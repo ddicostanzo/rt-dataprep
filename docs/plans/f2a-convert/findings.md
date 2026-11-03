@@ -40,3 +40,10 @@ Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytes
 - Missing-tag refusal catches AttributeError/KeyError/IndexError/TypeError/ValueError around the per-plan path: a coding bug surfaces as REASON_MISSING_TAG, not a crash.
 - sd.write_rtstruct writes no ContourImageSequence, so such plans are refused: organize->convert fixtures (A2.9) must use write_rtstruct_rois(contour_images=True).
 - Rescale test needs mixed slopes to tell Cast from SetOutputPixelType. Mutation checks (5) all fail the suite.
+
+## review-group-2 (task-04)
+- BLOCKING fixed by orchestrator: a sheared/gantry-tilted CT passed _check_volume and was written with wrong geometry; slices must now lie on the normal through the first slice (test_sheared_ct_is_refused). Spec step 2.2 updated.
+- Verified by probe: CT under 4 orientations + shuffled files exact; dose with relative/negative/absolute offsets identical; DoseGridScaling and PixelSpacing order right.
+- WARNING (deferred): broad (AttributeError, KeyError, IndexError, TypeError, ValueError) catch turns coding bugs into REASON_MISSING_TAG.
+- WARNING (deferred): no tests for non-identity CT orientation or negative/absolute dose offsets (writer is identity-only).
+- NOTE: an RTDOSE not naming the plan is silently ignored; a non-DICOM file (.DS_Store) in a plan folder refuses the plan.

@@ -232,6 +232,16 @@ def test_ct_with_a_duplicate_slice_position_is_refused(tree):
     assert row_of(conv.convert(org, out).rows).reason == conv.REASON_CT_NOT_VOLUME
 
 
+def test_sheared_ct_is_refused(tree):
+    """A gantry tilt shifts each slice sideways: a SimpleITK volume cannot hold that grid, so the plan is refused."""
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    for k, path in enumerate(plan['ct']['paths']):
+        edit(path, lambda ds, k=k: setattr(ds, 'ImagePositionPatient',
+                                           [float(ds.ImagePositionPatient[0]) + 0.5 * k, *ds.ImagePositionPatient[1:]]))
+    assert row_of(conv.convert(org, out).rows).reason == conv.REASON_CT_NOT_VOLUME
+
+
 def test_rtstruct_without_contour_images_refuses_the_plan(tree):
     _, rows, _ = one_plan(tree, contour_images=False)
     assert row_of(rows).reason == conv.REASON_NO_CONTOUR_IMAGES

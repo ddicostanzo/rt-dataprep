@@ -234,9 +234,14 @@ def _check_volume(ct_slices):
           and len({str(ds.FrameOfReferenceUID) for ds in heads}) == 1)
     if ok:
         normal = np.cross(iops[0][:3], iops[0][3:])
-        along = np.asarray([float(np.dot(normal, [float(v) for v in ds.ImagePositionPatient])) for ds in heads])
+        positions = np.asarray([[float(v) for v in ds.ImagePositionPatient] for ds in heads])
+        along = positions @ normal
         steps = np.diff(along)  # the slices are sorted, so a duplicate position is a step of ~0
-        ok = bool(steps[0] > ORIGIN_ATOL_MM and np.all(np.abs(steps - steps[0]) <= ORIGIN_ATOL_MM))
+        # A gantry tilt moves slices sideways too; the image grid would put them on the normal and misplace them.
+        offset = positions - positions[0]
+        sideways = offset - np.outer(offset @ normal, normal)
+        ok = bool(steps[0] > ORIGIN_ATOL_MM and np.all(np.abs(steps - steps[0]) <= ORIGIN_ATOL_MM)
+                  and np.abs(sideways).max() <= ORIGIN_ATOL_MM)
     if not ok:
         raise CaseRefused(REASON_CT_NOT_VOLUME)
 
