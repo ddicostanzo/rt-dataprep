@@ -75,3 +75,12 @@ Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytes
 - Spec axis: 51/52 criteria MET; PARTIAL: read_header not through quiet_call (deferred). Unrequested: broad catch, raw OSError from os.replace, extra conservative checks, input OSErrors as IO_ERROR (all deferred).
 - Correctness: BLOCKING: coronal/sagittal planning CT passes _check_volume; DicomRTTool matches slices by patient z only, so all contours land on slice 0 and the plan reports converted. DEFERRED: ROI in another frame rasterized onto the CT; write_applicator raw OSError; rerun overwrites the report.
 - STUCK: escalation counter tripped (same category, CT geometry accepted then mishandled, returned twice). Halted; handoff docs/handoffs/f2-convert-handoff.md.
+
+## review-loop-pass-1-fix (/dev continue, new session)
+- BLOCKING fixed in e6ed1da: _check_volume refuses a CT whose slice normal is not along z, and the mask check in masks.py requires each mask's voxel slices to equal the CT slice indices its non-POINT contours map to through the CT's full geometry (closes the class: z-only lookup, contours off the CT snapped onto an end slice). 3 tests; spec steps 2.2 and the mask verify list updated.
+- Gotcha: the broad catch in convert_plan reported a NameError-style shadowing bug as REASON_MISSING_TAG (#33).
+
+## review-loop-pass-1-verify
+- PASS: coronal and sagittal refuse; HFS/FFS/FFP/HFP axial convert to the right physical place; nothing weakened; 156 passed, ruff clean.
+- DEFERRED: a contour exactly halfway between slices refuses (rounding differs from DicomRTTool), noted on #32.
+- Deferred findings filed as hardening issues #20-#33.
