@@ -116,3 +116,12 @@ def test_write_reg_references_other_study(tmp_path):
     assert ds.SOPInstanceUID == sop and ds.Modality == 'REG'
     assert (ds.PatientID, ds.StudyInstanceUID) == ('SYNTHETIC_C', study)
     assert [i.StudyInstanceUID for i in ds.StudiesContainingOtherReferencedInstancesSequence] == [other]
+
+
+def test_write_ct_series_mr_modality(tmp_path):
+    import pydicom
+    import synthetic_dicom as sd
+
+    out = sd.write_ct_series(tmp_path, [[[1]]], modality='MR', prefix='mr')
+    ds = pydicom.dcmread(out['paths'][0])
+    assert ds.Modality == 'MR' and ds.SOPClassUID == pydicom.uid.MRImageStorage

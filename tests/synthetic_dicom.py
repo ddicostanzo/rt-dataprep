@@ -71,19 +71,20 @@ def _writing_unvalidated():
 
 
 def write_ct_series(folder, values, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), series_uid=None, frame_uid=None,
-                    prefix='ct', image_type=None, **meta):
+                    prefix='ct', image_type=None, modality='CT', **meta):
     """
     One CT slice file per z of `values` (a (z, y, x) int array; HU as stored, slope 1, intercept 0), axial, slice k at
     origin z + k * spacing z, in files named <prefix>_<k>.dcm (a second series in the folder needs its own prefix).
     image_type: the ImageType list (None omits it), e.g. ['ORIGINAL', 'PRIMARY', 'LOCALIZER']. All slices share one study
-    (study_uid= or a fresh one). Returns {'series_uid', 'frame_uid', 'study_uid', 'sop_uids', 'paths'}.
+    (study_uid= or a fresh one). modality='MR' writes MR Image Storage instead (a diagnostic series). Returns {'series_uid', 'frame_uid', 'study_uid', 'sop_uids', 'paths'}.
     """
     series_uid, frame_uid = series_uid or generate_uid(), frame_uid or generate_uid()
     values = np.asarray(values, dtype=np.int16)
     meta['study_uid'] = meta.get('study_uid') or generate_uid()
     sop_uids, paths = [], []
     for k, plane in enumerate(values):
-        ds = _dataset(Path(folder) / f'{prefix}_{k:03d}.dcm', pydicom.uid.CTImageStorage, 'CT', frame_uid=frame_uid,
+        sop_class = pydicom.uid.MRImageStorage if modality == 'MR' else pydicom.uid.CTImageStorage
+        ds = _dataset(Path(folder) / f'{prefix}_{k:03d}.dcm', sop_class, modality, frame_uid=frame_uid,
                       series_uid=series_uid, **meta)
         if image_type:
             ds.ImageType = list(image_type)

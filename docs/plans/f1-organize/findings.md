@@ -35,3 +35,11 @@ Synthetic writers (tests/synthetic_dicom.py). Shared `**meta` keywords on every 
 - `write_rtdose(path, stored, scaling=1e-4, position=(0,0,0), orientation=(1,0,0,0,1,0), pixel_spacing=(2.0,3.0), offsets=None, plan_sop_uid=None, frame_uid=None, units='GY', dose_type='PHYSICAL', summation='PLAN', number_of_frames=None, invalid_values=False, sop_uid=None, **meta)`
 - `write_reg(path, study_uid, other_study_uid, sop_uid=None, **meta)`: Modality REG in `study_uid`, with `StudiesContainingOtherReferencedInstancesSequence` naming `other_study_uid` (a UID string or a list of them).
 - The RTSTRUCT writer has no CT-study default: pass `study_uid=ct['study_uid']` (and the same for RTPLAN/RTDOSE/REG) to put objects in the CT's study; the default is a fresh study each call.
+
+## review-group-1
+- APPROVE, no BLOCKING. W1 (no MR writer for A1.2) fixed by orchestrator: `write_ct_series(..., modality='MR')`.
+- W2 (distinct PatientIDs can sanitize to the same folder; step 6 would silently skip the second): this touches patient
+  matching, so task-02 must detect a sanitized-name collision between different PatientIDs in one run and refuse the
+  later patient with a fixed reason counted in organize_report.csv (no silent skip). An existing folder from a
+  previous run is still skipped and counted as such.
+- NOTE: README hook line fails in a worktree (`.git` is a file); NOTE: `raise ... from None` keeps context on the object.
