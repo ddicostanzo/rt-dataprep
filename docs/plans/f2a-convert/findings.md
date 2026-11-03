@@ -59,3 +59,9 @@ Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytes
 - Verified against DicomRTTool source: name->channel mapping, axis order, CopyInformation only after tolerance checks, binarisation, overlaps, applicator order/gzip, scratch cleanup on every path, PHI.
 - WARNING (deferred): an ROI mixing POINT and CLOSED_PLANAR contours is kept and its POINT items reach return_mask unchecked.
 - NOTE: a skipped ROI sharing a kept ROI's lowercased name and listed first refuses a valid plan; temp PHI copies sit in the partial folder during a run; spacing compared with the origin tolerance.
+
+## task-06
+- series.csv written last via temp name + os.replace; listed in the report's files column, not in PlanResult.files. Summed-BEAM dose row ';'-joins deduplicated UIDs. Absent plan/series tags -> ''. reg_matrix 'identity' on the CT row only.
+- RoiPlan.applicators widened to (file, points, ROIName) for roi_name (masks.py touched in its own commit).
+- CLI: convert subcommand; out inside org exits 1 with exactly the REASON constant.
+- Broken-RTSTRUCT fixture (empty RTROIIdentificationCodeSequence) makes DicomRTTool log the tmp path: the PHI test fails with quiet_call bypassed, so it bites.
