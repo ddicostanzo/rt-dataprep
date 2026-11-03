@@ -15,3 +15,9 @@ Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytes
 - organize: fx_<n> -> plan_<n>, PatientRow.fx -> plans, report column plan_count; #7 adds the resolved RTSTRUCT via a struct_paths map. README renamed too.
 - Gate tripped when the patient id keyword and a 6-digit series time shared one line: times/dates go in a variable on their own line.
 - phase1.md F3/parity `fx` mentions left (legacy OSC tree really is fx_<n>); F2 flat line still there, cleaned up at the end.
+
+## task-02
+- dicom_io: CaseRefused(reason), quiet_call(fn, reason) (logging.disable, sitk warnings off, warnings recorded, pydicom quiet, fd 1/2 dup2 to a temp file and sys.stdout/stderr to devnull; raises after the except block). read_header raises after its except block.
+- Deps: simpleitk>=2.5.7, dicomrttool==6.2.0.
+- Private-API scan flags dotted reads of the exception dunders (cause, context) in tests: read them with operator.attrgetter in a helper.
+- Under capfd, pytest replaces sys.stdout with its capture file, not fd 1: both levels need redirecting.
