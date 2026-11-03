@@ -43,3 +43,29 @@ Synthetic writers (tests/synthetic_dicom.py). Shared `**meta` keywords on every 
   later patient with a fixed reason counted in organize_report.csv (no silent skip). An existing folder from a
   previous run is still skipped and counted as such.
 - NOTE: README hook line fails in a worktree (`.git` is a file); NOTE: `raise ... from None` keeps context on the object.
+
+## task-02
+Files: `src/rt_dataprep/organize.py` (new), `src/rt_dataprep/__main__.py` (calls `organize`, logging at INFO), `tests/test_organize.py` (new, 33 tests in the whole suite).
+
+Decisions
+- `organize(...)` returns `OrganizeReport(rows)`; each `PatientRow` has patient, fx, misc, unreadable, outcome (`organized`/`skipped`/`refused`), reason. `organize_report.csv` is rewritten each run (columns patient, fx_count, misc_count, unreadable_count, outcome, reason).
+- Collision guard (review W2): `claimed` holds the casefolded output names of every patient folder seen in the run, including skipped ones. A later folder with the same name is refused with `REASON_NAME_CLAIMED`, never merged. This also refuses a second source folder with the same PatientID. Casefold because a case-insensitive filesystem would merge the folders.
+- Outside the plan, patient matching, decided here: a source folder whose readable files carry more than one PatientID is refused (`REASON_MIXED_IDS`); a folder with no readable DICOM is refused (`REASON_NO_DICOM`). The CSV id for those rows is the sanitized source folder name. No output folder is made.
+- "Planning study" (step 3, the REG rule) = any study holding an RTPLAN, not only the CT study of a complete chain. Wider, so a REG never pulls another plan's study in as "diagnostic".
+- Step 3 says "every file of a study named by a REG"; the copy of those studies also drops RTPLANs and plan-naming RTDOSEs, so every fx folder holds exactly one RTPLAN (F2 relies on this, phase1.md F2 step 1). Such files go to misc_files.
+- A1.5b follows step 3 literally: each fx folder holds both CT series and both RTSTRUCTs of the shared study, and its own plan only.
+- RTSTRUCT -> CT: the referenced series UIDs that match a CT series in the pool; exactly one must match, otherwise the plan is left over (ambiguous = incomplete).
+- Pre-filter: localizer CT files and `exclude_models` studies (case-sensitive substring) are removed before grouping and so land in misc_files; a file with no StudyInstanceUID is left over too. Unreadable files are counted and not copied.
+- A plan-bound RTDOSE (names a plan) goes to the folder of each plan it names; one naming no plan is an ordinary study file.
+- Same file name from two source sub-folders into one destination: the second gets `_<n>` before the suffix (copy2 would overwrite silently).
+- Containment: `target.resolve().is_relative_to(out_root.resolve())`, raising `ValueError(REASON_OUTSIDE_ROOT)` (not `assert`, which -O strips). sanitize makes it unreachable in tests.
+- Sort key: strings of (CT SeriesDate, CT SeriesTime, RTPlanDate, RTPlanTime, plan SOPInstanceUID); a missing tag sorts first as ''. The CT is the series file with the lowest SOPInstanceUID.
+
+Gotchas
+- The synthetic writers do not create folders; tests use an `mk()` helper.
+- `write_rtstruct`/`write_rtplan`/`write_rtdose` default to a fresh study; the test helper passes `study_uid` every time.
+- Mutation-checked: removing the collision guard, the REG planning-study exclusion, or the plan-bound filter each fails tests.
+
+Deferred (not fixed here)
+- organize_report.csv is overwritten, so a rerun replaces the counts of an earlier run for skipped patients.
+- An `out_root` inside `src_root` would be walked as a patient folder; `*.dcm` is matched case-sensitively.
