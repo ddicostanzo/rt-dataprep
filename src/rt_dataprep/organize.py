@@ -1,5 +1,5 @@
 """
-Sort an export tree into <out>/<patient>/fx_<n>/, one folder per RTPLAN (spec: phase1.md, F1).
+Sort an export tree into <out>/<patient>/plan_<n>/, one folder per RTPLAN (spec: phase1.md, F1).
 
 Files are copied, never moved. Log lines and exception messages carry counts and the fixed REASON_ constants only, never a
 PatientID, folder name, date or path; organize_report.csv in the output root is the one place the sanitized id appears.
@@ -28,7 +28,7 @@ REASON_IO_ERROR = 'file system error while reading or copying; nothing kept for 
 @dataclass
 class PatientRow:
     patient: str  # sanitized id; the sanitized source folder name when no single PatientID could be read
-    fx: int
+    plans: int
     misc: int
     unreadable: int
     outcome: str
@@ -53,10 +53,10 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',)):
             log.warning('organize: %s', REASON_IO_ERROR)
     with open(out_root / REPORT_NAME, 'w', newline='') as handle:
         writer = csv.writer(handle)
-        writer.writerow(['patient', 'fx_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'])
-        writer.writerows([r.patient, r.fx, r.misc, r.unreadable, r.outcome, r.reason] for r in rows)
-    log.info('organize: %d patient folders, %d organized, %d fx folders, %d misc files, %d unreadable files',
-             len(rows), sum(r.outcome == OUTCOME_ORGANIZED for r in rows), sum(r.fx for r in rows),
+        writer.writerow(['patient', 'plan_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'])
+        writer.writerows([r.patient, r.plans, r.misc, r.unreadable, r.outcome, r.reason] for r in rows)
+    log.info('organize: %d patient folders, %d organized, %d plan folders, %d misc files, %d unreadable files',
+             len(rows), sum(r.outcome == OUTCOME_ORGANIZED for r in rows), sum(r.plans for r in rows),
              sum(r.misc for r in rows), sum(r.unreadable for r in rows))
     return OrganizeReport(rows)
 
@@ -88,7 +88,7 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
     shutil.rmtree(partial, ignore_errors=True)
     try:
         for n, paths in enumerate(cases, start=1):
-            _copy_all(paths, partial / f'fx_{n}')
+            _copy_all(paths, partial / f'plan_{n}')
         _copy_all(misc, partial / 'misc_files')
         partial.mkdir(exist_ok=True)
         partial.rename(target)
@@ -121,7 +121,7 @@ def _planning_ct_series(plan, structs, ct_series):
 
 
 def _group(headers, exclude_models):
-    """([file lists, one per fx folder in fx order], [left-over files]) for one patient's readable headers."""
+    """([file lists, one per plan folder in plan order], [left-over files]) for one patient's readable headers."""
     study_of = lambda ds: str(ds.get('StudyInstanceUID', ''))  # noqa: E731
     excluded = {study_of(ds) for _, ds in headers if any(m in str(ds.get('ManufacturerModelName', '')) for m in exclude_models)}
     excluded.add('')  # a file with no study cannot be matched to a case
@@ -134,6 +134,7 @@ def _group(headers, exclude_models):
         if ds.get('Modality') == 'CT':
             ct_series[ds.get('SeriesInstanceUID')].append((path, ds))
     structs = {ds.SOPInstanceUID: ds for _, ds in pool if ds.get('Modality') == 'RTSTRUCT'}
+    struct_paths = {ds.SOPInstanceUID: p for p, ds in pool if ds.get('Modality') == 'RTSTRUCT'}
     # shortcut: a "planning study" is any study that holds an RTPLAN; a diagnostic study with a plan is not copied in
     planning_studies = {study_of(ds) for _, ds in pool if ds.get('Modality') == 'RTPLAN'}
 
@@ -146,14 +147,16 @@ def _group(headers, exclude_models):
         key = tuple(str(v) for v in (ct.get('SeriesDate', ''), ct.get('SeriesTime', ''), plan.get('RTPlanDate', ''),
                                      plan.get('RTPlanTime', ''), plan.SOPInstanceUID))
         ct_study = study_of(ct)
-        files = [plan_path] + [p for p, ds in pool if ds.get('Modality') == 'RTDOSE'
+        # The resolved RTSTRUCT always comes along, even when it was exported in a study other than the CT's.
+        files = [plan_path, struct_paths[_uids(plan, 'ReferencedStructureSetSequence', 'ReferencedSOPInstanceUID')[0]]]
+        files += [p for p, ds in pool if ds.get('Modality') == 'RTDOSE'
                                and plan.SOPInstanceUID in _uids(ds, 'ReferencedRTPlanSequence', 'ReferencedSOPInstanceUID')]
         studies = [ct_study]
         for _, reg in by_study[ct_study]:
             if reg.get('Modality') == 'REG':
                 studies += [u for u in _uids(reg, 'StudiesContainingOtherReferencedInstancesSequence', 'StudyInstanceUID')
                             if u not in planning_studies]
-        # Other plans and their doses never come along, so every fx folder holds exactly one RTPLAN.
+        # Other plans and their doses never come along, so every plan folder holds exactly one RTPLAN.
         files += [p for study in dict.fromkeys(studies) for p, ds in by_study[study] if not _plan_bound(ds)]
         cases.append((key, list(dict.fromkeys(files))))
 

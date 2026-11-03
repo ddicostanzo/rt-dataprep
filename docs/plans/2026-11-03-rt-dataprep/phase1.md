@@ -40,8 +40,9 @@ Steps:
    that RTSTRUCT references (the logic of rnt `_referenced_ct_slices`). A plan without a complete chain is left over.
    Sort plans by `(CT SeriesDate, CT SeriesTime, RTPlanDate, RTPlanTime, plan SOPInstanceUID)`. With one plan per CT
    this gives the same numbering as the legacy code.
-3. In that order, the n-th plan becomes `fx_<n>`, numbered from 1. The folder gets:
+3. In that order, the n-th plan becomes `plan_<n>`, numbered from 1. The folder gets:
    - the plan itself and every RTDOSE whose `ReferencedRTPlanSequence` names it. These files go to that folder only.
+   - the RTSTRUCT the plan resolves to (step 2), always, even when it is stored in a study other than the CT's.
    - **copies** of every other file in the plan's CT study, except other RTPLANs and their RTDOSEs. This covers the
      CT, the RTSTRUCTs and the REGs. Several plans on one CT therefore each get their own CT and RTSTRUCT.
    - copies of every file of a study named by a REG in the CT study
@@ -50,23 +51,25 @@ Steps:
 4. Before grouping, two kinds of file are treated as left over: CT files whose `ImageType` contains `LOCALIZER`
    (topograms), and whole studies where any file's `ManufacturerModelName` contains one of `exclude_models`.
 5. Files are **copied** (`shutil.copy2`), never moved, so the source stays intact. Output is
-   `<out_root>/<sanitized PatientID>/fx_<n>/<original filename>`. Every file that does not land in an fx folder goes
+   `<out_root>/<sanitized PatientID>/plan_<n>/<original filename>`. Every file that does not land in a plan folder goes
    to `<out_root>/<patient>/misc_files/`. `sanitize_path_component` comes from DT `src/common.py`, and the resolved
    path is asserted to sit inside `out_root`.
 6. A patient whose output folder already exists is skipped and counted in the report. The run does not merge into it.
-7. `organize_report.csv` is written in `out_root` with one row per patient: the sanitized ID, fx count,
+7. `organize_report.csv` is written in `out_root` with one row per patient: the sanitized ID, plan count,
    misc_files count and unreadable count. The hook blocks this file from commits.
 
 Acceptance tests (synthetic):
 - **A1.1** One patient with two planning studies on different dates. Each study has a CT, RTSTRUCT, RTPLAN and
-  RTDOSE. Result: `fx_1` holds the earlier study and `fx_2` the later one, and the file counts match.
-- **A1.2** A REG in the planning study references a diagnostic MR study. The MR files land in that study's `fx`
+  RTDOSE. Result: `plan_1` holds the earlier study and `plan_2` the later one, and the file counts match.
+- **A1.2** A REG in the planning study references a diagnostic MR study. The MR files land in that study's `plan`
   folder.
 - **A1.3** A REG references the other planning study. Neither study's files are duplicated into the other's folder.
 - **A1.4** A localizer CT, an `Acuity` study, and an orphan CT with no plan all go to `misc_files/`.
-- **A1.5** Two RTPLANs, each with its own RTDOSE, reference the same RTSTRUCT and CT. The result is `fx_1` and
-  `fx_2`. Each holds the full CT and RTSTRUCT, exactly one RTPLAN, and only that plan's RTDOSE.
-- **A1.5b** Two planning CTs in one study, each with a plan, give two `fx` folders and no empty folder.
+- **A1.5** Two RTPLANs, each with its own RTDOSE, reference the same RTSTRUCT and CT. The result is `plan_1` and
+  `plan_2`. Each holds the full CT and RTSTRUCT, exactly one RTPLAN, and only that plan's RTDOSE.
+- **A1.8** The RTSTRUCT a plan references is stored in a different study from its CT. It is copied into the plan's
+  `plan_<n>` folder and is not in `misc_files`.
+- **A1.5b** Two planning CTs in one study, each with a plan, give two `plan` folders and no empty folder.
 - **A1.6** A PatientID of `../evil` is written inside `out_root`.
 - **A1.7** After a run, the source tree is byte-identical (compared by hash of every file).
 
@@ -82,7 +85,7 @@ Acceptance tests (synthetic):
 `--legacy-rnt` CLI preset sets `resample`, `rescale`, `ahe`, `harmonize_spacing` and `reshape`, which reproduces
 `reshape_resample_ahe_rescale_initialresample_planning_ct`.
 
-Steps, for each `<patient>/fx_<n>/`:
+Steps, for each `<patient>/plan_<n>/`:
 1. **Assemble.** Index headers by modality, as in rnt `gauge_rr.read_folder`, widened to RTDOSE and REG. Then
    follow the chain CT ← RTSTRUCT ← RTPLAN ← RTDOSE by referenced UIDs. F1 guarantees one RTPLAN per folder.
    Refuse the case if the chain is broken or resolves to anything other than one CT series. Dose is the RTDOSE whose
@@ -94,7 +97,7 @@ Steps, for each `<patient>/fx_<n>/`:
    resampled onto the native CT grid with `resample_dose`. The legacy code never scaled dose to Gy; this
    deliberately corrects that.
 4. **Masks.** Build a temporary folder of hard links to only the planning CT slices and the RTSTRUCT. It goes under
-   `out_root`, so it is on the same filesystem as the source, and other series in the fx folder cannot be picked
+   `out_root`, so it is on the same filesystem as the source, and other series in the plan folder cannot be picked
    up. Then run `DicomReaderWriter(arg_max=False)` on it in one pass:
    `walk_through_folders`, `set_contour_names_and_associations(contour_names=<all kept ROIs>)`,
    `set_index(<the index whose SeriesInstanceUID is the planning CT>)` and `get_images_and_mask()`. Split the
@@ -114,21 +117,21 @@ Steps, for each `<patient>/fx_<n>/`:
 6. **Names.** Use legacy prefixes, newest step first (`create_file_name`): `planning_ct`, `dose`, and
    `<format_name(roi)>`. Dose and masks take only the geometric prefixes (`initialresample`, `resample`,
    `reshape`), never `rescale`, `norm` or `ahe`. `format_name`
-   lowercases and strips non-alphanumerics, as in legacy `utils.py`. All files are `.nii.gz`. The output folder is `<out_root>/<patient>/fx_<n>/`, or `<out_root>/<patient>_fx_<n>/` with
+   lowercases and strips non-alphanumerics, as in legacy `utils.py`. All files are `.nii.gz`. The output folder is `<out_root>/<patient>/plan_<n>/`, or `<out_root>/<patient>_plan_<n>/` with
    `flat`. A folder that already exists is skipped. Each file is written to a temporary name and renamed into place
    (`write_atomic` from rnt `scripts/convert_dose.py`), so a crash never leaves a half-written case.
 7. `convert_report.csv` is written in `out_root`, with one row per case: outcome, refusal reason and the list of
    files written.
 
 Acceptance tests (synthetic):
-- **A2.1** A synthetic fx folder with no steps gives `planning_ct.nii.gz` equal to the source CT (same spacing,
+- **A2.1** A synthetic plan folder with no steps gives `planning_ct.nii.gz` equal to the source CT (same spacing,
   origin, direction and values) and `dose.nii.gz` in Gy (stored value × scaling) on the CT grid. This reuses rnt
   `tests/test_rtdose.py` expectations where they apply.
 - **A2.2** A cube ROI drawn on the synthetic CT gives a binary mask whose voxel count equals the cube volume (±1 slice
   edge), on the CT grid.
 - **A2.3** A BRACHY_CHANNEL ROI gives a text file that `np.loadtxt` reads back into the contour points (tolerance
   1e-4).
-- **A2.4** A diagnostic MR study in the same fx folder does not change the outputs.
+- **A2.4** A diagnostic MR study in the same plan folder does not change the outputs.
 - **A2.5** `--legacy-rnt` without `ahe` gives the legacy filename set, and a crop/pad to the requested shape.
   Masks are {0, 1} by default, and fractional values appear only with `legacy_linear_masks`.
 - **A2.6** SimpleITK resample and crop/pad match a torchio reference within 1e-4. The test is skipped unless
