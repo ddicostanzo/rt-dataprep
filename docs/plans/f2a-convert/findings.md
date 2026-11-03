@@ -65,3 +65,8 @@ Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytes
 - RoiPlan.applicators widened to (file, points, ROIName) for roi_name (masks.py touched in its own commit).
 - CLI: convert subcommand; out inside org exits 1 with exactly the REASON constant.
 - Broken-RTSTRUCT fixture (empty RTROIIdentificationCodeSequence) makes DicomRTTool log the tmp path: the PHI test fails with quiet_call bypassed, so it bites.
+
+## review-group-4 (task-06): PASS, no BLOCKING
+- WARNING: only the broken-RTSTRUCT half of A2.10 bites (ITK's CT read error carries no path, so the truncated-CT case cannot catch a wrapper regression).
+- WARNING: series.csv / convert_report.csv opened without encoding='utf-8': a SeriesDescription the locale cannot encode refuses the plan as REASON_MISSING_TAG.
+- NOTE: mask rows take ReferencedFrameOfReferenceSequence[0] as frame; CLI re-raises unexpected ValueErrors with a traceback; a missing org root leaves an empty out root.
