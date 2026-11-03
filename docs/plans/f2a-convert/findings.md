@@ -70,3 +70,8 @@ Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytes
 - WARNING: only the broken-RTSTRUCT half of A2.10 bites (ITK's CT read error carries no path, so the truncated-CT case cannot catch a wrapper regression).
 - WARNING: series.csv / convert_report.csv opened without encoding='utf-8': a SeriesDescription the locale cannot encode refuses the plan as REASON_MISSING_TAG.
 - NOTE: mask rows take ReferencedFrameOfReferenceSequence[0] as frame; CLI re-raises unexpected ValueErrors with a traceback; a missing org root leaves an empty out root.
+
+## review-loop-pass-1
+- Spec axis: 51/52 criteria MET; PARTIAL: read_header not through quiet_call (deferred). Unrequested: broad catch, raw OSError from os.replace, extra conservative checks, input OSErrors as IO_ERROR (all deferred).
+- Correctness: BLOCKING: coronal/sagittal planning CT passes _check_volume; DicomRTTool matches slices by patient z only, so all contours land on slice 0 and the plan reports converted. DEFERRED: ROI in another frame rasterized onto the CT; write_applicator raw OSError; rerun overwrites the report.
+- STUCK: escalation counter tripped (same category, CT geometry accepted then mishandled, returned twice). Halted; handoff docs/handoffs/f2-convert-handoff.md.
