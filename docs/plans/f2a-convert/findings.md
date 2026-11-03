@@ -26,3 +26,9 @@ Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytes
 - tests/synthetic_dicom.py: write_rtstruct_rois(path, ct, rois, contour_images=True, sop_uid=None, **meta); roi dicts have number, name, kind (box|point|empty|channel), interpreted; box=((z0,z1),(y0,y1),(x0,x1)) inclusive indices. write_rtplan gains label=.
 - DicomRTTool 6.2 rounds vertices half-up and fills vertex voxels (boundary-inclusive): box vertices sit at the centres of the extreme voxels; half-step corners overcount (40 vs 24). Real contours drawn on voxel edges will rasterize one voxel larger per side: inherited legacy behaviour, recorded for review.
 - arg_max=False mask is (z, y, x, nROI+1) with channel 0 background.
+
+## review-group-1 (tasks 01-03): PASS, no BLOCKING
+- WARNING: quiet_call is not thread-safe for concurrent calls (process-wide state) — lock or document before parallel convert (#2).
+- WARNING: BaseException (KeyboardInterrupt/SystemExit) passes through quiet_call with its original message.
+- WARNING: #7 test lacks a case where the RTSTRUCT's other study also holds other files.
+- NOTE: _fds_quiet dups fds before creating the temp file (fd leak if TemporaryFile fails). NOTE: Python 3.14 context-aware warnings. NOTE: dicom_io imports SimpleITK at module level.
