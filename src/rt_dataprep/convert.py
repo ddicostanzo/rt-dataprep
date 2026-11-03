@@ -2,9 +2,9 @@
 Turn an organized tree (<patient>/plan_<n>/) into NIfTI on the native CT grid, one folder per plan (spec: f2a-convert, F2a).
 
 Per plan: RTPLAN -> RTSTRUCT -> the one CT series it references -> planning_ct.nii.gz (float32 HU), and the plan's RTDOSE
-as dose.nii.gz (Gy, linearly resampled onto the CT grid). Masks and applicators (task-05) and series.csv (task-06) extend
-`convert_plan`. The organized tree is only read. Log lines and exception messages carry counts and the fixed REASON_
-constants only, never a PatientID, folder name, date, path or UID; convert_report.csv in the output root is the one place the
+as dose.nii.gz (Gy, linearly resampled onto the CT grid). Masks and applicators (masks.py) are written into the same
+folder; series.csv (task-06) extends `convert_plan`. The organized tree is only read. Log lines and exception messages
+carry counts and the fixed REASON_ constants only, never a PatientID, folder name, date, path or UID; convert_report.csv in the output root is the one place the
 folder names appear. Every third-party read runs inside dicom_io's quiet wrapper.
 """
 import contextlib
@@ -20,6 +20,7 @@ import numpy as np
 import pydicom
 import SimpleITK as sitk
 
+from rt_dataprep import masks
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_header
 
 log = logging.getLogger(__name__)
@@ -168,6 +169,11 @@ def _convert_plan(plan_dir, case_dir):
     _check_contour_images(struct, series_uid, ct_slices)
     ct = _read_ct([p for p, _ in ct_slices], ct_slices[0][1])
     dose = _read_dose_sum(headers, plan, str(ct_slices[0][1].FrameOfReferenceUID), ct)
+    rois = masks.classify(struct, plan, taken=(CT_NAME, DOSE_NAME))
+    struct_path = next(p for p, ds in headers if ds is struct)
+    # The scratch folder of DicomRTTool goes in the patient's partial folder: a stale partial's cleanup removes it too.
+    mask_images = masks.build_masks(rois.kept, [p for p, _ in ct_slices], struct_path, str(struct.SeriesInstanceUID),
+                                    series_uid, ct, case_dir.parent, ORIGIN_ATOL_MM, DIRECTION_ATOL)
     # Everything that can refuse has run: only now does the plan folder appear.
     case_dir.mkdir(parents=True)
     write_atomic(ct, case_dir / CT_NAME)
@@ -175,6 +181,12 @@ def _convert_plan(plan_dir, case_dir):
     if dose is not None:
         write_atomic(dose, case_dir / DOSE_NAME)
         files.append(DOSE_NAME)
+    for name, image in mask_images.items():
+        write_atomic(image, case_dir / name)
+        files.append(name)
+    for name, points in rois.applicators:
+        masks.write_applicator(points, case_dir / name)
+        files.append(name)
     return PlanResult(files, series_uid)
 
 
