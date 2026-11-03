@@ -84,3 +84,4 @@ Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytes
 - PASS: coronal and sagittal refuse; HFS/FFS/FFP/HFP axial convert to the right physical place; nothing weakened; 156 passed, ruff clean.
 - DEFERRED: a contour exactly halfway between slices refuses (rounding differs from DicomRTTool), noted on #32.
 - Deferred findings filed as hardening issues #20-#33.
+- User decision: the Codex P1 "ROI on another frame of reference" (#29) is BLOCKING (same silent-wrong-mask class). Fixed in 4a754d6: classify refuses a mask or applicator ROI whose ReferencedFrameOfReferenceUID is not the planning CT's. Verify pass: PASS, 157 passed, ruff clean. A struct with ROIs on several frames now refuses (intended until registration is supported).
