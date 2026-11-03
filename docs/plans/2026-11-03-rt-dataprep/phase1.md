@@ -77,6 +77,12 @@ Acceptance tests (synthetic):
 
 ## F2: convert (`rt_dataprep/convert.py`, `preprocess.py`, `masks.py`)
 
+> **Superseded (2026-11-03)** by `docs/specs/2026-11-03-f2a-convert.md` (F2a, native grid, in two PRs) and a later F2b
+> (`preprocess.py`, `--legacy-rnt` without ahe, A2.5, A2.6). Changes from the text below: no `--flat` and no A2.7
+> (the output does not recreate the RNT layout), `<patient>/plan_<n>/` plus `<patient>/images/`, a per-folder
+> `series.csv`, PLAN > FRACTION > BEAM-sum dose precedence, and no AHE (#16). The parity check below needs a fresh
+> plan once F2b exists.
+
 `convert(org_root, out_root, *, flat=False, steps=ConvertSteps()) -> ConvertReport`
 
 `ConvertSteps` is a frozen dataclass of the legacy flags and parameters, with the defaults in the table in
