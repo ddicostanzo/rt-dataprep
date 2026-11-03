@@ -1,0 +1,58 @@
+#!/bin/sh
+#
+# Rejects a commit that would add patient data to the repository.
+#
+# Checks the staged change, so a PHI-bearing file is caught before it reaches a remote.
+# .gitignore covers these paths already; this catches "git add -f" and paths the rules miss.
+#
+# Install (no core.hooksPath: the global ~/.claude/git-hooks dispatcher chains to .git/hooks):
+#     ln -s ../../.githooks/pre-commit .git/hooks/pre-commit
+
+staged=$(git diff --cached --name-only --diff-filter=AM)
+[ -z "$staged" ] && exit 0
+
+blocked=""
+
+# check <pattern> <reason> [allowed_pattern]
+check() {
+    pattern="$1"
+    reason="$2"
+    allowed="$3"
+    matches=$(echo "$staged" | grep -E "$pattern")
+    if [ -n "$allowed" ]; then
+        matches=$(echo "$matches" | grep -vE "$allowed")
+    fi
+    if [ -n "$matches" ]; then
+        blocked="yes"
+        echo "BLOCKED: $reason"
+        echo "$matches" | sed 's/^/    /'
+    fi
+}
+
+check '\.ipynb$' \
+    'Jupyter notebooks. Cell outputs can hold patient names, MRNs and dates of birth.'
+check '\.dcm$' \
+    'DICOM data.'
+check '\.(nii|nii\.gz|nrrd|mha|npz|npy|pkl|pickle)$' \
+    'Converted imaging or arrays. Synthetic test data belongs under tests/fixtures/ with a SYNTHETIC_ prefix.' \
+    '(^|/)tests/fixtures/SYNTHETIC_'
+check '(^|/)(manifest|organize_report|convert_report|splits)\.(csv|json)$' \
+    'Run artifacts. These contain PatientIDs and UIDs.'
+check '(^|/)\.env($|\.)' \
+    'Environment file.' \
+    '(^|/)\.env\.example$'
+check '\.log($|\.)' \
+    'Log file. Logs can record patient identifiers.'
+
+if [ -n "$blocked" ]; then
+    cat <<'MSG'
+
+This commit was blocked because it adds files that carry PHI or credentials.
+
+If a file is genuinely safe and you have checked its contents, commit with
+--no-verify. Do not do that for a notebook without clearing its outputs first.
+MSG
+    exit 1
+fi
+
+exit 0
