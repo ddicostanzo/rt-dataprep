@@ -1,7 +1,10 @@
 """convert (task-04): assemble, planning CT, dose, atomic plan folders, report. Every tree is synthetic and built in tmp_path."""
 import ast
 import csv
+import hashlib
 import inspect
+import logging
+import operator
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +14,8 @@ import SimpleITK as sitk
 import synthetic_dicom as sd
 
 from rt_dataprep import convert as conv
+from rt_dataprep import masks
+from rt_dataprep.organize import organize
 from rt_dataprep.dicom_io import CaseRefused
 
 PID = 'SYNTHETICPTA'
@@ -34,15 +39,15 @@ def dose_spec(value, summation='PLAN', **kwargs):
     return spec
 
 
-def make_plan(folder, doses=(), rois=(), values=None, contour_images=True, patient=PID):
+def make_plan(folder, doses=(), rois=(), values=None, contour_images=True, patient=PID, ct_meta=None, plan_meta=None):
     """One plan folder: CT, RTSTRUCT, RTPLAN and an RTDOSE per entry of `doses` (write_rtdose kwargs)."""
     folder.mkdir(parents=True, exist_ok=True)
     if values is None:
         values = (np.arange(np.prod(SHAPE)) % 200 - 100).reshape(SHAPE)
-    ct = sd.write_ct_series(folder, values, spacing=SPACING, origin=ORIGIN, patient_id=patient)
+    ct = sd.write_ct_series(folder, values, spacing=SPACING, origin=ORIGIN, patient_id=patient, **(ct_meta or {}))
     study = dict(patient_id=patient, study_uid=ct['study_uid'])
     struct = sd.write_rtstruct_rois(folder / 'struct.dcm', ct, list(rois), contour_images=contour_images, **study)
-    plan = sd.write_rtplan(folder / 'plan.dcm', struct, np.zeros((2, 3)), **study)
+    plan = sd.write_rtplan(folder / 'plan.dcm', struct, np.zeros((2, 3)), **study, **(plan_meta or {}))
     for k, spec in enumerate(doses):
         spec = dict(spec)
         spec.setdefault('frame_uid', ct['frame_uid'])
@@ -108,8 +113,8 @@ def test_a2_1_ct_equals_source_and_dose_is_scaled_and_resampled(tree):
     assert inside.sum() == 36 and outside.any()
     np.testing.assert_allclose(got[inside], expected[inside], atol=1e-4)
     assert (got[outside] == 0).all()
-    assert row.files == ['planning_ct.nii.gz', 'dose.nii.gz']
-    assert sorted(p.name for p in folder.iterdir()) == ['dose.nii.gz', 'planning_ct.nii.gz']  # no temp left
+    assert row.files == ['planning_ct.nii.gz', 'dose.nii.gz', 'series.csv']
+    assert sorted(p.name for p in folder.iterdir()) == ['dose.nii.gz', 'planning_ct.nii.gz', 'series.csv']  # no temp left
 
 
 def test_ct_with_different_rescale_slopes_is_not_quantized(tree):
@@ -154,7 +159,7 @@ def test_dose_none_converts_without_dose_file(tree):
     _, rows, out = one_plan(tree, doses=[])
     assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
     assert not (out / PID / 'plan_1' / 'dose.nii.gz').exists()
-    assert row_of(rows).files == ['planning_ct.nii.gz']
+    assert row_of(rows).files == ['planning_ct.nii.gz', 'series.csv']
 
 
 @pytest.mark.parametrize('doses, reason', [
@@ -420,7 +425,7 @@ def test_report_columns_and_joined_files(tree):
         written = list(reader)
         assert reader.fieldnames == ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series']
     assert written == [dict(patient=PID, folder='plan_1', outcome='converted', reason='',
-                            files='planning_ct.nii.gz;dose.nii.gz', skipped_series='0')]
+                            files='planning_ct.nii.gz;dose.nii.gz;series.csv', skipped_series='0')]
 
 
 @pytest.mark.parametrize('where', ['same', 'inside'])
@@ -449,8 +454,8 @@ def test_convert_plan_writes_into_case_dir_and_returns_the_files(tree):
     make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
     case = org.parent / 'case'
     result = conv.convert_plan(org / PID / 'plan_1', case)
-    assert result.files == ['planning_ct.nii.gz', 'dose.nii.gz']
-    assert sorted(p.name for p in case.iterdir()) == ['dose.nii.gz', 'planning_ct.nii.gz']
+    assert result.files == ['planning_ct.nii.gz', 'dose.nii.gz']  # series.csv is the report's to add
+    assert sorted(p.name for p in case.iterdir()) == ['dose.nii.gz', 'planning_ct.nii.gz', 'series.csv']
 
 
 def test_convert_plan_refusal_raises_the_reason_and_leaves_no_case_dir(tree):
@@ -461,6 +466,222 @@ def test_convert_plan_refusal_raises_the_reason_and_leaves_no_case_dir(tree):
         conv.convert_plan(org / PID / 'plan_1', case)
     assert str(caught.value) == conv.REASON_DOSE_RULE
     assert not case.exists()
+
+
+# ---------------------------------------------------------------- series.csv (A2.4d)
+
+SERIES_COLUMNS = ['file', 'kind', 'modality', 'series_description', 'series_instance_uid', 'study_instance_uid',
+                  'frame_of_reference_uid', 'series_date', 'roi_name', 'dose_summation_type', 'reg_matrix', 'rtplan_uid',
+                  'rtplan_label', 'rtplan_date', 'fractions_planned']
+CT_DATE, STRUCT_DATE, DOSE_DATE, PLAN_DATE = '20240105', '20240106', '20240107', '20240301'
+BOX = dict(number=1, name='Liver', kind='box', box=((0, 2), (0, 2), (0, 2)))
+RING = dict(number=2, name='ROI A', kind='channel', points=np.arange(15.0).reshape(5, 3), interpreted='BRACHY_CHANNEL')
+RING_CHANNEL = [dict(applicator_id='Ring-1', dwells_mm=np.zeros((2, 3)), roi=2)]
+
+
+def series_rows(out, folder='plan_1'):
+    with open(out / PID / folder / 'series.csv', newline='') as handle:
+        reader = csv.DictReader(handle)
+        assert reader.fieldnames == SERIES_COLUMNS
+        return list(reader)
+
+
+def describe(path, text, date):
+    def change(ds):
+        ds.SeriesDescription, ds.SeriesDate = text, date
+    edit(path, change)
+
+
+def test_series_csv_has_one_row_per_written_file_with_the_values_of_each_kind(tree):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN', series_date=DOSE_DATE)], rois=[BOX, RING],
+                     ct_meta=dict(series_date=CT_DATE),
+                     plan_meta=dict(label='Plan A', plan_date=PLAN_DATE, fractions=5, channels=RING_CHANNEL))
+    folder = plan['folder']
+    for path in plan['ct']['paths']:
+        describe(path, 'Planning CT', CT_DATE)
+    describe(folder / 'struct.dcm', 'Structures', STRUCT_DATE)
+    describe(folder / 'dose_0.dcm', 'Dose', DOSE_DATE)
+    struct, dose = pydicom.dcmread(folder / 'struct.dcm'), pydicom.dcmread(folder / 'dose_0.dcm')
+    row = row_of(conv.convert(org, out).rows)
+    assert row.files == ['planning_ct.nii.gz', 'dose.nii.gz', 'liver.nii.gz', 'Ring1.nii.gz', 'series.csv']
+    rows = series_rows(out)
+    assert [r['file'] for r in rows] == row.files[:-1]  # no row for series.csv itself
+    ct_row, dose_row, mask_row, applicator_row = rows
+    plan_columns = dict(rtplan_uid=plan['plan'], rtplan_label='Plan A', rtplan_date=PLAN_DATE, fractions_planned='5')
+    assert ct_row == dict(file='planning_ct.nii.gz', kind='ct', modality='CT', series_description='Planning CT',
+                          series_instance_uid=plan['ct']['series_uid'], study_instance_uid=plan['ct']['study_uid'],
+                          frame_of_reference_uid=plan['ct']['frame_uid'], series_date=CT_DATE, roi_name='',
+                          dose_summation_type='', reg_matrix='identity', **plan_columns)
+    assert dose_row == dict(file='dose.nii.gz', kind='dose', modality='RTDOSE', series_description='Dose',
+                            series_instance_uid=str(dose.SeriesInstanceUID), study_instance_uid=str(dose.StudyInstanceUID),
+                            frame_of_reference_uid=plan['ct']['frame_uid'], series_date=DOSE_DATE, roi_name='',
+                            dose_summation_type='PLAN', reg_matrix='', **plan_columns)
+    for mask_kind, got, name, file in (('mask', mask_row, 'Liver', 'liver.nii.gz'), ('applicator', applicator_row, 'ROI A', 'Ring1.nii.gz')):
+        assert got == dict(file=file, kind=mask_kind, modality='RTSTRUCT', series_description='Structures',
+                           series_instance_uid=str(struct.SeriesInstanceUID), study_instance_uid=str(struct.StudyInstanceUID),
+                           frame_of_reference_uid=plan['ct']['frame_uid'], series_date=STRUCT_DATE, roi_name=name,
+                           dose_summation_type='', reg_matrix='', **plan_columns)
+
+
+def test_series_csv_of_a_summed_beam_dose_joins_the_series_uids(tree):
+    org, out = tree
+    uids = [pydicom.uid.generate_uid(), pydicom.uid.generate_uid()]
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'BEAM', series_uid=uid) for uid in uids])
+    conv.convert(org, out)
+    dose_row = series_rows(out)[1]
+    assert (dose_row['file'], dose_row['modality'], dose_row['dose_summation_type']) == ('dose.nii.gz', 'RTDOSE', 'BEAM')
+    assert dose_row['series_instance_uid'] == ';'.join(uids)
+
+
+def test_series_csv_leaves_absent_plan_tags_empty(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1', plan_meta=dict(fractions=None))
+    conv.convert(org, out)
+    [ct_row] = series_rows(out)
+    assert {k: ct_row[k] for k in ('rtplan_label', 'rtplan_date', 'fractions_planned', 'series_description', 'series_date')} == {
+        'rtplan_label': '', 'rtplan_date': '', 'fractions_planned': '', 'series_description': '', 'series_date': ''}
+
+
+def test_series_csv_is_the_last_file_and_goes_through_a_temp_name(tree, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1', rois=[BOX])
+    replaced = []
+    real = conv.os.replace
+
+    def spy(source, target):
+        replaced.append((Path(source).name, Path(target).name, Path(target).parent.name))
+        real(source, target)
+    monkeypatch.setattr(conv.os, 'replace', spy)
+    conv.convert(org, out)
+    source, target, _ = replaced[-1]
+    assert target == 'series.csv' and source != target and source.endswith('series.csv')
+    assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == ['liver.nii.gz', 'planning_ct.nii.gz', 'series.csv']
+
+
+def test_a_failed_series_csv_write_is_a_patient_level_io_error_and_leaves_nothing(tree, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    real = conv.os.replace
+
+    def fail(source, target):
+        if Path(target).name == 'series.csv':
+            raise OSError(f'cannot write {target} for {PID}')
+        real(source, target)
+    monkeypatch.setattr(conv.os, 'replace', fail)
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'refused', conv.REASON_IO_ERROR)]
+    assert sorted(p.name for p in out.iterdir()) == [conv.REPORT_NAME]
+
+
+# ---------------------------------------------------------------- A2.9: organize -> convert
+
+def test_a2_9_an_rtstruct_in_another_study_is_organized_and_converts(tmp_path):
+    src, org, out = tmp_path / 'src', tmp_path / 'org', tmp_path / 'out'
+    folder = src / PID / 'p'
+    folder.mkdir(parents=True)
+    ct_time = '100000'
+    ct = sd.write_ct_series(folder, np.zeros((4, 5, 6), int), spacing=SPACING, origin=ORIGIN, patient_id=PID,
+                            series_date=CT_DATE, series_time=ct_time)
+    other_study = pydicom.uid.generate_uid()  # the RTSTRUCT was exported in a study of its own, not the CT's
+    struct = sd.write_rtstruct_rois(folder / 'struct.dcm', ct, [BOX], contour_images=True, patient_id=PID, study_uid=other_study)
+    plan_time = '110000'
+    sd.write_rtplan(folder / 'plan.dcm', struct, np.zeros((2, 3)), plan_date=CT_DATE, plan_time=plan_time,
+                    patient_id=PID, study_uid=ct['study_uid'])
+    organize(src, org)
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.files) for r in rows] == [
+        ('plan_1', 'converted', ['planning_ct.nii.gz', 'liver.nii.gz', 'series.csv'])]
+    assert arr(out / PID / 'plan_1' / 'liver.nii.gz').sum() == 27
+
+
+# ---------------------------------------------------------------- A2.10: PHI
+
+def chain(exc):
+    """`exc` and everything on its __cause__/__context__ links, recursively."""
+    seen, todo = [], [exc]
+    while todo:
+        item = todo.pop()
+        if item is not None and all(item is not other for other in seen):
+            seen.append(item)
+            todo += [operator.attrgetter('__cause__')(item), operator.attrgetter('__context__')(item)]
+    return seen
+
+
+def every_uid(folder):
+    found = set()
+    for path in folder.glob('*.dcm'):
+        ds = pydicom.dcmread(path, stop_before_pixels=True)
+        for dataset in (ds, ds.file_meta):
+            found |= {str(e.value) for e in dataset.iterall() if e.VR == 'UI'}
+    return found
+
+
+def truncate_pixels(plan):
+    path = Path(plan['ct']['paths'][1])
+    path.write_bytes(path.read_bytes()[:-40])  # header intact, pixel data truncated
+
+
+def break_rtstruct(plan):
+    def change(ds):  # DicomRTTool reads [0] of this sequence, convert never does
+        ds.RTROIObservationsSequence[0].RTROIIdentificationCodeSequence = []
+    edit(plan['folder'] / 'struct.dcm', change)
+
+
+@pytest.mark.parametrize('damage, reason', [(truncate_pixels, conv.REASON_CT_UNREADABLE),
+                                            (break_rtstruct, masks.REASON_MASK_LINK)])
+def test_a2_10_no_output_channel_or_exception_carries_the_patient_id_the_path_or_a_uid(tree, tmp_path, capfd, caplog, recwarn,
+                                                                                         damage, reason):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', rois=[BOX])
+    secrets = [PID, str(tmp_path), *every_uid(plan['folder'])]
+    assert len(secrets) > 10
+    damage(plan)
+    caplog.set_level(logging.DEBUG)
+    capfd.readouterr()
+    rows = conv.convert(org, out).rows
+    with pytest.raises(CaseRefused) as caught:
+        conv.convert_plan(plan['folder'], tmp_path / 'case')
+    assert [(r.outcome, r.reason) for r in rows] == [(conv.OUTCOME_REFUSED, reason)] and str(caught.value) == reason
+    assert chain(caught.value) == [caught.value]
+    captured = capfd.readouterr()
+    texts = [captured.out, captured.err, caplog.text, *(r.getMessage() for r in caplog.records),
+             *(str(w.message) for w in recwarn.list), *(f'{e!r} {e}' for e in chain(caught.value))]
+    assert [s for s in secrets for t in texts if s in t] == []
+
+
+def test_a2_10_the_broken_rtstruct_really_makes_dicomrttool_log_the_path(tree, caplog):
+    """Guards the guard: unwrapped, DicomRTTool logs the path of the broken RTSTRUCT."""
+    from DicomRTTool import DicomReaderWriter
+    org, _ = tree
+    plan = make_plan(org / PID / 'plan_1', rois=[BOX])
+    break_rtstruct(plan)
+    caplog.set_level(logging.WARNING)
+    DicomReaderWriter(arg_max=False, verbose=False).walk_through_folders(str(plan['folder']))
+    assert str(plan['folder']) in caplog.text
+
+
+# ---------------------------------------------------------------- A2.11: rerun safety
+
+def tree_hashes(root):
+    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file()}
+
+
+def test_a2_11_the_organized_tree_keeps_its_hashes_and_a_rerun_skips_every_patient(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')], rois=[BOX])
+    make_plan(org / 'SYNTHETICPTB' / 'plan_1', contour_images=False, patient='SYNTHETICPTB')  # refused: still has its outcome
+    before = tree_hashes(org)
+    first = conv.convert(org, out).rows
+    assert sorted((r.patient, r.outcome) for r in first) == [(PID, 'converted'), ('SYNTHETICPTB', 'refused')]
+    assert tree_hashes(org) == before
+    after_first = tree_hashes(out)
+    rows = conv.convert(org, out).rows
+    assert sorted((r.patient, r.folder, r.outcome, r.reason) for r in rows) == [
+        (PID, '', 'skipped', conv.REASON_EXISTS), ('SYNTHETICPTB', '', 'skipped', conv.REASON_EXISTS)]
+    assert tree_hashes(org) == before
+    assert {k: v for k, v in tree_hashes(out).items() if k != conv.REPORT_NAME} == {
+        k: v for k, v in after_first.items() if k != conv.REPORT_NAME}
 
 
 # ---------------------------------------------------------------- guardrails on the source

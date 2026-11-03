@@ -3,9 +3,9 @@ Turn an organized tree (<patient>/plan_<n>/) into NIfTI on the native CT grid, o
 
 Per plan: RTPLAN -> RTSTRUCT -> the one CT series it references -> planning_ct.nii.gz (float32 HU), and the plan's RTDOSE
 as dose.nii.gz (Gy, linearly resampled onto the CT grid). Masks and applicators (masks.py) are written into the same
-folder; series.csv (task-06) extends `convert_plan`. The organized tree is only read. Log lines and exception messages
-carry counts and the fixed REASON_ constants only, never a PatientID, folder name, date, path or UID; convert_report.csv in the output root is the one place the
-folder names appear. Every third-party read runs inside dicom_io's quiet wrapper.
+folder; series.csv is written last, one row per file. The organized tree is only read. Log lines and exception messages
+carry counts and the fixed REASON_ constants only, never a PatientID, folder name, date, path or UID. convert_report.csv in
+the output root is the one place the folder names appear; the series.csv files hold the UIDs, dates and descriptions. Every third-party read runs inside dicom_io's quiet wrapper.
 """
 import contextlib
 import csv
@@ -26,7 +26,10 @@ from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_header
 log = logging.getLogger(__name__)
 
 REPORT_NAME = 'convert_report.csv'
-CT_NAME, DOSE_NAME = 'planning_ct.nii.gz', 'dose.nii.gz'
+CT_NAME, DOSE_NAME, SERIES_NAME = 'planning_ct.nii.gz', 'dose.nii.gz', 'series.csv'
+SERIES_COLUMNS = ['file', 'kind', 'modality', 'series_description', 'series_instance_uid', 'study_instance_uid',
+                  'frame_of_reference_uid', 'series_date', 'roi_name', 'dose_summation_type', 'reg_matrix', 'rtplan_uid',
+                  'rtplan_label', 'rtplan_date', 'fractions_planned']
 OUTCOME_CONVERTED, OUTCOME_SKIPPED, OUTCOME_REFUSED = 'converted', 'skipped', 'refused'
 ORIGIN_ATOL_MM = 1e-3  # slice-spacing uniformity and duplicate positions (rnt gauge_rr.py)
 DIRECTION_ATOL = 1e-6  # image orientation equality (rnt gauge_rr.py)
@@ -72,7 +75,7 @@ class ConvertReport:
 
 @dataclass
 class PlanResult:
-    files: list  # names written into the case folder, in write order
+    files: list  # the data files written into the case folder, in write order; series.csv, written last, is not in it
     ct_series_uid: str
 
 
@@ -136,7 +139,7 @@ def _convert_one(plan_dir, partial):
     if reason is not None:
         log.warning('convert: plan refused: %s', reason)
         return ConvertRow(plan_dir.parent.name, plan_dir.name, OUTCOME_REFUSED, reason)
-    return ConvertRow(plan_dir.parent.name, plan_dir.name, OUTCOME_CONVERTED, files=result.files)
+    return ConvertRow(plan_dir.parent.name, plan_dir.name, OUTCOME_CONVERTED, files=[*result.files, SERIES_NAME])
 
 
 def convert_plan(plan_dir, case_dir):
@@ -168,7 +171,7 @@ def _convert_plan(plan_dir, case_dir):
     _check_volume(ct_slices)
     _check_contour_images(struct, series_uid, ct_slices)
     ct = _read_ct([p for p, _ in ct_slices], ct_slices[0][1])
-    dose = _read_dose_sum(headers, plan, str(ct_slices[0][1].FrameOfReferenceUID), ct)
+    dose, dose_heads = _read_dose_sum(headers, plan, str(ct_slices[0][1].FrameOfReferenceUID), ct)
     rois = masks.classify(struct, plan, taken=(CT_NAME, DOSE_NAME))
     struct_path = next(p for p, ds in headers if ds is struct)
     # The scratch folder of DicomRTTool goes in the patient's partial folder: a stale partial's cleanup removes it too.
@@ -187,6 +190,7 @@ def _convert_plan(plan_dir, case_dir):
     for name, points, _ in rois.applicators:
         masks.write_applicator(points, case_dir / name)
         files.append(name)
+    write_series_csv(_series_rows(plan, struct, ct_slices[0][1], dose_heads, rois, files), case_dir / SERIES_NAME)
     return PlanResult(files, series_uid)
 
 
@@ -353,16 +357,61 @@ def _read_dose(path, offsets, ct):
 
 
 def _read_dose_sum(headers, plan, ct_frame_uid, ct):
-    """The plan dose on the CT grid (Gy, float32), or None when the plan has no RTDOSE."""
+    """(the plan dose on the CT grid in Gy as float32, the headers of the RTDOSEs summed); (None, []) without an RTDOSE."""
     used = _dose_candidates(headers, plan)
     offsets = [_check_dose_header(ds, ct_frame_uid) for _, ds in used]  # every used dose is checked before any is read
     images = [_read_dose(path, off, ct) for (path, _), off in zip(used, offsets, strict=True)]
     if not images:
-        return None
+        return None, []
     total = images[0]
     for image in images[1:]:
         total = total + image
-    return total
+    return total, [ds for _, ds in used]
+
+
+def _tag(ds, name):
+    """The raw value of an optional tag as text ('' when absent or empty; dates stay as stored)."""
+    value = ds.get(name)
+    return '' if value is None else str(value)
+
+
+def _joined(values):
+    return ';'.join(dict.fromkeys(values))
+
+
+def _series_rows(plan, struct, ct_head, dose_heads, rois, files):
+    """One dict per mask, applicator, CT and dose file in `files` (series.csv itself has none), from headers already read."""
+    groups = plan.get('FractionGroupSequence', [])
+    plan_columns = dict(rtplan_uid=str(plan.SOPInstanceUID), rtplan_label=_tag(plan, 'RTPlanLabel'),
+                        rtplan_date=_tag(plan, 'RTPlanDate'),
+                        fractions_planned=_tag(groups[0], 'NumberOfFractionsPlanned') if groups else '')
+    frames = struct.get('ReferencedFrameOfReferenceSequence', [])
+    struct_frame = _tag(struct, 'FrameOfReferenceUID') or (_tag(frames[0], 'FrameOfReferenceUID') if frames else '')
+
+    def row(file, kind, heads, modality, frame, roi_name='', summation='', reg_matrix=''):
+        return dict(file=file, kind=kind, modality=modality, roi_name=roi_name, dose_summation_type=summation,
+                    reg_matrix=reg_matrix, frame_of_reference_uid=frame, **plan_columns,
+                    **{column: _joined(_tag(ds, tag) for ds in heads) for column, tag in (
+                        ('series_description', 'SeriesDescription'), ('series_instance_uid', 'SeriesInstanceUID'),
+                        ('study_instance_uid', 'StudyInstanceUID'), ('series_date', 'SeriesDate'))})
+    rows = [row(CT_NAME, 'ct', [ct_head], 'CT', _tag(ct_head, 'FrameOfReferenceUID'), reg_matrix='identity')]
+    if dose_heads:
+        rows.append(row(DOSE_NAME, 'dose', dose_heads, 'RTDOSE', _joined(_tag(ds, 'FrameOfReferenceUID') for ds in dose_heads),
+                        summation=_joined(_tag(ds, 'DoseSummationType').strip() for ds in dose_heads)))
+    roi_names = {file: ('mask', name) for _, name, file in rois.kept} | {file: ('applicator', name) for file, _, name in rois.applicators}
+    rows += [row(file, roi_names[file][0], [struct], 'RTSTRUCT', struct_frame, roi_name=roi_names[file][1])
+             for file in files if file in roi_names]
+    return rows
+
+
+def write_series_csv(rows, path):
+    """`rows` (dicts of SERIES_COLUMNS) at `path`, written atomically; a failure raises OSError(REASON_WRITE)."""
+    def write(temp):
+        with open(temp, 'w', newline='') as handle:
+            writer = csv.DictWriter(handle, SERIES_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+    _atomic(write, path)
 
 
 def write_atomic(image, path):
@@ -370,13 +419,18 @@ def write_atomic(image, path):
     Write `image` to `path` through a temp file in the same folder (its name ends .nii.gz: SimpleITK picks the writer by
     extension) and os.replace. A failure of either step raises OSError(REASON_WRITE), and the temp file is removed.
     """
+    _atomic(lambda temp: quiet_call(lambda: sitk.WriteImage(image, str(temp)), REASON_WRITE), path)  # ITK names the path
+
+
+def _atomic(write, path):
+    """write(temp) then os.replace(temp, path); any OSError or CaseRefused of either step is OSError(REASON_WRITE)."""
     path = Path(path)
     temp = path.with_name(f'.{os.getpid()}.tmp.{path.name}')
     failed = False
     try:
         try:
-            quiet_call(lambda: sitk.WriteImage(image, str(temp)), REASON_WRITE)  # an ITK writer message would name the path
-        except CaseRefused:
+            write(temp)
+        except (CaseRefused, OSError):
             failed = True
         if not failed:
             os.replace(temp, path)
