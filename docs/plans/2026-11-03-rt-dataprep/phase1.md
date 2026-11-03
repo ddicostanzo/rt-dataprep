@@ -13,7 +13,7 @@ must be loadable by rnt_transformer without changes to rnt.
 ## Package
 
 - Python ≥3.12, `src/rt_dataprep/`, built with hatchling. Core deps: `pydicom`, `numpy`, `pandas`, `SimpleITK`,
-  `DicomRTTool==6.2.0`, `scikit-learn` (for `GroupShuffleSplit` only). Optional extra `[ahe]` = `mclahe`. Dev:
+  `DicomRTTool==6.2.0`. Optional extra `[ahe]` = `mclahe`. Dev:
   `pytest`, `ruff`.
 - CLI is `python -m rt_dataprep <organize|convert|split>`, using argparse. Each subcommand wraps one function with
   the same name, which tests call directly.
@@ -35,14 +35,18 @@ The work is cut into three `/dev`-sized features, implemented and merged in orde
 Steps:
 1. For each patient folder under `src_root`, read every `*.dcm` header (`stop_before_pixels=True`). The header reader
    is `read_dicom` / `_pydicom_quiet`, copied from rnt `src/dose/rtdose.py`. An unreadable file is counted and skipped.
-2. Find the planning CTs: each RTPLAN → the RTSTRUCT whose `SOPInstanceUID` equals the plan's
-   `ReferencedStructureSetSequence[0].ReferencedSOPInstanceUID` → the CT series that RTSTRUCT references (the logic of
-   rnt `_referenced_ct_slices`). Remove duplicate CT series, then sort by `(SeriesDate, SeriesTime,
-   SeriesInstanceUID)`.
-3. In that order, the n-th planning CT's **study** becomes `fx_<n>`, numbered from 1. The folder gets every file with
-   that `StudyInstanceUID`. It also gets every file of a study named by a REG in that study
-   (`StudiesContainingOtherReferencedInstancesSequence[*].StudyInstanceUID`), unless that study is itself a planning
-   study.
+2. The case unit is one **RTPLAN** (user decision, 2026-11-03). For each RTPLAN, find the RTSTRUCT whose
+   `SOPInstanceUID` equals the plan's `ReferencedStructureSetSequence[0].ReferencedSOPInstanceUID`, then the CT series
+   that RTSTRUCT references (the logic of rnt `_referenced_ct_slices`). A plan without a complete chain is left over.
+   Sort plans by `(CT SeriesDate, CT SeriesTime, RTPlanDate, RTPlanTime, plan SOPInstanceUID)`. With one plan per CT
+   this gives the same numbering as the legacy code.
+3. In that order, the n-th plan becomes `fx_<n>`, numbered from 1. The folder gets:
+   - the plan itself and every RTDOSE whose `ReferencedRTPlanSequence` names it. These files go to that folder only.
+   - **copies** of every other file in the plan's CT study, except other RTPLANs and their RTDOSEs. This covers the
+     CT, the RTSTRUCTs and the REGs. Several plans on one CT therefore each get their own CT and RTSTRUCT.
+   - copies of every file of a study named by a REG in the CT study
+     (`StudiesContainingOtherReferencedInstancesSequence[*].StudyInstanceUID`), unless that study is itself a
+     planning study. That study is the diagnostic imaging.
 4. Before grouping, two kinds of file are treated as left over: CT files whose `ImageType` contains `LOCALIZER`
    (topograms), and whole studies where any file's `ManufacturerModelName` contains one of `exclude_models`.
 5. Files are **copied** (`shutil.copy2`), never moved, so the source stays intact. Output is
@@ -60,7 +64,9 @@ Acceptance tests (synthetic):
   folder.
 - **A1.3** A REG references the other planning study. Neither study's files are duplicated into the other's folder.
 - **A1.4** A localizer CT, an `Acuity` study, and an orphan CT with no plan all go to `misc_files/`.
-- **A1.5** Two RTPLANs reference the same RTSTRUCT and CT. The result is one `fx` folder, with no empty folder.
+- **A1.5** Two RTPLANs, each with its own RTDOSE, reference the same RTSTRUCT and CT. The result is `fx_1` and
+  `fx_2`. Each holds the full CT and RTSTRUCT, exactly one RTPLAN, and only that plan's RTDOSE.
+- **A1.5b** Two planning CTs in one study, each with a plan, give two `fx` folders and no empty folder.
 - **A1.6** A PatientID of `../evil` is written inside `out_root`.
 - **A1.7** After a run, the source tree is byte-identical (compared by hash of every file).
 
@@ -78,19 +84,23 @@ Acceptance tests (synthetic):
 
 Steps, for each `<patient>/fx_<n>/`:
 1. **Assemble.** Index headers by modality, as in rnt `gauge_rr.read_folder`, widened to RTDOSE and REG. Then
-   follow the chain CT ← RTSTRUCT ← RTPLAN ← RTDOSE by referenced UIDs. Refuse the case unless there is exactly one
-   planning chain with exactly one CT series. Dose is the RTDOSE whose `ReferencedRTPlanSequence` names the plan. If
-   there is none, the case has no dose and is not refused.
+   follow the chain CT ← RTSTRUCT ← RTPLAN ← RTDOSE by referenced UIDs. F1 guarantees one RTPLAN per folder.
+   Refuse the case if the chain is broken or resolves to anything other than one CT series. Dose is the RTDOSE whose
+   `ReferencedRTPlanSequence` names the plan. If there are several, sum the doses whose `DoseSummationType` is
+   `BEAM`, or take the single `PLAN` dose. If there is none, the case has no dose and is not refused.
 2. **CT.** Read with `read_ct_series`, from rnt `rtdose.py` together with the `utils.augment._read` it depends on,
    restricted to the planning CT's files.
 3. **Dose.** `read_rtdose` / `_convert` from rnt `rtdose.py`, giving Gy with `DoseGridScaling` applied. It is then
    resampled onto the native CT grid with `resample_dose`. The legacy code never scaled dose to Gy; this
    deliberately corrects that.
-4. **Masks.** Use `DicomReaderWriter(arg_max=True)` on a temporary folder of hard links to only the planning CT
-   slices and the RTSTRUCT, so other series in the fx folder cannot be picked up. Then call
-   `set_contour_names_and_associations(contour_names=[roi])` and `get_images_and_mask()` for each ROI.
-   `annotation_handle` must match the CT geometry (`geometry_equal`, from rnt `gauge_rr.py`), otherwise the ROI is
-   refused.
+4. **Masks.** Build a temporary folder of hard links to only the planning CT slices and the RTSTRUCT. It goes under
+   `out_root`, so it is on the same filesystem as the source, and other series in the fx folder cannot be picked
+   up. Then run `DicomReaderWriter(arg_max=False)` on it in one pass:
+   `walk_through_folders`, `set_contour_names_and_associations(contour_names=<all kept ROIs>)`,
+   `set_index(<the index whose SeriesInstanceUID is the planning CT>)` and `get_images_and_mask()`. Split the
+   multi-channel mask into one mask per ROI. `arg_max=False` keeps overlapping OARs intact; the legacy code read
+   one ROI at a time, so it never lost overlaps either. `annotation_handle` must match the CT geometry
+   (`geometry_equal`, from rnt `gauge_rr.py`), otherwise the case is refused.
    - Skip: `POINT` ROIs, empty ROIs, and names containing `dose` (legacy rule).
    - Applicator channels: ROIs that are `OPEN_NONPLANAR` or have `RTROIInterpretedType == BRACHY_CHANNEL`. Each is
      written as `<SourceApplicatorID letters>.nii.gz`, a **text** file of contour points (`np.savetxt`,
@@ -102,8 +112,9 @@ Steps, for each `<patient>/fx_<n>/`:
    This happens whenever any geometric step is on, which fixes the legacy bug where masks were only resampled when
    `resample` was on.
 6. **Names.** Use legacy prefixes, newest step first (`create_file_name`): `planning_ct`, `dose`, and
-   `<format_name(roi)>`, where `format_name` lowercases and strips non-alphanumerics, as in legacy `utils.py`. All
-   are `.nii.gz`. The output folder is `<out_root>/<patient>/fx_<n>/`, or `<out_root>/<patient>_fx_<n>/` with
+   `<format_name(roi)>`. Dose and masks take only the geometric prefixes (`initialresample`, `resample`,
+   `reshape`), never `rescale`, `norm` or `ahe`. `format_name`
+   lowercases and strips non-alphanumerics, as in legacy `utils.py`. All files are `.nii.gz`. The output folder is `<out_root>/<patient>/fx_<n>/`, or `<out_root>/<patient>_fx_<n>/` with
    `flat`. A folder that already exists is skipped. Each file is written to a temporary name and renamed into place
    (`write_atomic` from rnt `scripts/convert_dose.py`), so a crash never leaves a half-written case.
 7. `convert_report.csv` is written in `out_root`, with one row per case: outcome, refusal reason and the list of
@@ -136,8 +147,8 @@ Steps:
 1. `manifest(out_root)` writes `manifest.csv`, with one row per converted case. Columns: `case_dir`, `patient`,
    `fx`, CT size and spacing, dose present, and the list of masks. It also records `rtplan_uid`, `ct_series_uid`
    and `study_uid` for cross-run matching. The hook blocks this file from commits.
-2. `split(manifest, *, test_size, val_size, seed)` uses `GroupShuffleSplit` grouped by `patient`, the same method as
-   rnt `_split_by_patient`. It writes `splits.json` with `{train, val, test}` case lists and a
+2. `split(manifest, *, test_size, val_size, seed)` shuffles the sorted unique patients with
+   `numpy.random.default_rng(seed)` and assigns whole patients to test, then val, then train. No scikit-learn. It writes `splits.json` with `{train, val, test}` case lists and a
    `case_id_hash = sha256('\n'.join(sorted(ids)))` for each split, the same hash convention as rnt
    `_setup_external_test`.
 3. `check_disjoint(splits, external_manifest)` refuses if any patient overlaps.
@@ -150,17 +161,23 @@ Acceptance tests:
 
 ## Parity check on real data (OSC, run by the user, after F2)
 
-`scripts/parity.py --legacy <pooled dir> --new <convert out> --org <organize out>` matches cases on
-`rtplan_uid`. It never matches on `fx_<n>`, because the legacy numbering depended on pre-filters and a keep-list.
-It prints aggregate counts only, with no identifiers. The run uses `--legacy-rnt --legacy-linear-masks` on N ≥ 20
-fractions. Pass criteria:
-- CT: `geometry_equal`, and voxel max abs diff ≤ 1e-3 on the rescaled scale. If `ahe` is on, it is checked
+**Convert parity.** The OSC `raw/<mrn>/fx_<n>/` tree is already organized, so run `convert --flat --legacy-rnt
+--legacy-linear-masks` on it directly and match against the pooled legacy folders by folder name, the same pairing
+`scripts/convert_dose.py` uses. This keeps convert parity separate from organize. `scripts/parity.py` prints
+aggregate counts only, with no identifiers. Run on N ≥ 20 fractions. Pass criteria:
+- CT: `geometry_equal` to legacy, and voxel max abs diff ≤ 1e-3 on the rescaled scale. With `ahe` on, it is checked
   separately with a Pearson r ≥ 0.999, because of the uncertainty about the legacy torchio/SimpleITK handoff after
   AHE.
 - Masks: Dice ≥ 0.98 for each OAR after thresholding at 0.5.
 - Applicator text files: point arrays equal within 1e-3.
-- Dose is **not** compared to legacy (legacy was unscaled). It is compared to rnt's `dose_gy.nii.gz` with
-  max abs diff ≤ 1e-4 Gy after resampling to the same grid.
+- Dose is **not** compared to legacy, because legacy dose was unscaled. When the new native-grid CT is
+  `geometry_equal` to rnt's `ct.nii.gz`, the new native-grid dose must match rnt's `dose_gy.nii.gz` within
+  1e-4 Gy, since both come from the same `resample_dose`. If the grids differ, no dose tolerance applies; record
+  the grid mismatch count instead.
+
+**Organize parity** comes later and is separate. A fresh DICOM_Transport export is organized and then compared to
+`raw/` by the `rtplan_uid` read from each tree's RTPLAN, never by `fx_<n>`. Legacy numbering depended on
+pre-filters and a keep-list.
 
 A failure here is a finding to bring back to the user before rnt switches over. It does not block F3.
 
@@ -174,7 +191,6 @@ A failure here is a finding to bring back to the user before rnt switches over. 
 
 - REG-based resampling of diagnostic MR or PET into the planning CT frame.
 - Parallel reading (the legacy code used `Pool(6)`).
-- Multi-plan cases (more than one RTPLAN per study) are refused rather than split.
 - Same-day planning CTs: the order is by `SeriesTime` and then UID, which may differ from the legacy numbering.
 - `normalize`, which the RNT data never used. It is ported but has only a smoke test.
 - Second-wave package: provenance, run_dir and the section 6 stats.

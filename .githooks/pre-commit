@@ -7,6 +7,10 @@
 #
 # Install (no core.hooksPath: the global ~/.claude/git-hooks dispatcher chains to .git/hooks):
 #     ln -s ../../.githooks/pre-commit .git/hooks/pre-commit
+# Runs the global PHI content guard (~/.claude/hooks/pre-commit.sh) first when it exists.
+
+guard="$HOME/.claude/hooks/pre-commit.sh"
+if [ -x "$guard" ]; then "$guard" "$@" || exit $?; fi
 
 staged=$(git diff --cached --name-only --diff-filter=AM)
 [ -z "$staged" ] && exit 0
