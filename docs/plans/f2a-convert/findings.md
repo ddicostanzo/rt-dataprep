@@ -47,3 +47,10 @@ Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytes
 - WARNING (deferred): broad (AttributeError, KeyError, IndexError, TypeError, ValueError) catch turns coding bugs into REASON_MISSING_TAG.
 - WARNING (deferred): no tests for non-identity CT orientation or negative/absolute dose offsets (writer is identity-only).
 - NOTE: an RTDOSE not naming the plan is silently ignored; a non-DICOM file (.DS_Store) in a plan folder refuses the plan.
+
+## task-05
+- masks.py: classify(struct, plan, taken) -> RoiPlan(kept, applicators); build_masks(...) -> {file: uint8 image}; write_applicator(points, path); format_name. Masks/classify run before case_dir.mkdir, so refusals leave no plan folder. Scratch folder via mkdtemp in the patient's partial folder, removed in finally.
+- DicomRTTool's constructor calls set_contour_names_and_associations(None) itself; mask_dictionary holds every requested name even when absent/empty, so the voxel check is the real guard.
+- Extra check: DicomRTTool's ROI number for the lowercased name must equal the kept ROI's number (case-only name collision with a POINT ROI).
+- Implementation written before tests; 47 mutations run, 45 killed, 1 equivalent survivor.
+- Open: two channels on one ROI use the first SourceApplicatorID; mixed open/closed ROI treated as applicator; format_name keeps Unicode alphanumerics.
