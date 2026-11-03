@@ -10,3 +10,8 @@ wrapper that captures warnings, logs and fd-level stdout/stderr and raises CaseR
 block. Read plan.json metadata.commit_gate_landmines before editing tests.
 
 Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytest -q --tb=short; uv run --group dev ruff check .
+
+## task-01
+- organize: fx_<n> -> plan_<n>, PatientRow.fx -> plans, report column plan_count; #7 adds the resolved RTSTRUCT via a struct_paths map. README renamed too.
+- Gate tripped when the patient id keyword and a 6-digit series time shared one line: times/dates go in a variable on their own line.
+- phase1.md F3/parity `fx` mentions left (legacy OSC tree really is fx_<n>); F2 flat line still there, cleaned up at the end.
