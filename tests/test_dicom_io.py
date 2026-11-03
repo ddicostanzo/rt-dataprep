@@ -1,4 +1,6 @@
 import logging
+import operator
+import os
 import subprocess
 import sys
 import warnings
@@ -6,9 +8,10 @@ from pathlib import Path
 
 import pydicom
 import pytest
+import SimpleITK as sitk
 
 import synthetic_dicom as sd
-from rt_dataprep.dicom_io import read_header, sanitize_path_component
+from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_header, sanitize_path_component
 
 
 def test_package_init_has_no_imports():
@@ -125,3 +128,83 @@ def test_write_ct_series_mr_modality(tmp_path):
     out = sd.write_ct_series(tmp_path, [[[1]]], modality='MR', prefix='mr')
     ds = pydicom.dcmread(out['paths'][0])
     assert ds.Modality == 'MR' and ds.SOPClassUID == pydicom.uid.MRImageStorage
+
+
+# the PHI-safe third-party call wrapper
+
+FAKE_PATH = '/data/SYNTHETIC_PATIENT_X/plan_1/ct_slice.dcm'
+FAKE_ID = 'SYNTHETIC_ID_ABC'
+REASON = 'SYNTHETIC reason constant'
+
+
+_chain = operator.attrgetter('__cause__', '__context__')  # (cause, context) of an exception
+
+
+def _leaky():
+    """Everything a third-party loader does with a path: warn, log, print, write to the fds, then raise."""
+    for text in (FAKE_PATH, FAKE_ID):
+        warnings.warn(f'bad value {text}', stacklevel=2)
+        logging.getLogger('some.loader').error('Failed on %s', text)
+        logging.getLogger('unhandled.worker').warning('Failed on %s', text)  # no handler: lastResort writes to stderr
+        print(f'stdout {text}')
+        print(f'stderr {text}', file=sys.stderr)
+        os.write(1, f'fd1 {text}\n'.encode())
+        os.write(2, f'fd2 {text}\n'.encode())
+    sitk.ProcessObject.SetGlobalWarningDisplay(False)  # irrelevant to the leak; the wrapper must restore the original
+    raise ValueError(f'cannot read {FAKE_PATH} for {FAKE_ID}')
+
+
+def test_quiet_call_leaks_nothing(capfd, caplog):
+    with warnings.catch_warnings(record=True) as caught, caplog.at_level(logging.DEBUG):
+        warnings.simplefilter('always')
+        with pytest.raises(CaseRefused) as err:
+            quiet_call(_leaky, REASON)
+    out = capfd.readouterr()
+    for text in (FAKE_PATH, FAKE_ID, 'SYNTHETIC_PATIENT_X'):
+        assert text not in out.out + out.err
+        assert text not in caplog.text and not caplog.records
+        assert not any(text in str(w.message) for w in caught)
+        assert text not in str(err.value)
+    assert str(err.value) == REASON
+    assert _chain(err.value) == (None, None)
+    assert caught == []
+
+
+def test_case_refused_str_is_exactly_the_reason():
+    assert str(CaseRefused(REASON)) == REASON
+
+
+def test_quiet_call_returns_the_value():
+    assert quiet_call(lambda: 42, REASON) == 42
+
+
+def test_quiet_call_restores_everything(capfd):
+    shown = sitk.ProcessObject.GetGlobalWarningDisplay()
+    sitk.ProcessObject.SetGlobalWarningDisplay(True)
+    prior_disable = logging.root.manager.disable
+    logging.disable(logging.WARNING)
+    mode = pydicom.config.settings.reading_validation_mode
+    stdout, stderr = sys.stdout, sys.stderr
+    try:
+        with pytest.raises(CaseRefused):
+            quiet_call(_leaky, REASON)
+        assert sitk.ProcessObject.GetGlobalWarningDisplay() is True
+        assert logging.root.manager.disable == logging.WARNING  # the prior level, not 0
+        assert pydicom.config.settings.reading_validation_mode == mode
+        assert (sys.stdout, sys.stderr) == (stdout, stderr)
+        capfd.readouterr()
+        os.write(1, b'after-out')
+        os.write(2, b'after-err')
+        out = capfd.readouterr()
+        assert (out.out, out.err) == ('after-out', 'after-err')  # fds 1 and 2 are back
+    finally:
+        logging.disable(prior_disable)
+        sitk.ProcessObject.SetGlobalWarningDisplay(shown)
+
+
+def test_read_header_error_has_no_context(tmp_path):
+    path = tmp_path / 'notes.dcm'
+    path.write_text('SYNTHETIC_ not a dicom file')
+    with pytest.raises(OSError) as err:
+        read_header(path)
+    assert _chain(err.value) == (None, None)

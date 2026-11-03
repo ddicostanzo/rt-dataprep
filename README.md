@@ -1,7 +1,7 @@
 # rt-dataprep
 
 Turns radiotherapy DICOM exports into ML-ready cases. Stage F1, `organize`, sorts an export tree into
-`<patient>/fx_<n>/` folders, one per RTPLAN. Later stages convert the folders to NIfTI and split them into cohorts.
+`<patient>/plan_<n>/` folders, one per RTPLAN. Later stages convert the folders to NIfTI and split them into cohorts.
 
 ## Install
 

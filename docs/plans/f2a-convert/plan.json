@@ -1,0 +1,214 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "organize: plan_<n> folders and #7 (RTSTRUCT in another study)",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/organize.py",
+        "src/rt_dataprep/__main__.py",
+        "tests/test_organize.py",
+        "docs/plans/2026-11-03-rt-dataprep/phase1.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/organize.py": "modify",
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_organize.py": "modify",
+        "docs/plans/2026-11-03-rt-dataprep/phase1.md": "modify"
+      },
+      "test_approach": "Update the existing F1 tests to the new names; add one synthetic test with the RTSTRUCT written to a different StudyInstanceUID from its CT (red first).",
+      "criteria": [
+        "A2.0: organize writes plan folders named plan_<n> (same order as the former fx_<n>); the report column is plan_count, the PatientRow field is plans, and the CLI help text says plan; every existing F1 test passes with the new names",
+        "A2.9 (organize part): an RTSTRUCT stored in a different study from the CT it references is copied into its plan folder and is not in misc_files",
+        "phase1.md F1 step 3 states that the resolved RTSTRUCT is always added to the plan folder, and F1/F2 text uses plan_<n>",
+        "Guardrail (commit gate): no added line puts mrn/patient_id next to a run of 6-10 digits and no added line accesses an underscore-prefixed attribute of another module"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "Dependencies and the PHI-safe third-party call wrapper",
+      "depends_on": [],
+      "files": [
+        "pyproject.toml",
+        "uv.lock",
+        "src/rt_dataprep/dicom_io.py",
+        "tests/test_dicom_io.py"
+      ],
+      "file_ops": {
+        "pyproject.toml": "modify",
+        "uv.lock": "modify",
+        "src/rt_dataprep/dicom_io.py": "modify",
+        "tests/test_dicom_io.py": "modify"
+      },
+      "test_approach": "Unit tests with pytest capfd and caplog: call the wrapper on functions that raise with a fake path, warn, log through a named logger, print to Python stdout, and write to fd 2 via os.write.",
+      "criteria": [
+        "pyproject.toml core dependencies include SimpleITK and DicomRTTool==6.2.0; uv.lock is updated; no mclahe, torch or torchio",
+        "A public wrapper (e.g. quiet_call(fn, reason)) runs fn with pydicom quieted (vault: pydicom-validates-lazily-on-first-tag-access), warnings recorded, Python logging records from any logger suppressed, sitk.ProcessObject.SetGlobalWarningDisplay(False), and fd 1/2 redirected at the os.dup2 level; all are restored afterwards",
+        "On failure it raises CaseRefused(reason) after the except block has exited, so the exception's message, __cause__ and __context__ contain no text from the original exception (vault: third-party-loader-errors-and-warnings-embed-phi-paths)",
+        "A test asserts that a fake path and a SYNTHETIC_ id raised, warned, logged, printed and written to fd 2 inside the wrapper appear nowhere in capfd output, caplog records or the exception chain",
+        "CaseRefused(reason) exists in the package and its str() is exactly the reason constant",
+        "dicom_io.read_header raises after its except block has exited; a test asserts the raised OSError has __context__ None and __cause__ None",
+        "The wrapper sets logging.disable(CRITICAL) and restores the prior level, and flushes sys.stdout/sys.stderr before each os.dup2 restore (DicomRTTool logs from ThreadPoolExecutor workers; tqdm writes to stderr)"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "Synthetic writers: general ROIs and dose options",
+      "depends_on": [],
+      "files": [
+        "tests/synthetic_dicom.py",
+        "tests/test_synthetic_dicom.py"
+      ],
+      "file_ops": {
+        "tests/synthetic_dicom.py": "modify",
+        "tests/test_synthetic_dicom.py": "create"
+      },
+      "test_approach": "Round-trip tests: write each fixture to tmp_path, read back with pydicom, assert the tags the convert tests rely on.",
+      "criteria": [
+        "A writer produces one RTSTRUCT on a given CT's FrameOfReferenceUID with any mix of ROIs: CLOSED_PLANAR boxes given in voxel index ranges (each contour carrying ContourImageSequence to its CT slice), a POINT ROI, an ROI with no ContourSequence, an OPEN_NONPLANAR/BRACHY_CHANNEL ROI from given points, with chosen ROIName and RTROIInterpretedType, and with RTReferencedSeriesSequence listing the CT slices in ContourImageSequence",
+        "write_rtdose / write_rtplan already take units, summation, frame, plan, applicator_id, roi and plan date parameters (reuse them); write_rtplan gains RTPlanLabel; existing defaults unchanged",
+        "All new fixture ids have no digits or underscores (e.g. SYNTHETICPTA) and carry no 6-10 digit runs next to patient_id/mrn on any added line; existing synthetic tests still pass",
+        "Guardrail (commit gate): no added line puts mrn/patient_id next to a run of 6-10 digits (dates go through a variable defined on its own line) and no added line accesses an underscore-prefixed attribute of another module"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "convert: assemble, planning CT, dose, atomic plan folders, report",
+      "depends_on": [
+        "task-01",
+        "task-02",
+        "task-03"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_convert.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "create",
+        "tests/test_convert.py": "create"
+      },
+      "test_approach": "Synthetic org trees in tmp_path (plan_<n> folders built with the writers, or via organize for A2.9); compare outputs with SimpleITK and numpy. Port rnt read_ct_series/_convert/resample_dose/write_atomic with their checks.",
+      "criteria": [
+        "convert(org_root, out_root, *, exclude_models=('Acuity',)) returns ConvertReport(rows); it reads every <patient>/plan_<n>/ (patient folders starting with '.' and misc_files are never converted); a resolved out_root equal to or inside org_root raises ValueError(REASON constant) before any mkdir, and the CLI exits 1 with that reason",
+        "Assemble: exactly one RTPLAN, its RTSTRUCT by ReferencedStructureSetSequence[0], and exactly one CT series that RTSTRUCT references; otherwise CaseRefused with a fixed reason constant. An unreadable file in a plan folder refuses the plan. A plan-folder header missing a tag the per-plan path reads (e.g. ImagePositionPatient on a CT slice, ReferencedStructureSetSequence) refuses that plan with a fixed reason and the run continues; one fixture per such case",
+        "A2.1: planning_ct.nii.gz equals the source CT (spacing, origin, direction, values; series read with SetOutputPixelType(sitkFloat32) before Execute) and dose.nii.gz equals stored value x DoseGridScaling linearly resampled onto the CT grid",
+        "A2.1b: PLAN+BEAM -> the PLAN dose; PLAN+FRACTION -> the PLAN dose; one FRACTION -> used; two BEAM -> their sum on the CT grid; two PLAN -> refused; a single BRACHY -> refused; no RTDOSE -> converted with no dose.nii.gz; DoseUnits not GY -> refused; a used dose whose FrameOfReferenceUID differs from the CT -> refused",
+        "A2.1c: a planning CT missing a middle slice is refused (one-volume check: one orientation and size, no duplicate positions, uniform spacing within ORIGIN_ATOL_MM, at least two slices), and so is one missing an end slice that the RTSTRUCT's RTReferencedSeriesSequence item for the planning CT lists in ContourImageSequence",
+        "From A2.4b: with two CT series in the plan folder, the one the RTSTRUCT references is planning_ct.nii.gz",
+        "A2.8: a plan referencing a missing RTSTRUCT is refused; the convert_report.csv row carries the reason constant; no plan_<n>/, partial or temp folder is left",
+        "Each patient is built in <out_root>/.<patient>.partial/ (a stale one removed first) and renamed into place at the end; a refused plan leaves no plan_<n>/ while the patient's other plans are written (vault: record-completion-at-outcome-not-intent)",
+        "Every SimpleITK/pydicom read goes through the task-02 wrapper; no sitk.GetArrayViewFromImage on a temporary image (vault: simpleitk-array-view-of-temporary-image-reads-freed-memory)",
+        "Guardrail (commit gate): no added line puts mrn/patient_id next to a run of 6-10 digits (dates go through a variable defined on its own line) and no added line accesses an underscore-prefixed attribute of another module",
+        "Port from /home/dominic/Repositories/rnt_transformer: src/dose/rtdose.py _convert (BEAM added to SUMMATIONS), resample_dose, read_ct_series (SetOutputPixelType(sitkFloat32), not Cast); scripts/convert_dose.py write_atomic. ORIGIN_ATOL_MM=1e-3 (slice-spacing uniformity, duplicate positions) and DIRECTION_ATOL=1e-6 (IOP equality), from rnt src/data/gauge_rr.py. Do not port load_fraction's NumberOfFractionsPlanned==1, CT-match, dwell or hotspot checks",
+        "No CaseRefused is raised inside an except block in convert.py",
+        "A patient with no plan_<n>/ folder gets no output folder and one patient-level row with outcome skipped and REASON_NO_PLANS; a patient whose plans are all refused is renamed into place and gets one refused row per plan",
+        "An RTSTRUCT whose RTReferencedSeriesSequence item for the planning CT has no ContourImageSequence refuses the plan (the end-slice check cannot run)",
+        "convert_report.csv in out_root has one row per plan plus a patient-level row when a patient is skipped or fails with OSError; columns patient, folder, outcome, reason, files (';'-joined), skipped_series",
+        "A monkeypatched OSError while writing gives a patient-level refused row with a fixed reason and removes the partial folder",
+        "CT slices are sorted ascending by the projection of ImagePositionPatient on the slice normal (cross product of the IOP row and column cosines); A2.1's reference is the writer's origin, spacing and identity direction"
+      ]
+    },
+    {
+      "id": "task-05",
+      "title": "masks and applicators via DicomRTTool",
+      "depends_on": [
+        "task-04"
+      ],
+      "files": [
+        "src/rt_dataprep/masks.py",
+        "src/rt_dataprep/convert.py",
+        "tests/test_masks.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/masks.py": "create",
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_masks.py": "create"
+      },
+      "test_approach": "Synthetic CT + RTSTRUCT (task-03 writer) through convert and through masks directly; count voxels; np.loadtxt applicator files.",
+      "criteria": [
+        "Kept ROIs exclude POINT ROIs, ROIs with no contour data, names containing 'dose' (case-insensitive) and applicator channels; format_name (lowercase, non-alphanumerics removed) of the kept names must be non-empty and unique case-insensitively, else the plan is refused",
+        "DicomRTTool 6.2 runs once per plan inside the task-02 wrapper on a temp folder of hard links (copy fallback) to only the planning CT slices and the RTSTRUCT, placed inside the patient's partial folder and removed in every outcome: DicomReaderWriter(arg_max=False, verbose=False), walk_through_folders, set_contour_names_and_associations(contour_names=...), set_index(index of the planning CT SeriesInstanceUID), get_images_and_mask() (vault: dicomrttool-6-api-and-mclahe-deps)",
+        "Verification after the call: exactly one index carries the planning CT UID with the RTSTRUCT linked; every kept ROI is in mask_dictionary under ROIName.lower() with at least one voxel; each mask's size, origin, spacing and direction equal the CT's within ORIGIN_ATOL_MM/DIRECTION_ATOL; otherwise CaseRefused",
+        "A2.2: a cube ROI gives a {0,1} uint8 <format_name>.nii.gz on the CT grid whose voxel count equals the cube volume (+-1 slice edge)",
+        "A2.2b: two overlapping ROIs both keep their full voxel count",
+        "A2.2c: a kept ROI whose mask comes back empty refuses the plan",
+        "A2.3: a BRACHY_CHANNEL ROI gives <alnum of SourceApplicatorID>.nii.gz (gzip text written by np.savetxt fmt '%.4f', temp name also ending .nii.gz) that np.loadtxt reads back into its contour points within 1e-4; the ROI name is used when no RTPLAN channel references it; POINT ROIs, empty ROIs and 'dose' names produce no file; clashing or empty output names refuse the plan",
+        "Guardrail (commit gate): no added line puts mrn/patient_id next to a run of 6-10 digits (dates go through a variable defined on its own line) and no added line accesses an underscore-prefixed attribute of another module",
+        "Linked means the RTSTRUCT's SeriesInstanceUID is in series_instances_dictionary[index].RTs; a plan with no kept ROIs does not run DicomRTTool and converts",
+        "After the tolerance check each mask gets CopyInformation(planning CT); the test asserts exact size/origin/spacing/direction equality with planning_ct.nii.gz",
+        "Applicator points are concatenated in ROIContourSequence / ContourSequence order",
+        "No CaseRefused is raised inside an except block in masks.py"
+      ]
+    },
+    {
+      "id": "task-06",
+      "title": "series.csv, PHI end-to-end, rerun safety and CLI",
+      "depends_on": [
+        "task-05"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "src/rt_dataprep/__main__.py",
+        "tests/test_convert.py",
+        "tests/test_cli.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_convert.py": "modify",
+        "tests/test_cli.py": "create"
+      },
+      "test_approach": "End-to-end synthetic org tree; capfd + caplog for PHI; file hashes before/after; subprocess or main(argv) for the CLI.",
+      "criteria": [
+        "Each converted plan folder has series.csv with one row per written file and the columns file, kind, modality, series_description, series_instance_uid, study_instance_uid, frame_of_reference_uid, series_date, roi_name, dose_summation_type, reg_matrix, rtplan_uid, rtplan_label, rtplan_date, fractions_planned",
+        "series.csv values per kind: ct row = the CT's UIDs, SeriesDescription, SeriesDate, reg_matrix 'identity'; dose row = modality RTDOSE, its UIDs (summed BEAM: ';'-joined series_instance_uid), dose_summation_type; mask and applicator rows = modality RTSTRUCT, the RTSTRUCT's UIDs, roi_name = ROIName; plan columns on every row; DA values written raw; no row for series.csv itself",
+        "A2.4d: the plan folder's series.csv carries rtplan_label, rtplan_date and fractions_planned (FractionGroupSequence[0].NumberOfFractionsPlanned)",
+        "A2.10: a CT slice with a readable header and truncated pixel data, and a broken RTSTRUCT that DicomRTTool fails on, each refuse with a fixed reason; with pytest capfd and caplog, neither the exception chain nor any log record, warning or fd-level stdout/stderr contains the synthetic patient id, the tmp path or a UID; the test calls both convert() (report + capfd/caplog) and the public per-plan function (convert_plan) and walks __cause__/__context__ recursively",
+        "A2.11: after a run every file in the org tree has the same hash as before, and a rerun reports every patient as skipped",
+        "A2.12: python -m rt_dataprep convert <org> <out>, run as a subprocess, runs end to end on a synthetic tree, writes convert_report.csv, and exits with a path-free message on an OSError",
+        "Guardrail (commit gate): no added line puts mrn/patient_id next to a run of 6-10 digits (dates go through a variable defined on its own line) and no added line accesses an underscore-prefixed attribute of another module",
+        "A2.9 (convert part): a tree built by organize() with the RTSTRUCT in another study converts (outcome converted, planning_ct and masks written)"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01",
+      "task-02",
+      "task-03"
+    ],
+    [
+      "task-04"
+    ],
+    [
+      "task-05"
+    ],
+    [
+      "task-06"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-03",
+    "spec": "docs/specs/2026-11-03-f2a-convert.md",
+    "profile": "project-profile.yml",
+    "scope": "PR 1 of F2a (see spec Delivery)",
+    "vault_guardrails": [
+      "dicomrttool-6-api-and-mclahe-deps",
+      "pydicom-validates-lazily-on-first-tag-access",
+      "third-party-loader-errors-and-warnings-embed-phi-paths",
+      "simpleitk-array-view-of-temporary-image-reads-freed-memory",
+      "record-completion-at-outcome-not-intent",
+      "phi-scanner-flags-large-counts-and-date-like-seeds"
+    ],
+    "pr_notes": [
+      "PR body: fx_<n>/fx_count renamed to plan_<n>/plan_count; already-organized trees must be re-organized",
+      "Hardening #18 (DicomRTTool links an RTSTRUCT to the last referenced series)"
+    ],
+    "commit_gate_landmines": [
+      "tests/test_organize.py:24 and tests/test_dicom_io.py:85 trip the MRN rule if edited: when touching either line, move the date into a variable on its own line",
+      "tests/test_dicom_io.py:17 (the package __file__ lookup) and docs/plans/2026-11-03-rt-dataprep/phase1.md:91 (the _read helper of utils augment) trip the private-API rule if edited: reword them without a dot before the underscore when touching them",
+      "Never write a dotted name whose last part starts with an underscore (module dot _name, package dot __main__) on an added line in any file type, docs and JSON included; drive the CLI with a subprocess running 'python -m rt_dataprep', never by importing the package's main module"
+    ]
+  }
+}

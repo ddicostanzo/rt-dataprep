@@ -1,0 +1,87 @@
+# F2a PR 1 findings (shared, append-only)
+
+Spec: docs/specs/2026-11-03-f2a-convert.md (REVIEWED). Plan: docs/plans/f2a-convert/plan.json (6 tasks, sequential).
+
+Summary: organize renames fx_<n> to plan_<n> and always copies the resolved RTSTRUCT (#7). convert reads each
+<patient>/plan_<n>/, follows RTPLAN -> RTSTRUCT -> CT by UID, writes planning_ct.nii.gz (float32 HU), dose.nii.gz
+(Gy on the CT grid; PLAN > FRACTION > BEAM-sum precedence), {0,1} masks via DicomRTTool 6.2 (verified after the call)
+and applicator text files, plus series.csv per plan folder and convert_report.csv. Every third-party call runs in a
+wrapper that captures warnings, logs and fd-level stdout/stderr and raises CaseRefused(reason) outside the except
+block. Read plan.json metadata.commit_gate_landmines before editing tests.
+
+Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytest -q --tb=short; uv run --group dev ruff check .
+
+## task-01
+- organize: fx_<n> -> plan_<n>, PatientRow.fx -> plans, report column plan_count; #7 adds the resolved RTSTRUCT via a struct_paths map. README renamed too.
+- Gate tripped when the patient id keyword and a 6-digit series time shared one line: times/dates go in a variable on their own line.
+- phase1.md F3/parity `fx` mentions left (legacy OSC tree really is fx_<n>); F2 flat line still there, cleaned up at the end.
+
+## task-02
+- dicom_io: CaseRefused(reason), quiet_call(fn, reason) (logging.disable, sitk warnings off, warnings recorded, pydicom quiet, fd 1/2 dup2 to a temp file and sys.stdout/stderr to devnull; raises after the except block). read_header raises after its except block.
+- Deps: simpleitk>=2.5.7, dicomrttool==6.2.0.
+- Private-API scan flags dotted reads of the exception dunders (cause, context) in tests: read them with operator.attrgetter in a helper.
+- Under capfd, pytest replaces sys.stdout with its capture file, not fd 1: both levels need redirecting.
+
+## task-03
+- tests/synthetic_dicom.py: write_rtstruct_rois(path, ct, rois, contour_images=True, sop_uid=None, **meta); roi dicts have number, name, kind (box|point|empty|channel), interpreted; box=((z0,z1),(y0,y1),(x0,x1)) inclusive indices. write_rtplan gains label=.
+- DicomRTTool 6.2 rounds vertices half-up and fills vertex voxels (boundary-inclusive): box vertices sit at the centres of the extreme voxels; half-step corners overcount (40 vs 24). Real contours drawn on voxel edges will rasterize one voxel larger per side: inherited legacy behaviour, recorded for review.
+- arg_max=False mask is (z, y, x, nROI+1) with channel 0 background.
+
+## review-group-1 (tasks 01-03): PASS, no BLOCKING
+- WARNING: quiet_call is not thread-safe for concurrent calls (process-wide state) — lock or document before parallel convert (#2).
+- WARNING: BaseException (KeyboardInterrupt/SystemExit) passes through quiet_call with its original message.
+- WARNING: #7 test lacks a case where the RTSTRUCT's other study also holds other files.
+- NOTE: _fds_quiet dups fds before creating the temp file (fd leak if TemporaryFile fails). NOTE: Python 3.14 context-aware warnings. NOTE: dicom_io imports SimpleITK at module level.
+
+## task-04
+- convert.py: convert(org_root, out_root, *, exclude_models) -> ConvertReport(rows); convert_plan(plan_dir, case_dir) -> PlanResult(files, ct_series_uid) is the seam for masks; write_atomic raises OSError(REASON_WRITE) so output failures are patient-level.
+- The CLI clause of task-04 criterion 1 (exit 1 with the reason) lands in task-06 with the convert subcommand (__main__ is task-06's file).
+- Two PLAN doses refuse even when a FRACTION exists (strict reading). Plan folders sorted numerically.
+- Missing-tag refusal catches AttributeError/KeyError/IndexError/TypeError/ValueError around the per-plan path: a coding bug surfaces as REASON_MISSING_TAG, not a crash.
+- sd.write_rtstruct writes no ContourImageSequence, so such plans are refused: organize->convert fixtures (A2.9) must use write_rtstruct_rois(contour_images=True).
+- Rescale test needs mixed slopes to tell Cast from SetOutputPixelType. Mutation checks (5) all fail the suite.
+
+## review-group-2 (task-04)
+- BLOCKING fixed by orchestrator: a sheared/gantry-tilted CT passed _check_volume and was written with wrong geometry; slices must now lie on the normal through the first slice (test_sheared_ct_is_refused). Spec step 2.2 updated.
+- Verified by probe: CT under 4 orientations + shuffled files exact; dose with relative/negative/absolute offsets identical; DoseGridScaling and PixelSpacing order right.
+- WARNING (deferred): broad (AttributeError, KeyError, IndexError, TypeError, ValueError) catch turns coding bugs into REASON_MISSING_TAG.
+- WARNING (deferred): no tests for non-identity CT orientation or negative/absolute dose offsets (writer is identity-only).
+- NOTE: an RTDOSE not naming the plan is silently ignored; a non-DICOM file (.DS_Store) in a plan folder refuses the plan.
+
+## task-05
+- masks.py: classify(struct, plan, taken) -> RoiPlan(kept, applicators); build_masks(...) -> {file: uint8 image}; write_applicator(points, path); format_name. Masks/classify run before case_dir.mkdir, so refusals leave no plan folder. Scratch folder via mkdtemp in the patient's partial folder, removed in finally.
+- DicomRTTool's constructor calls set_contour_names_and_associations(None) itself; mask_dictionary holds every requested name even when absent/empty, so the voxel check is the real guard.
+- Extra check: DicomRTTool's ROI number for the lowercased name must equal the kept ROI's number (case-only name collision with a POINT ROI).
+- Implementation written before tests; 47 mutations run, 45 killed, 1 equivalent survivor.
+- Open: two channels on one ROI use the first SourceApplicatorID; mixed open/closed ROI treated as applicator; format_name keeps Unicode alphanumerics.
+
+## review-group-3 (task-05): PASS, no BLOCKING
+- Verified against DicomRTTool source: name->channel mapping, axis order, CopyInformation only after tolerance checks, binarisation, overlaps, applicator order/gzip, scratch cleanup on every path, PHI.
+- WARNING (deferred): an ROI mixing POINT and CLOSED_PLANAR contours is kept and its POINT items reach return_mask unchecked.
+- NOTE: a skipped ROI sharing a kept ROI's lowercased name and listed first refuses a valid plan; temp PHI copies sit in the partial folder during a run; spacing compared with the origin tolerance.
+
+## task-06
+- series.csv written last via temp name + os.replace; listed in the report's files column, not in PlanResult.files. Summed-BEAM dose row ';'-joins deduplicated UIDs. Absent plan/series tags -> ''. reg_matrix 'identity' on the CT row only.
+- RoiPlan.applicators widened to (file, points, ROIName) for roi_name (masks.py touched in its own commit).
+- CLI: convert subcommand; out inside org exits 1 with exactly the REASON constant.
+- Broken-RTSTRUCT fixture (empty RTROIIdentificationCodeSequence) makes DicomRTTool log the tmp path: the PHI test fails with quiet_call bypassed, so it bites.
+
+## review-group-4 (task-06): PASS, no BLOCKING
+- WARNING: only the broken-RTSTRUCT half of A2.10 bites (ITK's CT read error carries no path, so the truncated-CT case cannot catch a wrapper regression).
+- WARNING: series.csv / convert_report.csv opened without encoding='utf-8': a SeriesDescription the locale cannot encode refuses the plan as REASON_MISSING_TAG.
+- NOTE: mask rows take ReferencedFrameOfReferenceSequence[0] as frame; CLI re-raises unexpected ValueErrors with a traceback; a missing org root leaves an empty out root.
+
+## review-loop-pass-1
+- Spec axis: 51/52 criteria MET; PARTIAL: read_header not through quiet_call (deferred). Unrequested: broad catch, raw OSError from os.replace, extra conservative checks, input OSErrors as IO_ERROR (all deferred).
+- Correctness: BLOCKING: coronal/sagittal planning CT passes _check_volume; DicomRTTool matches slices by patient z only, so all contours land on slice 0 and the plan reports converted. DEFERRED: ROI in another frame rasterized onto the CT; write_applicator raw OSError; rerun overwrites the report.
+- STUCK: escalation counter tripped (same category, CT geometry accepted then mishandled, returned twice). Halted; handoff docs/handoffs/f2-convert-handoff.md.
+
+## review-loop-pass-1-fix (/dev continue, new session)
+- BLOCKING fixed in e6ed1da: _check_volume refuses a CT whose slice normal is not along z, and the mask check in masks.py requires each mask's voxel slices to equal the CT slice indices its non-POINT contours map to through the CT's full geometry (closes the class: z-only lookup, contours off the CT snapped onto an end slice). 3 tests; spec steps 2.2 and the mask verify list updated.
+- Gotcha: the broad catch in convert_plan reported a NameError-style shadowing bug as REASON_MISSING_TAG (#33).
+
+## review-loop-pass-1-verify
+- PASS: coronal and sagittal refuse; HFS/FFS/FFP/HFP axial convert to the right physical place; nothing weakened; 156 passed, ruff clean.
+- DEFERRED: a contour exactly halfway between slices refuses (rounding differs from DicomRTTool), noted on #32.
+- Deferred findings filed as hardening issues #20-#33.
+- User decision: the Codex P1 "ROI on another frame of reference" (#29) is BLOCKING (same silent-wrong-mask class). Fixed in 4a754d6: classify refuses a mask or applicator ROI whose ReferencedFrameOfReferenceUID is not the planning CT's. Verify pass: PASS, 157 passed, ruff clean. A struct with ROIs on several frames now refuses (intended until registration is supported).

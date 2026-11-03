@@ -106,10 +106,18 @@ def write_rtstruct(path, ct, sop_uid=None, extra_series_uids=(), **meta):
     series chain. Returns its SOPInstanceUID.
     """
     ds = _dataset(path, pydicom.uid.RTStructureSetStorage, 'RTSTRUCT', sop_uid=sop_uid, frame_uid=ct['frame_uid'], **meta)
+    _reference_ct(ds, ct, extra_series_uids)
+    _save(ds)
+    return ds.SOPInstanceUID
+
+
+def _reference_ct(ds, ct, extra_series_uids=(), slices=False):
     referenced = []
     for uid in (ct['series_uid'], *extra_series_uids):
         series = Dataset()
         series.SeriesInstanceUID = uid
+        if slices and uid == ct['series_uid']:
+            series.ContourImageSequence = [_image_reference(sop) for sop in ct['sop_uids']]
         referenced.append(series)
     study = Dataset()
     study.ReferencedSOPInstanceUID = generate_uid()
@@ -118,12 +126,17 @@ def write_rtstruct(path, ct, sop_uid=None, extra_series_uids=(), **meta):
     frame.FrameOfReferenceUID = ct['frame_uid']
     frame.RTReferencedStudySequence = [study]
     ds.ReferencedFrameOfReferenceSequence = [frame]
-    _save(ds)
-    return ds.SOPInstanceUID
+
+
+def _image_reference(sop_uid):
+    image = Dataset()
+    image.ReferencedSOPClassUID = pydicom.uid.CTImageStorage
+    image.ReferencedSOPInstanceUID = sop_uid
+    return image
 
 
 def write_rtplan(path, struct_sop_uid, positions_mm, times=None, fractions=1, sop_uid=None, frame_uid=None,
-                  dose_references=None, channels=None, plan_date=None, plan_time=None, **meta):
+                  dose_references=None, channels=None, plan_date=None, plan_time=None, label=None, **meta):
     """
     A brachy RTPLAN: ReferencedStructureSetSequence -> `struct_sop_uid`, one fraction group with `fractions`
     NumberOfFractionsPlanned (None writes it empty), one channel whose control points are `positions_mm` (N, 3) patient
@@ -132,7 +145,8 @@ def write_rtplan(path, struct_sop_uid, positions_mm, times=None, fractions=1, so
     channels: a list of dicts that replaces the single channel (positions_mm is then ignored): applicator_id (the
     SourceApplicatorID), dwells_mm (N, 3), times (default 1 each), roi (ReferencedROINumber, default the channel
     number), step_size (SourceApplicatorStepSize, omitted when None), paired (default True: control points 2k and 2k+1
-    both at dwell k, the time passing between them). plan_date / plan_time set RTPlanDate / RTPlanTime (omitted when None).
+    both at dwell k, the time passing between them). plan_date / plan_time / label set RTPlanDate / RTPlanTime / RTPlanLabel
+    (omitted when None).
     Returns its SOPInstanceUID.
     """
     ds = _dataset(path, pydicom.uid.RTPlanStorage, 'RTPLAN', sop_uid=sop_uid, frame_uid=frame_uid, **meta)
@@ -140,6 +154,8 @@ def write_rtplan(path, struct_sop_uid, positions_mm, times=None, fractions=1, so
         ds.RTPlanDate = plan_date
     if plan_time:
         ds.RTPlanTime = plan_time
+    if label:
+        ds.RTPlanLabel = label
     reference = Dataset()
     reference.ReferencedSOPClassUID = pydicom.uid.RTStructureSetStorage
     reference.ReferencedSOPInstanceUID = struct_sop_uid
@@ -210,17 +226,9 @@ def write_rtstruct_contours(path, contours, sop_uid=None, brachy=True, **meta):
         roi = Dataset()
         roi.ROINumber, roi.ROIName = number, name
         rois.append(roi)
-        items = []
-        for k, chunk in enumerate(np.array_split(np.asarray(points, dtype=float), -(-len(points) // 10))):
-            item = Dataset()
-            item.ContourNumber = k + 1
-            item.ContourGeometricType = 'OPEN_NONPLANAR' if brachy else 'CLOSED_PLANAR'
-            item.NumberOfContourPoints = len(chunk)
-            item.ContourData = [float(v) for v in chunk.ravel()]
-            items.append(item)
         roi_contour = Dataset()
         roi_contour.ReferencedROINumber = number
-        roi_contour.ContourSequence = items
+        roi_contour.ContourSequence = _contour_items(points, 'OPEN_NONPLANAR' if brachy else 'CLOSED_PLANAR')
         roi_contours.append(roi_contour)
         if brachy:
             observation = Dataset()
@@ -230,6 +238,87 @@ def write_rtstruct_contours(path, contours, sop_uid=None, brachy=True, **meta):
             observations.append(observation)
     ds.StructureSetROISequence = rois
     ds.ROIContourSequence = roi_contours
+    ds.RTROIObservationsSequence = observations
+    _save(ds)
+    return ds.SOPInstanceUID
+
+
+def _contour_item(number, geometric_type, points):
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    item = Dataset()
+    item.ContourNumber = number
+    item.ContourGeometricType = geometric_type
+    item.NumberOfContourPoints = len(points)
+    item.ContourData = [float(v) for v in points.ravel()]
+    return item
+
+
+def _contour_items(points, geometric_type):
+    """ContourSequence items of at most 10 points each."""
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    chunks = np.array_split(points, -(-len(points) // 10))
+    return [_contour_item(k + 1, geometric_type, chunk) for k, chunk in enumerate(chunks)]
+
+
+def write_rtstruct_rois(path, ct, rois, contour_images=True, sop_uid=None, **meta):
+    """
+    One RTSTRUCT on the frame of reference of the CT series dict `ct` (from write_ct_series), referencing that series, with
+    any mix of ROIs. `rois` is a list of dicts with number, name, interpreted (the RTROIInterpretedType, default 'ORGAN';
+    None writes no observation) and kind:
+      'box': box=((z0, z1), (y0, y1), (x0, x1)), INCLUSIVE voxel indices; one CLOSED_PLANAR rectangle per slice z0..z1 with
+             its corners at the CENTRES of the extreme voxels, in patient mm (DicomRTTool 6.2 rounds vertices to the nearest
+             voxel and fills the vertex voxels, so half-step corners would grow the box by a voxel on the high side and
+             this gives exactly the box), each contour carrying a ContourImageSequence to its slice.
+      'point': point=(x, y, z) patient mm; a POINT contour.
+      'empty': an ROIContourSequence item with no ContourSequence.
+      'channel': points=(N, 3) patient mm; OPEN_NONPLANAR contours of at most 10 points.
+    contour_images=False leaves the ContourImageSequence (the slice list) out of the referenced series item.
+    Axial identity-orientation CT only (what write_ct_series writes). Returns its SOPInstanceUID.
+    """
+    ds = _dataset(path, pydicom.uid.RTStructureSetStorage, 'RTSTRUCT', sop_uid=sop_uid, frame_uid=ct['frame_uid'], **meta)
+    _reference_ct(ds, ct, slices=contour_images)
+    slice_headers = [pydicom.dcmread(p, stop_before_pixels=True) for p in ct['paths']]
+    rows, cols = slice_headers[0].PixelSpacing  # between rows (y), between columns (x)
+    rows_out, contours_out, observations = [], [], []
+    for roi in rois:
+        number = roi['number']
+        entry = Dataset()
+        entry.ROINumber, entry.ROIName = number, roi['name']
+        entry.ReferencedFrameOfReferenceUID = ct['frame_uid']
+        entry.ROIGenerationAlgorithm = 'AUTOMATIC'
+        rows_out.append(entry)
+        contour = Dataset()
+        contour.ReferencedROINumber = number
+        contour.ROIDisplayColor = [255, 0, 0]
+        kind = roi['kind']
+        if kind == 'box':
+            (z0, z1), (y0, y1), (x0, x1) = roi['box']
+            x_mm = [float(slice_headers[0].ImagePositionPatient[0]) + i * cols for i in (x0, x1)]
+            y_mm = [float(slice_headers[0].ImagePositionPatient[1]) + i * rows for i in (y0, y1)]
+            items = []
+            for k in range(z0, z1 + 1):
+                z = float(slice_headers[k].ImagePositionPatient[2])
+                corners = [(x_mm[0], y_mm[0], z), (x_mm[1], y_mm[0], z),
+                           (x_mm[1], y_mm[1], z), (x_mm[0], y_mm[1], z)]
+                item = _contour_item(len(items) + 1, 'CLOSED_PLANAR', corners)
+                item.ContourImageSequence = [_image_reference(ct['sop_uids'][k])]
+                items.append(item)
+            contour.ContourSequence = items
+        elif kind == 'point':
+            contour.ContourSequence = [_contour_item(1, 'POINT', roi['point'])]
+        elif kind == 'channel':
+            contour.ContourSequence = _contour_items(roi['points'], 'OPEN_NONPLANAR')
+        elif kind != 'empty':
+            raise ValueError(f'unknown ROI kind {kind!r}')
+        contours_out.append(contour)
+        if roi.get('interpreted', 'ORGAN'):
+            observation = Dataset()
+            observation.ObservationNumber = number
+            observation.ReferencedROINumber = number
+            observation.RTROIInterpretedType = roi.get('interpreted', 'ORGAN')
+            observations.append(observation)
+    ds.StructureSetROISequence = rows_out
+    ds.ROIContourSequence = contours_out
     ds.RTROIObservationsSequence = observations
     _save(ds)
     return ds.SOPInstanceUID
