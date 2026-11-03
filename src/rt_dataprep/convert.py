@@ -184,7 +184,7 @@ def _convert_plan(plan_dir, case_dir):
     for name, image in mask_images.items():
         write_atomic(image, case_dir / name)
         files.append(name)
-    for name, points in rois.applicators:
+    for name, points, _ in rois.applicators:
         masks.write_applicator(points, case_dir / name)
         files.append(name)
     return PlanResult(files, series_uid)

@@ -31,7 +31,7 @@ REASON_MASK_GRID = 'a mask is not on the planning CT grid'
 @dataclass
 class RoiPlan:
     kept: list = field(default_factory=list)  # [(ROINumber, ROIName, '<format_name>.nii.gz')] in RTSTRUCT order
-    applicators: list = field(default_factory=list)  # [('<name>.nii.gz', (N, 3) points in patient mm)] in RTSTRUCT order
+    applicators: list = field(default_factory=list)  # [('<name>.nii.gz', (N, 3) points in patient mm, ROIName)] in RTSTRUCT order
 
 
 def format_name(text):
@@ -65,7 +65,7 @@ def classify(struct, plan, taken=()):
             continue
         if 'OPEN_NONPLANAR' in types or interpreted.get(number) == 'BRACHY_CHANNEL':
             stem = ''.join(c for c in channel_ids.get(number, name) if c.isalnum())
-            result.applicators.append((stem + SUFFIX, np.concatenate(points)))
+            result.applicators.append((stem + SUFFIX, np.concatenate(points), name))
             names.append((stem + SUFFIX).lower())
         else:
             result.kept.append((number, name, format_name(name) + SUFFIX))
