@@ -12,3 +12,26 @@ Design was settled interactively in the planning session (2026-11-03); no separa
 - Tasks run sequentially in the session worktree (task-02 depends on task-01), not per-task worktrees.
 - DicomRTTool, SimpleITK and the mclahe extra are deferred to F2: mclahe pins numpy 1.26 in a universal uv lock.
 - Implementer never sets CLAUDE_ALLOW_PRIVATE_API; any third-party private access is reported to the orchestrator.
+
+## task-01
+Files: `pyproject.toml`, `uv.lock`, `README.md`, `src/rt_dataprep/{__init__,__main__,dicom_io}.py`, `tests/synthetic_dicom.py`, `tests/test_dicom_io.py`.
+
+Decisions
+- `__main__.main(argv=None)`: argparse with required subcommand `organize SRC OUT`; after parsing it calls `parser.error('organize is not wired up yet')`. task-02 replaces that line with the import and call of `organize`.
+- `dicom_io.read_header(path)` raises `OSError(REASON_UNREADABLE)` for any failure (non-DICOM, truncated, missing) with `from None`, so no path reaches the message. `_pydicom_quiet` also wraps `warnings.catch_warnings` + `simplefilter('ignore')`, then forces `_ = element.value` for every element.
+- Runtime deps are `pydicom>=3` and `numpy`. pytest `pythonpath = ["tests"]` so tests do `import synthetic_dicom as sd`.
+- `[tool.ruff.lint] select = ["E4","E7","E9","F","B"]` is pinned: ruff 0.17's built-in default is much wider (C408, BLE001, RUF059, I001 ...) and would fail the ported file. Ported code got `zip(..., strict=True)` for B905.
+
+Gotchas
+- pydicom validates lazily; the test asserts no warnings and no log records with the forced conversion, and fails (PN length warning) when the loop is removed (checked).
+- `dcmread` raises `InvalidDicomError`, which is not an OSError, hence the broad catch in `read_header`.
+- Test for an empty `__init__` reads the file text, since `vars(rt_dataprep)` gains submodules once imported.
+
+Synthetic writers (tests/synthetic_dicom.py). Shared `**meta` keywords on every writer, forwarded to `_dataset`: `patient_id`, `study_uid`, `series_date`, `series_time`, `manufacturer_model_name`. Unset means: PatientID `SYNTHETIC_ID`, fresh StudyInstanceUID, date/time/model tags omitted. Each writer returns the SOPInstanceUID except the CT writer.
+- `write_ct_series(folder, values, spacing=(1.0,1.0,1.0), origin=(0.0,0.0,0.0), series_uid=None, frame_uid=None, prefix='ct', image_type=None, **meta)` returns `{'series_uid','frame_uid','study_uid','sop_uids','paths'}`; all slices share one study; `image_type` is the ImageType list (None omits it); series_date/series_time/manufacturer_model_name apply to every slice.
+- `write_rtstruct(path, ct, sop_uid=None, extra_series_uids=(), **meta)`
+- `write_rtplan(path, struct_sop_uid, positions_mm, times=None, fractions=1, sop_uid=None, frame_uid=None, dose_references=None, channels=None, plan_date=None, plan_time=None, **meta)` plan_date/plan_time set RTPlanDate/RTPlanTime.
+- `write_rtstruct_contours(path, contours, sop_uid=None, brachy=True, **meta)`
+- `write_rtdose(path, stored, scaling=1e-4, position=(0,0,0), orientation=(1,0,0,0,1,0), pixel_spacing=(2.0,3.0), offsets=None, plan_sop_uid=None, frame_uid=None, units='GY', dose_type='PHYSICAL', summation='PLAN', number_of_frames=None, invalid_values=False, sop_uid=None, **meta)`
+- `write_reg(path, study_uid, other_study_uid, sop_uid=None, **meta)`: Modality REG in `study_uid`, with `StudiesContainingOtherReferencedInstancesSequence` naming `other_study_uid` (a UID string or a list of them).
+- The RTSTRUCT writer has no CT-study default: pass `study_uid=ct['study_uid']` (and the same for RTPLAN/RTDOSE/REG) to put objects in the CT's study; the default is a fresh study each call.
