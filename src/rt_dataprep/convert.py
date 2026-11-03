@@ -172,7 +172,7 @@ def _convert_plan(plan_dir, case_dir):
     _check_contour_images(struct, series_uid, ct_slices)
     ct = _read_ct([p for p, _ in ct_slices], ct_slices[0][1])
     dose, dose_heads = _read_dose_sum(headers, plan, str(ct_slices[0][1].FrameOfReferenceUID), ct)
-    rois = masks.classify(struct, plan, taken=(CT_NAME, DOSE_NAME))
+    rois = masks.classify(struct, plan, str(ct_slices[0][1].FrameOfReferenceUID), taken=(CT_NAME, DOSE_NAME))
     struct_path = next(p for p, ds in headers if ds is struct)
     # The scratch folder of DicomRTTool goes in the patient's partial folder: a stale partial's cleanup removes it too.
     mask_images = masks.build_masks(rois.kept, [p for p, _ in ct_slices], struct_path, str(struct.SeriesInstanceUID),

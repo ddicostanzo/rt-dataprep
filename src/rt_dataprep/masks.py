@@ -21,6 +21,7 @@ from rt_dataprep.dicom_io import CaseRefused, quiet_call
 SUFFIX = '.nii.gz'  # also on the applicator text files: numpy gzips by the suffix
 
 REASON_ROI_NAMES = 'ROI names give an empty or clashing output file name'
+REASON_ROI_FRAME = 'a kept ROI is on another frame of reference than the planning CT'
 REASON_MASK_RUN = 'DicomRTTool could not turn the RTSTRUCT into masks'
 REASON_MASK_LINK = 'DicomRTTool did not link the RTSTRUCT to exactly one planning CT series'
 REASON_MASK_MISSING = 'a kept ROI is missing from the DicomRTTool result or maps to another ROI'
@@ -40,13 +41,14 @@ def format_name(text):
     return ''.join(c for c in str(text).lower() if c.isalnum())
 
 
-def classify(struct, plan, taken=()):
+def classify(struct, plan, frame_uid, taken=()):
     """
     The RoiPlan of an RTSTRUCT (and the RTPLAN naming its applicator channels).
 
     Not kept: ROIs with no contour data, POINT ROIs (every contour POINT) and names containing 'dose'. Of the rest, ROIs
     with an OPEN_NONPLANAR contour or RTROIInterpretedType BRACHY_CHANNEL are applicators, the others masks. An empty
-    output name, or two names equal ignoring case (also with `taken`, names already used in the plan folder), refuse.
+    output name, or two names equal ignoring case (also with `taken`, names already used in the plan folder), refuse, as
+    does a mask or applicator ROI whose ReferencedFrameOfReferenceUID is not `frame_uid` (the planning CT's).
     """
     contours = {int(c.ReferencedROINumber): c for c in struct.get('ROIContourSequence', [])}
     interpreted = {int(o.ReferencedROINumber): str(o.get('RTROIInterpretedType', ''))
@@ -64,6 +66,8 @@ def classify(struct, plan, taken=()):
         types = {str(item.ContourGeometricType) for item in items}
         if not points or sum(len(p) for p in points) == 0 or types == {'POINT'} or 'dose' in name.lower():
             continue
+        if str(roi.ReferencedFrameOfReferenceUID) != frame_uid:  # its points would be read as CT coordinates
+            raise CaseRefused(REASON_ROI_FRAME)
         if 'OPEN_NONPLANAR' in types or interpreted.get(number) == 'BRACHY_CHANNEL':
             stem = ''.join(c for c in channel_ids.get(number, name) if c.isalnum())
             result.applicators.append((stem + SUFFIX, np.concatenate(points), name))

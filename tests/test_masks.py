@@ -216,6 +216,15 @@ def test_a_contour_beyond_the_last_ct_slice_refuses_the_plan(tmp_path):
     assert refused(tmp_path, folder) == masks.REASON_MASK_SLICES
 
 
+def test_a_kept_roi_on_another_frame_of_reference_refuses_the_plan(tmp_path):
+    folder = make_plan(tmp_path, [box(1, 'A', (1, 3), (2, 5), (3, 7)), box(2, 'B', (1, 3), (2, 5), (3, 7))])
+
+    def other_frame(ds):
+        ds.StructureSetROISequence[1].ReferencedFrameOfReferenceUID = pydicom.uid.generate_uid()
+    edit(folder / 'struct.dcm', other_frame)
+    assert refused(tmp_path, folder) == masks.REASON_ROI_FRAME
+
+
 # ---------------------------------------------------------------- which ROIs are kept
 
 def test_point_empty_and_dose_rois_produce_no_file_and_the_plan_converts(tmp_path):
