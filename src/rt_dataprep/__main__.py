@@ -12,7 +12,10 @@ def main(argv=None):
     sub.add_argument('out', help='output root')
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format='%(message)s')
-    organize(args.src, args.out)
+    try:
+        organize(args.src, args.out)
+    except OSError:  # the message names a path, which can hold a patient id
+        parser.exit(1, 'rt_dataprep: file system error on the source or output root\n')
 
 
 if __name__ == '__main__':

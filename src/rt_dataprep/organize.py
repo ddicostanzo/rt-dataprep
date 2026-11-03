@@ -22,6 +22,7 @@ REASON_NAME_CLAIMED = 'output folder name already used by an earlier patient fol
 REASON_MIXED_IDS = 'source folder holds more than one PatientID'
 REASON_NO_DICOM = 'source folder holds no readable DICOM file'
 REASON_OUTSIDE_ROOT = 'output folder resolves outside the output root'
+REASON_IO_ERROR = 'file system error while reading or copying; nothing kept for this patient'
 
 
 @dataclass
@@ -43,8 +44,13 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',)):
     src_root, out_root = Path(src_root), Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
     claimed = set()  # casefolded output names taken in this run: a case-insensitive filesystem would merge them
-    rows = [_organize_patient(folder, out_root, claimed, exclude_models)
-            for folder in sorted(p for p in src_root.iterdir() if p.is_dir())]
+    rows = []
+    for folder in sorted(p for p in src_root.iterdir() if p.is_dir()):
+        try:
+            rows.append(_organize_patient(folder, out_root, claimed, exclude_models))
+        except OSError:  # its message names a path, i.e. the patient: report a fixed reason and go on
+            rows.append(PatientRow(sanitize_path_component(folder.name), 0, 0, 0, OUTCOME_REFUSED, REASON_IO_ERROR))
+            log.warning('organize: %s', REASON_IO_ERROR)
     with open(out_root / REPORT_NAME, 'w', newline='') as handle:
         writer = csv.writer(handle)
         writer.writerow(['patient', 'fx_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'])
@@ -76,9 +82,19 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
     if target.exists():
         return PatientRow(name, 0, 0, unreadable, OUTCOME_SKIPPED, REASON_EXISTS)
     cases, misc = _group(headers, exclude_models)
-    for n, paths in enumerate(cases, start=1):
-        _copy_all(paths, target / f'fx_{n}')
-    _copy_all(misc, target / 'misc_files')
+    # Build under a hidden name and rename at the end: a run that dies part-way leaves no folder that a later run
+    # would skip as already done.
+    partial = out_root / f'.{name}.partial'
+    shutil.rmtree(partial, ignore_errors=True)
+    try:
+        for n, paths in enumerate(cases, start=1):
+            _copy_all(paths, partial / f'fx_{n}')
+        _copy_all(misc, partial / 'misc_files')
+        partial.mkdir(exist_ok=True)
+        partial.rename(target)
+    except OSError:
+        shutil.rmtree(partial, ignore_errors=True)
+        raise
     return PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED)
 
 

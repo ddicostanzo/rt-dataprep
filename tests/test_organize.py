@@ -65,8 +65,8 @@ def tree(tmp_path):
 
 def test_a1_1_two_planning_studies_numbered_by_date(tree):
     src, out = tree
-    late = planning_study(src / PID / 'late', date=LATE)  # folder order must not decide the numbering
-    early = planning_study(src / PID / 'early', date=EARLY)
+    late = planning_study(src / PID / 'a', date=LATE)  # name order disagrees with date order: dates must decide
+    early = planning_study(src / PID / 'z', date=EARLY)
     report = organize(src, out)
     assert modalities(out / PID / 'fx_1') == Counter(CT=3, RTSTRUCT=1, RTPLAN=1, RTDOSE=1)
     assert modalities(out / PID / 'fx_2') == Counter(CT=3, RTSTRUCT=1, RTPLAN=1, RTDOSE=1)
@@ -126,10 +126,10 @@ def test_a1_5_two_plans_on_one_ct_and_struct(tree):
     first = planning_study(src / PID / 'x', tag='')
     study = dict(patient_id=PID, study_uid=first['study'])
     plan2 = sd.write_rtplan(src / PID / 'x' / 'plan2.dcm', first['struct'], np.zeros((2, 3)), plan_date=EARLY,
-                            plan_time='120000', **study)
+                            plan_time='090000', **study)  # earlier than plan.dcm's 110000, against name order
     dose2 = sd.write_rtdose(src / PID / 'x' / 'dose2.dcm', np.ones((1, 2, 2)), plan_sop_uid=plan2, **study)
     organize(src, out)
-    for fx, plan, dose in (('fx_1', first['plan'], first['dose']), ('fx_2', plan2, dose2)):  # plan time orders them
+    for fx, plan, dose in (('fx_1', plan2, dose2), ('fx_2', first['plan'], first['dose'])):  # plan time orders them
         folder = out / PID / fx
         assert modalities(folder) == Counter(CT=3, RTSTRUCT=1, RTPLAN=1, RTDOSE=1)
         assert {header(p).SOPInstanceUID for p in folder.iterdir() if header(p).Modality in ('RTPLAN', 'RTDOSE')} == {plan, dose}
@@ -250,3 +250,35 @@ def test_cli_runs_organize_and_exits_zero(tree):
     assert done.returncode == 0
     assert (out / PID / 'fx_1').is_dir()
     assert PID not in done.stdout + done.stderr
+
+
+def test_copy_failure_keeps_nothing_leaks_nothing_and_reruns(tree, monkeypatch, caplog):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    real_copy, calls = org.shutil.copy2, []
+
+    def failing_copy(source, target):
+        calls.append(target)
+        if len(calls) == 3:
+            raise OSError(f'disk full writing {target}')  # a real OSError names the path, i.e. the patient
+        return real_copy(source, target)
+
+    monkeypatch.setattr(org.shutil, 'copy2', failing_copy)
+    with caplog.at_level(logging.DEBUG):
+        report = organize(src, out)
+    assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_REFUSED, org.REASON_IO_ERROR)]
+    assert sorted(p.name for p in out.iterdir()) == ['organize_report.csv']  # no target, no partial left behind
+    assert PID not in caplog.text and str(out.parent) not in caplog.text
+    monkeypatch.setattr(org.shutil, 'copy2', real_copy)
+    assert organize(src, out).rows[0].outcome == org.OUTCOME_ORGANIZED  # the failed patient is redone, not skipped
+
+
+def test_cli_file_system_error_exits_1_without_paths(tmp_path):
+    src = tmp_path / 'SYNTHETIC_SRC'
+    planning_study(src / PID / 'p')
+    out = tmp_path / 'SYNTHETIC_OUT'
+    out.write_text('not a directory')
+    result = subprocess.run([sys.executable, '-m', 'rt_dataprep', 'organize', str(src), str(out)],
+                            capture_output=True, text=True)
+    assert result.returncode == 1
+    assert 'SYNTHETIC_' not in result.stdout + result.stderr and str(tmp_path) not in result.stderr

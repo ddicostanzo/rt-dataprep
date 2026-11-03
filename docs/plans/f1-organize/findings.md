@@ -69,3 +69,15 @@ Gotchas
 Deferred (not fixed here)
 - organize_report.csv is overwritten, so a rerun replaces the counts of an earlier run for skipped patients.
 - An `out_root` inside `src_root` would be walked as a patient folder; `*.dcm` is matched case-sensitively.
+
+## review-loop-pass-1
+- BLOCKING fixed (orchestrator): fx ordering was unproven (removing the sort passed every test). A1.1 and A1.5 now have
+  name order opposite to date order; removing the sort fails 2 tests.
+- BLOCKING fixed (orchestrator): an OSError mid-copy leaked the output path (sanitized PatientID) and left a partial
+  patient that a rerun skipped as done. Patients are now built under `.<name>.partial` and renamed at the end; an
+  OSError refuses that patient with REASON_IO_ERROR, removes the partial, and the run continues; the CLI turns an
+  OSError on the roots into a fixed message and exit 1. Removing the cleanup fails a test.
+- Deferred to hardening issues: RTSTRUCT in a different study than its CT; missing SOPInstanceUID aborts the run;
+  missing SeriesDate sorts first; only `*.dcm` is read; duplicate plan file in two sub-folders gives two identical fx
+  folders; one blank PatientID refuses the whole patient; unreadable files not copied to misc_files; report written
+  only at the end and overwritten on rerun; out_root inside src_root.
