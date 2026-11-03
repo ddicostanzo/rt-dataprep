@@ -21,3 +21,8 @@ Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytes
 - Deps: simpleitk>=2.5.7, dicomrttool==6.2.0.
 - Private-API scan flags dotted reads of the exception dunders (cause, context) in tests: read them with operator.attrgetter in a helper.
 - Under capfd, pytest replaces sys.stdout with its capture file, not fd 1: both levels need redirecting.
+
+## task-03
+- tests/synthetic_dicom.py: write_rtstruct_rois(path, ct, rois, contour_images=True, sop_uid=None, **meta); roi dicts have number, name, kind (box|point|empty|channel), interpreted; box=((z0,z1),(y0,y1),(x0,x1)) inclusive indices. write_rtplan gains label=.
+- DicomRTTool 6.2 rounds vertices half-up and fills vertex voxels (boundary-inclusive): box vertices sit at the centres of the extreme voxels; half-step corners overcount (40 vs 24). Real contours drawn on voxel edges will rasterize one voxel larger per side: inherited legacy behaviour, recorded for review.
+- arg_max=False mask is (z, y, x, nROI+1) with channel 0 background.
