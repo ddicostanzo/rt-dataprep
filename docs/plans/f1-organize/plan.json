@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "Package skeleton and synthetic DICOM helpers",
+      "depends_on": [],
+      "files": [
+        "pyproject.toml",
+        "src/rt_dataprep/__init__.py",
+        "src/rt_dataprep/__main__.py",
+        "src/rt_dataprep/dicom_io.py",
+        "tests/synthetic_dicom.py",
+        "tests/test_dicom_io.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "pyproject.toml": "create",
+        "src/rt_dataprep/__init__.py": "create",
+        "src/rt_dataprep/__main__.py": "create",
+        "src/rt_dataprep/dicom_io.py": "create",
+        "tests/synthetic_dicom.py": "create",
+        "tests/test_dicom_io.py": "create",
+        "README.md": "create"
+      },
+      "test_approach": "pytest on synthetic DICOM written to tmp_path; real pydicom and SimpleITK, no stubs",
+      "criteria": [
+        "pyproject.toml: Python >=3.12, hatchling, src layout, runtime deps pydicom and numpy only (SimpleITK, DicomRTTool, mclahe come with F2); dependency group dev = pytest, ruff; `uv run --group dev pytest -q` and `uv run --group dev ruff check .` exit 0; src/rt_dataprep/__init__.py has no imports",
+        "`python -m rt_dataprep --help` lists an `organize` subcommand (argparse skeleton only; the handler import and wiring land in task-02)",
+        "tests/synthetic_dicom.py is ported from /home/dominic/Repositories/rnt_transformer/tests/synthetic_dicom.py and additionally accepts patient_id= on every writer, study_uid=, series_date=, series_time=, manufacturer_model_name= and image_type= where the CT/RT writers need them, plan_date=/plan_time= on write_rtplan, plus write_reg(path, study_uid, other_study_uid, ...) emitting StudiesContainingOtherReferencedInstancesSequence",
+        "dicom_io.read_header(path) returns a pydicom Dataset without pixel data and emits no warnings and no pydicom log records even for a file with invalid VR values (tested with warnings recorded and caplog, asserting both empty; per vault note pydicom-validates-lazily-on-first-tag-access, force every element conversion inside the quiet block)",
+        "dicom_io.read_header raises OSError for a non-DICOM file",
+        "dicom_io.sanitize_path_component ported from /home/dominic/Repositories/DICOM_Transport/src/common.py with its behaviour; '../evil' and 'a/b' each reduce to one safe component",
+        "README.md states the package purpose, install (uv), the PHI rules and the hook install line from .githooks/pre-commit"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "organize: export tree to <patient>/fx_<n>/ per RTPLAN",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/organize.py",
+        "src/rt_dataprep/__main__.py",
+        "tests/test_organize.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/organize.py": "create",
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_organize.py": "create"
+      },
+      "test_approach": "pytest building synthetic patient export trees with tests/synthetic_dicom.py; assertions on output tree contents",
+      "criteria": [
+        "organize(src_root, out_root, *, exclude_models=('Acuity',)) implements F1 steps 1-7 of docs/plans/2026-11-03-rt-dataprep/phase1.md exactly (case unit = one RTPLAN with a complete RTPLAN->RTSTRUCT->CT chain)",
+        "A1.1: two planning studies on different dates give fx_1 (earlier) and fx_2 (later) with the expected file counts",
+        "A1.2: diagnostic MR study referenced by a REG in the planning study is copied into that fx folder",
+        "A1.3: a REG referencing the other planning study does not copy either planning study into the other's folder",
+        "A1.4: a LOCALIZER CT, an Acuity-model study and an orphan CT with no plan all land in misc_files/",
+        "A1.5: two RTPLANs (each with its own RTDOSE) on one RTSTRUCT+CT give fx_1 and fx_2, each with the full CT and RTSTRUCT, exactly one RTPLAN and only that plan's RTDOSE",
+        "A1.5b: two planning CTs in one study, each with a plan, give two fx folders and no empty folder",
+        "A1.6: PatientID '../evil' is written inside out_root (resolved path asserted under out_root)",
+        "A1.7: source tree is byte-identical after a run (sha256 of every file before and after)",
+        "A patient whose output folder already exists is skipped and counted; organize_report.csv in out_root has one row per patient (sanitized id, fx count, misc count, unreadable count)",
+        "Unreadable files are counted, not fatal; log lines and exception messages carry counts and fixed reason constants only, never a PatientID, sanitized folder name, date or path; organize_report.csv (in out_root) is the only place the sanitized id appears",
+        "`python -m rt_dataprep organize SRC OUT` imports and runs organize and exits 0 on a synthetic tree"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-03",
+    "spec": "docs/plans/2026-11-03-rt-dataprep/phase1.md",
+    "profile": "project-profile.yml"
+  }
+}

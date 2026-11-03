@@ -1,0 +1,23 @@
+project: rt-dataprep
+stack: python
+commands:
+  build: uv run --group dev python -m compileall -q src
+  test: uv run --group dev pytest -q --tb=short
+  lint: uv run --group dev ruff check .
+merge: squash
+branches:
+  target: main
+execution:
+  max_parallel_worktrees: 1
+compliance:
+  - name: phi
+    rules:
+      - "No PatientID, name, date of birth or path in log lines, exception messages or report text . organize_report.csv / convert_report.csv in the output root are the only place a sanitized id appears."
+      - "Reports and logs are written under the output root only, never the working directory."
+      - "Test data is synthetic, generated at test time; no .dcm or imaging files are committed."
+  - name: data-safety
+    rules:
+      - "Source DICOM trees are only read, never moved, renamed or deleted."
+review:
+  - "Refusal reasons are fixed string constants."
+  - "pydicom reads are quieted for the whole access, not just dcmread (vault: pydicom-validates-lazily-on-first-tag-access)."
