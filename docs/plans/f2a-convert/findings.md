@@ -32,3 +32,11 @@ Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytes
 - WARNING: BaseException (KeyboardInterrupt/SystemExit) passes through quiet_call with its original message.
 - WARNING: #7 test lacks a case where the RTSTRUCT's other study also holds other files.
 - NOTE: _fds_quiet dups fds before creating the temp file (fd leak if TemporaryFile fails). NOTE: Python 3.14 context-aware warnings. NOTE: dicom_io imports SimpleITK at module level.
+
+## task-04
+- convert.py: convert(org_root, out_root, *, exclude_models) -> ConvertReport(rows); convert_plan(plan_dir, case_dir) -> PlanResult(files, ct_series_uid) is the seam for masks; write_atomic raises OSError(REASON_WRITE) so output failures are patient-level.
+- The CLI clause of task-04 criterion 1 (exit 1 with the reason) lands in task-06 with the convert subcommand (__main__ is task-06's file).
+- Two PLAN doses refuse even when a FRACTION exists (strict reading). Plan folders sorted numerically.
+- Missing-tag refusal catches AttributeError/KeyError/IndexError/TypeError/ValueError around the per-plan path: a coding bug surfaces as REASON_MISSING_TAG, not a crash.
+- sd.write_rtstruct writes no ContourImageSequence, so such plans are refused: organize->convert fixtures (A2.9) must use write_rtstruct_rois(contour_images=True).
+- Rescale test needs mixed slopes to tell Cast from SetOutputPixelType. Mutation checks (5) all fail the suite.
