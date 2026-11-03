@@ -54,3 +54,8 @@ Verify: uv run --group dev python -m compileall -q src; uv run --group dev pytes
 - Extra check: DicomRTTool's ROI number for the lowercased name must equal the kept ROI's number (case-only name collision with a POINT ROI).
 - Implementation written before tests; 47 mutations run, 45 killed, 1 equivalent survivor.
 - Open: two channels on one ROI use the first SourceApplicatorID; mixed open/closed ROI treated as applicator; format_name keeps Unicode alphanumerics.
+
+## review-group-3 (task-05): PASS, no BLOCKING
+- Verified against DicomRTTool source: name->channel mapping, axis order, CopyInformation only after tolerance checks, binarisation, overlaps, applicator order/gzip, scratch cleanup on every path, PHI.
+- WARNING (deferred): an ROI mixing POINT and CLOSED_PLANAR contours is kept and its POINT items reach return_mask unchecked.
+- NOTE: a skipped ROI sharing a kept ROI's lowercased name and listed first refuses a valid plan; temp PHI copies sit in the partial folder during a run; spacing compared with the origin tolerance.
