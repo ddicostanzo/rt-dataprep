@@ -168,6 +168,54 @@ def test_an_empty_mask_from_dicomrttool_refuses_the_plan(tmp_path, monkeypatch):
     assert refused(tmp_path, folder) == masks.REASON_MASK_EMPTY
 
 
+# ---------------------------------------------------------------- placement (DicomRTTool picks slices by patient z)
+
+def test_a_coronal_planning_ct_refuses_the_plan(tmp_path):
+    folder = make_plan(tmp_path, [box(1, 'Box', (1, 3), (2, 5), (3, 7))])
+
+    def coronal(values):  # rotates about x through ORIGIN: the slice normal becomes +y
+        p = np.asarray([float(v) for v in values]).reshape(-1, 3)
+        return [float(v) for v in np.stack(
+            [p[:, 0], ORIGIN[1] + p[:, 2] - ORIGIN[2], ORIGIN[2] - (p[:, 1] - ORIGIN[1])], -1).ravel()]
+
+    def rotate(ds):
+        if ds.Modality == 'CT':
+            ds.ImageOrientationPatient = [1, 0, 0, 0, 0, -1]
+            ds.ImagePositionPatient = coronal(ds.ImagePositionPatient)
+        for roi in ds.get('ROIContourSequence', []):
+            for item in roi.ContourSequence:
+                item.ContourData = coronal(item.ContourData)
+    for path in folder.iterdir():
+        edit(path, rotate)
+    assert refused(tmp_path, folder) == conv.REASON_CT_NOT_VOLUME
+
+
+def test_a_mask_off_its_contour_slices_refuses_the_plan(tmp_path, monkeypatch):
+    folder = make_plan(tmp_path, [box(1, 'Box', (1, 3), (2, 5), (3, 7))])
+
+    def onto_slice_0(reader):  # what the z-only lookup did to every contour of a coronal CT
+        image = reader.mask_dictionary['box']
+        values = sitk.GetArrayFromImage(image)
+        moved = np.zeros_like(values)
+        moved[0] = values.max(axis=0)
+        out = sitk.GetImageFromArray(moved)
+        out.CopyInformation(image)
+        reader.mask_dictionary['box'] = out
+    spy(monkeypatch, after_mask=onto_slice_0)
+    assert refused(tmp_path, folder) == masks.REASON_MASK_SLICES
+
+
+def test_a_contour_beyond_the_last_ct_slice_refuses_the_plan(tmp_path):
+    folder = make_plan(tmp_path, [box(1, 'Box', (1, 3), (2, 5), (3, 7))])
+
+    def beyond(ds):  # the top contour moves 10 slices past the CT
+        item = ds.ROIContourSequence[0].ContourSequence[-1]
+        data = [float(v) for v in item.ContourData]
+        item.ContourData = [v + 10 * SPACING[2] if k % 3 == 2 else v for k, v in enumerate(data)]
+    edit(folder / 'struct.dcm', beyond)
+    assert refused(tmp_path, folder) == masks.REASON_MASK_SLICES
+
+
 # ---------------------------------------------------------------- which ROIs are kept
 
 def test_point_empty_and_dose_rois_produce_no_file_and_the_plan_converts(tmp_path):

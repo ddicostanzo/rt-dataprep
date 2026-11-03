@@ -26,11 +26,12 @@ REASON_MASK_LINK = 'DicomRTTool did not link the RTSTRUCT to exactly one plannin
 REASON_MASK_MISSING = 'a kept ROI is missing from the DicomRTTool result or maps to another ROI'
 REASON_MASK_EMPTY = 'a kept ROI came back with no voxel'
 REASON_MASK_GRID = 'a mask is not on the planning CT grid'
+REASON_MASK_SLICES = 'a mask does not lie on exactly the CT slices its contours lie on'
 
 
 @dataclass
 class RoiPlan:
-    kept: list = field(default_factory=list)  # [(ROINumber, ROIName, '<format_name>.nii.gz')] in RTSTRUCT order
+    kept: list = field(default_factory=list)  # [(ROINumber, ROIName, '<format_name>.nii.gz', [(N, 3) non-POINT contours in patient mm])] in RTSTRUCT order
     applicators: list = field(default_factory=list)  # [('<name>.nii.gz', (N, 3) points in patient mm, ROIName)] in RTSTRUCT order
 
 
@@ -68,7 +69,8 @@ def classify(struct, plan, taken=()):
             result.applicators.append((stem + SUFFIX, np.concatenate(points), name))
             names.append((stem + SUFFIX).lower())
         else:
-            result.kept.append((number, name, format_name(name) + SUFFIX))
+            planar = [p for p, item in zip(points, items, strict=True) if str(item.ContourGeometricType) != 'POINT']
+            result.kept.append((number, name, format_name(name) + SUFFIX, planar))
             names.append((format_name(name) + SUFFIX).lower())
     if any(name == SUFFIX for name in names) or len(set(names)) != len(names):
         raise CaseRefused(REASON_ROI_NAMES)
@@ -109,18 +111,18 @@ def build_masks(kept, ct_paths, struct_path, struct_series_uid, ct_series_uid, c
     try:
         for path in [*ct_paths, struct_path]:
             _link_or_copy(path, os.path.join(scratch, os.path.basename(path)))
-        reader, hits = quiet_call(lambda: _run(scratch, [name for _, name, _ in kept], ct_series_uid), REASON_MASK_RUN)
+        reader, hits = quiet_call(lambda: _run(scratch, [name for _, name, _, _ in kept], ct_series_uid), REASON_MASK_RUN)
         # Linked: the RTSTRUCT's own series UID is a key of the CT index's RTs (DicomRTTool links by the series it references).
         if len(hits) != 1 or struct_series_uid not in reader.series_instances_dictionary[hits[0]].RTs:
             raise CaseRefused(REASON_MASK_LINK)
         rois = reader.series_instances_dictionary[hits[0]].RTs[struct_series_uid].ROIs_In_Structure
         masks = {}
-        for number, name, file_name in kept:
+        for number, name, file_name, contours in kept:
             key = name.lower()
             image = reader.mask_dictionary.get(key)
             if image is None or key not in rois or int(rois[key].ROINumber) != number:
                 raise CaseRefused(REASON_MASK_MISSING)
-            masks[file_name] = _checked(image, ct, origin_atol, direction_atol)
+            masks[file_name] = _checked(image, ct, contours, origin_atol, direction_atol)
         return masks
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
@@ -137,8 +139,11 @@ def _run(folder, names, ct_series_uid):
     return reader, hits
 
 
-def _checked(image, ct, origin_atol, direction_atol):
-    """`image` as {0,1} uint8 with `ct`'s geometry; it must have a voxel and match the CT grid within tolerance."""
+def _checked(image, ct, contours, origin_atol, direction_atol):
+    """
+    `image` as {0,1} uint8 with `ct`'s geometry; it must have a voxel, match the CT grid within tolerance, and have voxels
+    on exactly the slices its `contours` lie on.
+    """
     values = sitk.GetArrayFromImage(image) > 0
     if not values.any():
         raise CaseRefused(REASON_MASK_EMPTY)
@@ -147,6 +152,15 @@ def _checked(image, ct, origin_atol, direction_atol):
             and np.allclose(image.GetSpacing(), ct.GetSpacing(), rtol=0, atol=origin_atol)
             and np.allclose(image.GetDirection(), ct.GetDirection(), rtol=0, atol=direction_atol)):
         raise CaseRefused(REASON_MASK_GRID)
+    # DicomRTTool 6.2 picks a contour's slice by patient z alone; the CT's full geometry says where each contour belongs.
+    slices = set()
+    for points in contours:
+        index = np.rint([ct.TransformPhysicalPointToContinuousIndex(tuple(float(v) for v in p))[2] for p in points])
+        if index.min() != index.max():
+            raise CaseRefused(REASON_MASK_SLICES)
+        slices.add(int(index[0]))
+    if slices != set(np.flatnonzero(values.any(axis=(1, 2))).tolist()):
+        raise CaseRefused(REASON_MASK_SLICES)
     out = sitk.GetImageFromArray(values.astype(np.uint8))
     out.CopyInformation(ct)
     return out

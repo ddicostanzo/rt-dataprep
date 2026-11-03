@@ -239,7 +239,7 @@ def _assemble(headers):
 
 
 def _check_volume(ct_slices):
-    """One orientation, size, pixel spacing and frame; at least two slices; no duplicate position; uniform spacing."""
+    """One axial orientation, size, pixel spacing and frame; at least two slices; no duplicate position; uniform spacing."""
     heads = [ds for _, ds in ct_slices]
     iops = np.asarray([[float(v) for v in ds.ImageOrientationPatient] for ds in heads])
     pixel_spacing = np.asarray([[float(v) for v in ds.PixelSpacing] for ds in heads])
@@ -256,8 +256,9 @@ def _check_volume(ct_slices):
         # A gantry tilt moves slices sideways too; the image grid would put them on the normal and misplace them.
         offset = positions - positions[0]
         sideways = offset - np.outer(offset @ normal, normal)
+        # DicomRTTool places contours by patient z alone: only an axial CT (normal along z) keeps them on their slices.
         ok = bool(steps[0] > ORIGIN_ATOL_MM and np.all(np.abs(steps - steps[0]) <= ORIGIN_ATOL_MM)
-                  and np.abs(sideways).max() <= ORIGIN_ATOL_MM)
+                  and np.abs(sideways).max() <= ORIGIN_ATOL_MM and abs(normal[2]) >= 1 - DIRECTION_ATOL)
     if not ok:
         raise CaseRefused(REASON_CT_NOT_VOLUME)
 
@@ -398,7 +399,7 @@ def _series_rows(plan, struct, ct_head, dose_heads, rois, files):
     if dose_heads:
         rows.append(row(DOSE_NAME, 'dose', dose_heads, 'RTDOSE', _joined(_tag(ds, 'FrameOfReferenceUID') for ds in dose_heads),
                         summation=_joined(_tag(ds, 'DoseSummationType').strip() for ds in dose_heads)))
-    roi_names = {file: ('mask', name) for _, name, file in rois.kept} | {file: ('applicator', name) for file, _, name in rois.applicators}
+    roi_names = {file: ('mask', name) for _, name, file, _ in rois.kept} | {file: ('applicator', name) for file, _, name in rois.applicators}
     rows += [row(file, roi_names[file][0], [struct], 'RTSTRUCT', struct_frame, roi_name=roi_names[file][1])
              for file in files if file in roi_names]
     return rows
