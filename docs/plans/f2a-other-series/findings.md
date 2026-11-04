@@ -104,3 +104,23 @@ read_series; now refused in the check, with zero/negative-spacing and all-duplic
 pins the step guard). WARNING: the single-slice guard is only pinned via a NaN path. NOTE: task-05 edited
 tests/test_series.py outside its declared files (needed by the convert_plan signature change; logged, not a DAG
 change); misc unreadable count re-scans the folder.
+## task-04
+- Files: src/rt_dataprep/series.py (REG block appended), tests/test_series.py (22 tests appended), this file. convert.py untouched.
+- API (task-06 calls it): `registration(ct_frame, series_frame, regs, headers_by_sop) -> (registered: bool, reg_matrix: str)`.
+  - `regs`: the patient's REG headers (Datasets), ALREADY deduplicated by SOPInstanceUID and without those in an excluded
+    study: the caller does both (series.py does neither). `headers_by_sop`: `{SOPInstanceUID str: header}` of every readable
+    file of the patient (excluded studies and localizers too); used only for items without a FrameOfReferenceUID.
+  - Returns: `(True, 'identity')` when `ct_frame == series_frame` (regs are not even iterated); `(True, '<16 values>')`
+    row-major, space-separated, `%.10g`, = inv(M_ct) . M_series; `(True, '')` when the first qualifying REG has no single usable
+    rigid matrix for a frame; `(False, '')` when no REG qualifies. Constants `IDENTITY`, `RIGID_ATOL = 1e-4`, `LAST_ROW_ATOL = 1e-6`.
+  - Caller still decides when to call it (only for a series that is not the planning CT itself, and never for `images/`, where
+    reg_matrix stays empty): the function only knows frames.
+- Decisions: "exactly one entry" in a MatrixSequence is counted over ALL MatrixRegistrationSequence items of the RegistrationSequence
+  item (two registration items with one matrix each give ''; nothing is picked silently). A malformed tag inside a MATRIX
+  (missing type, non-numeric value, ...) leaves reg_matrix '' but the REG still qualifies ("whatever its matrices hold"); a malformed
+  tag anywhere else in the REG (RegistrationSequence item shape, ReferencedImageSequence entries, FrameOfReferenceUID, a missing
+  SOPInstanceUID) makes the whole REG not qualify. An empty-string item frame counts as absent. A header among `headers_by_sop`
+  lacking FrameOfReferenceUID is ignored when resolving. Non-Dataset entries in `regs` do not qualify.
+- Gotchas: translation-only fixtures cannot tell inv(M_ct).M_series from M_series.inv(M_ct) (translations commute), so the rotation test
+  carries the order check (mutation-checked: swapping the order, dropping the sort, dropping det > 0 each fail a test). `%.10g` can
+  print `-0` or `1e-17` for a computed zero; left as is. An implied identity item exists only when the REG has no real item for that frame.

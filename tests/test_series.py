@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 import synthetic_dicom as sd
+from pydicom.dataset import Dataset
 from test_convert import PID, dose_spec, edit, make_plan, run_plan
 
 from rt_dataprep import convert as conv
@@ -334,3 +335,196 @@ def test_series_py_imports_nothing_from_convert_and_owns_its_tolerances():
     modules += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
     assert not [m for m in modules if 'convert' in m]
     assert (ser.SERIES_ATOL_MM, ser.ORTHO_ATOL, ser.DIRECTION_ATOL) == (0.01, 1e-4, 1e-6)
+
+
+# ---------------------------------------------------------------- task-04: series.py (REG parsing and reg_matrix)
+
+VALUES_SMALL = np.zeros((2, 2, 2), dtype=int)
+IDENTITY_TEXT = ' '.join(['1', '0', '0', '0', '0', '1', '0', '0', '0', '0', '1', '0', '0', '0', '0', '1'])
+RIGID = 'RIGID'
+
+
+class World:
+    """A CT on one frame, an MR on another, and the headers by SOP; `reg` writes a REG and returns its header."""
+
+    def __init__(self, folder):
+        self.folder = folder
+        self.ct = sd.write_ct_series(folder, VALUES_SMALL, patient_id=PID_S, prefix='ct')
+        self.mr = sd.write_ct_series(folder, VALUES_SMALL, patient_id=PID_S, prefix='mr', modality='MR')
+        self.lookup = {}
+        for series in (self.ct, self.mr):
+            for sop, path in zip(series['sop_uids'], series['paths'], strict=True):
+                self.lookup[sop] = read_header(path)
+        self.count = 0
+        self.ct_frame, self.mr_frame = self.ct['frame_uid'], self.mr['frame_uid']
+
+    def reg(self, registrations=None, frame_uid=None, sop_uid=None):
+        self.count += 1
+        path = self.folder / f'reg_{self.count}.dcm'
+        sd.write_reg(path, self.ct['study_uid'], self.mr['study_uid'], sop_uid=sop_uid, frame_uid=frame_uid,
+                     registrations=registrations, patient_id=PID_S)
+        return read_header(path)
+
+    def items(self, ct_matrix, mr_matrix, **extra):
+        """RegistrationSequence for one CT item and one MR item with the given matrix lists."""
+        return [dict(frame_uid=self.ct_frame, matrices=ct_matrix, **extra), dict(frame_uid=self.mr_frame, matrices=mr_matrix)]
+
+    def registration(self, regs):
+        return ser.registration(self.ct_frame, self.mr_frame, regs, self.lookup)
+
+
+@pytest.fixture
+def world(tmp_path):
+    return World(tmp_path)
+
+
+def rigid(**kwargs):
+    return [(RIGID, sd.transformation_matrix(**kwargs))]
+
+
+def apply(text, point):
+    """The parsed reg_matrix applied to a point."""
+    values = [float(v) for v in text.split()]
+    assert len(values) == 16
+    return (np.asarray(values).reshape(4, 4) @ [*point, 1.0])[:3]
+
+
+MR_POINT = np.array([5.0, 6.0, 7.0])  # a named point in the MR frame; the MR frame sits +10 mm in x of the CT frame
+CT_POINT = np.array([15.0, 6.0, 7.0])  # the same place in the CT frame
+
+
+@pytest.mark.parametrize('in_frame', ['ct', 'mr'])
+def test_a2_4_the_reg_matrix_maps_a_named_mr_point_to_its_ct_coordinates(world, in_frame):
+    # standard wording: each matrix maps its item's frame into the REG frame; the REG frame is the CT's or the MR's
+    if in_frame == 'ct':
+        sequence = world.items(rigid(), rigid(translation=(10, 0, 0)))
+    else:
+        sequence = world.items(rigid(translation=(-10, 0, 0)), rigid())
+    registered, text = world.registration([world.reg(sequence)])
+    assert registered is True
+    assert np.allclose(apply(text, MR_POINT), CT_POINT, rtol=0, atol=1e-6)
+
+
+def test_a_rotated_registration_maps_the_point_with_the_right_order_of_the_matrices(world):
+    quarter = [[0, -1, 0], [1, 0, 0], [0, 0, 1]]  # 90 degrees about z
+    t_ct, t_mr = np.array([1.0, 2.0, 3.0]), np.array([-4.0, 5.0, 0.5])
+    sequence = world.items(rigid(rotation=np.eye(3), translation=t_ct), rigid(rotation=quarter, translation=t_mr))
+    _, text = world.registration([world.reg(sequence)])
+    in_reg = np.asarray(quarter) @ MR_POINT + t_mr  # MR frame -> REG frame
+    assert np.allclose(apply(text, MR_POINT), in_reg - t_ct, rtol=0, atol=1e-6)  # REG frame -> CT frame (identity rotation)
+    ct_turned = world.items(rigid(rotation=quarter, translation=t_ct), rigid(translation=t_mr))
+    _, text = world.registration([world.reg(ct_turned)])
+    assert np.allclose(apply(text, MR_POINT), np.asarray(quarter).T @ (MR_POINT + t_mr - t_ct), rtol=0, atol=1e-6)
+
+
+def test_the_text_is_16_values_row_major_in_10_significant_digits(world):
+    _, text = world.registration([world.reg(world.items(rigid(), rigid(translation=(10, 0, 0))))])
+    assert text == '1 0 0 10 0 1 0 0 0 0 1 0 0 0 0 1'
+    _, text = world.registration([world.reg(world.items(rigid(), rigid(translation=(1 / 3, 0, 0))))])
+    assert text == '1 0 0 0.3333333333 0 1 0 0 0 0 1 0 0 0 0 1'
+
+
+def test_the_same_frame_is_identity_and_no_reg_is_looked_at(world):
+    class Boom:
+        def __iter__(self):
+            raise AssertionError('REG lookup ran')
+    assert ser.registration(world.ct_frame, world.ct_frame, Boom(), world.lookup) == (True, 'identity')
+    assert ser.registration(world.ct_frame, world.ct_frame, [world.reg(world.items(rigid(), rigid(), ))], {}) == (True, 'identity')
+
+
+@pytest.mark.parametrize('own, kept', [('ct', 'mr'), ('mr', 'ct')])
+def test_a_reg_in_one_of_the_two_frames_has_an_implied_identity_item_for_it(world, own, kept):
+    if kept == 'mr':
+        sequence, own_frame = [dict(frame_uid=world.mr_frame, matrices=rigid(translation=(10, 0, 0)))], world.ct_frame
+    else:
+        sequence, own_frame = [dict(frame_uid=world.ct_frame, matrices=rigid(translation=(-10, 0, 0)))], world.mr_frame
+    registered, text = world.registration([world.reg(sequence, frame_uid=own_frame)])
+    assert registered is True and np.allclose(apply(text, MR_POINT), CT_POINT, rtol=0, atol=1e-6)
+
+
+def test_a_reg_that_omits_an_item_and_is_in_neither_frame_does_not_qualify(world):
+    sequence = [dict(frame_uid=world.mr_frame, matrices=rigid())]
+    assert world.registration([world.reg(sequence), world.reg(sequence, frame_uid='1.9.9')]) == (False, '')
+    assert world.registration([]) == (False, '')
+
+
+def test_a_study_link_without_a_frame_match_and_a_deformable_reg_do_not_register(world):
+    deformable = world.reg(world.items(rigid(), rigid()))
+    deformable.DeformableRegistrationSequence = deformable.RegistrationSequence
+    del deformable.RegistrationSequence
+    assert world.registration([world.reg(None), deformable]) == (False, '')
+
+
+@pytest.mark.parametrize('bad', [
+    [('DEFORMABLE', sd.transformation_matrix(translation=(10, 0, 0)))],
+    [('RIGID_SCALE', sd.transformation_matrix(translation=(10, 0, 0)))],
+    [(RIGID, sd.transformation_matrix(rotation=np.eye(3) * 1.1, translation=(10, 0, 0)))],
+    [(RIGID, sd.transformation_matrix(rotation=np.diag([1, 1, -1]), translation=(10, 0, 0)))],  # a reflection
+    [(RIGID, sd.transformation_matrix()[:15])],
+    [(RIGID, [*sd.transformation_matrix()[:12], 0, 0, 0.001, 1])],  # last row off
+    [(RIGID, sd.transformation_matrix(translation=(10, 0, 0))), (RIGID, sd.transformation_matrix())],
+    [],
+])
+def test_b3_an_unusable_matrix_gives_an_empty_reg_matrix_and_the_series_still_counts_as_registered(world, bad):
+    assert world.registration([world.reg(world.items(rigid(), bad))]) == (True, '')
+    assert world.registration([world.reg(world.items(bad, rigid()))]) == (True, '')
+
+
+def test_b3_two_items_for_one_frame_give_an_empty_reg_matrix(world):
+    sequence = [*world.items(rigid(), rigid(translation=(10, 0, 0))), dict(frame_uid=world.ct_frame, matrices=rigid())]
+    assert world.registration([world.reg(sequence)]) == (True, '')
+    sequence = [*world.items(rigid(), rigid(translation=(10, 0, 0))), dict(frame_uid=world.mr_frame, matrices=rigid())]
+    assert world.registration([world.reg(sequence)]) == (True, '')
+    implied = [dict(frame_uid=world.mr_frame, matrices=rigid()), dict(frame_uid=world.mr_frame, matrices=rigid())]
+    assert world.registration([world.reg(implied, frame_uid=world.ct_frame)]) == (True, '')
+
+
+def test_b3_a_matrix_within_the_orthonormal_tolerance_is_used(world):
+    near = rigid(rotation=np.eye(3) * (1 + 2e-5), translation=(10, 0, 0))  # |R^T R - I| = 4e-5
+    registered, text = world.registration([world.reg(world.items(rigid(), near))])
+    assert registered and np.allclose(apply(text, MR_POINT), CT_POINT, rtol=0, atol=1e-3)
+
+
+def test_the_first_qualifying_reg_by_sop_uid_is_used_with_no_fallback(world):
+    good = world.items(rigid(), rigid(translation=(10, 0, 0)))
+    bad = world.items(rigid(), [('DEFORMABLE', sd.transformation_matrix())])
+    unrelated = [dict(frame_uid=world.mr_frame, matrices=rigid())]
+    first = world.reg(bad, sop_uid='1.2.10')  # '1.2.10' < '1.2.9' as strings
+    second = world.reg(good, sop_uid='1.2.9')
+    none = world.reg(unrelated, sop_uid='1.2.0')  # sorts first but does not qualify
+    for order in ([first, second, none], [none, second, first]):
+        assert world.registration(order) == (True, '')
+    assert world.registration([second, none])[1] == '1 0 0 10 0 1 0 0 0 0 1 0 0 0 0 1'
+
+
+def test_b9_an_item_without_a_frame_takes_the_one_frame_of_the_present_sops_it_references(world):
+    ct_item = dict(frame_uid=world.ct_frame, matrices=rigid())
+    mr_item = lambda images: dict(matrices=rigid(translation=(10, 0, 0)), images=images)  # noqa: E731
+    present = world.mr['sop_uids']
+    assert world.registration([world.reg([ct_item, mr_item(present)])]) == (True, '1 0 0 10 0 1 0 0 0 0 1 0 0 0 0 1')
+    assert world.registration([world.reg([ct_item, mr_item([*present, '1.7.7'])])])[0] is True  # an absent SOP is ignored
+    assert world.registration([world.reg([ct_item, mr_item(['1.7.7'])])]) == (False, '')  # none present
+    assert world.registration([world.reg([ct_item, mr_item([present[0], world.ct['sop_uids'][0]])])]) == (False, '')  # two frames
+    assert world.registration([world.reg([ct_item, mr_item(None)])]) == (False, '')  # no frame and no references
+    ct_by_image = dict(matrices=rigid(), images=world.ct['sop_uids'])  # the CT item resolved the same way
+    assert world.registration([world.reg([ct_by_image, mr_item(present)])])[0] is True
+
+
+def test_a_malformed_reg_tag_makes_that_reg_not_qualify_and_no_exception_escapes(world):
+    good = world.reg(world.items(rigid(), rigid(translation=(10, 0, 0))), sop_uid='1.2.9')
+    damaged = []
+    for change in ('no_ref_uid', 'empty_reference_item', 'frame_none', 'no_sop'):
+        reg = world.reg([*world.items(rigid(), rigid()), dict(matrices=rigid(), images=world.mr['sop_uids'])], sop_uid='1.2.0')
+        if change == 'no_ref_uid':
+            del reg.RegistrationSequence[2].ReferencedImageSequence[0].ReferencedSOPInstanceUID
+        elif change == 'empty_reference_item':
+            reg.RegistrationSequence[2].ReferencedImageSequence = [Dataset()]
+        elif change == 'frame_none':
+            reg.RegistrationSequence[0].FrameOfReferenceUID = None
+        else:
+            del reg.SOPInstanceUID
+        damaged.append(reg)
+    for reg in damaged:
+        assert world.registration([reg]) == (False, '')
+        assert world.registration([reg, good]) == (True, '1 0 0 10 0 1 0 0 0 0 1 0 0 0 0 1')
+    assert world.registration([world.reg(None), 7, None, 'text', good])[0] is True  # not even a Dataset

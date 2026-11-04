@@ -5,6 +5,9 @@ check_volume(slices) validates the headers of one series and returns the slices 
 reads the pixels and sets origin, spacing and direction from those headers. Both return None for a series that is skipped
 (a bad or missing tag, not a uniform single-frame volume, an unreadable file): no exception escapes, and nothing here
 logs or raises text that holds a path, UID, date or description.
+
+registration(ct_frame, series_frame, regs, headers_by_sop) says whether a series is registered to the planning CT and
+gives its reg_matrix text (series frame -> CT frame).
 """
 import numpy as np
 import SimpleITK as sitk
@@ -130,3 +133,72 @@ def read_series(slices):
     image.SetSpacing(spacing)
     image.SetDirection(direction)
     return image
+
+
+IDENTITY = 'identity'
+RIGID_ATOL = 1e-4  # max |R^T R - I| of a registration matrix's 3x3 part
+LAST_ROW_ATOL = 1e-6  # last row of a registration matrix against 0 0 0 1
+
+
+def _rigid_matrix(item):
+    """The 4x4 matrix of one REG item, or None unless its MatrixSequence holds exactly one usable RIGID matrix."""
+    entries = [m for registration in item.MatrixRegistrationSequence for m in registration.MatrixSequence]
+    if len(entries) != 1 or str(entries[0].FrameOfReferenceTransformationMatrixType) != 'RIGID':
+        return None
+    values = [float(v) for v in entries[0].FrameOfReferenceTransformationMatrix]
+    if len(values) != 16:
+        return None
+    matrix = np.asarray(values).reshape(4, 4)
+    rotation = matrix[:3, :3]
+    usable = (np.abs(matrix[3] - (0, 0, 0, 1)).max() <= LAST_ROW_ATOL  # written so that NaN fails
+              and np.abs(rotation.T @ rotation - np.eye(3)).max() <= RIGID_ATOL and np.linalg.det(rotation) > 0)
+    return matrix if usable else None
+
+
+def _item_frame(item, headers_by_sop):
+    """An item's own FrameOfReferenceUID, else the one frame shared by the headers its ReferencedImageSequence names."""
+    if 'FrameOfReferenceUID' in item and str(item.FrameOfReferenceUID):
+        return str(item.FrameOfReferenceUID)
+    sops = [str(ref.ReferencedSOPInstanceUID) for ref in item.ReferencedImageSequence] if 'ReferencedImageSequence' in item else []
+    frames = {str(headers_by_sop[sop].FrameOfReferenceUID) for sop in sops
+              if sop in headers_by_sop and 'FrameOfReferenceUID' in headers_by_sop[sop]}
+    return frames.pop() if len(frames) == 1 else None
+
+
+def _reg_text(reg, ct_frame, series_frame, headers_by_sop):
+    """The reg_matrix text of one REG for the pair ('' for no usable matrix), or None when the REG has no item for a frame."""
+    own = str(reg.FrameOfReferenceUID) if 'FrameOfReferenceUID' in reg else None
+    items = [(_item_frame(item, headers_by_sop), item) for item in reg.RegistrationSequence]
+    matrices = {}
+    for frame in (ct_frame, series_frame):
+        found = [_header_call(_rigid_matrix, item) for item_frame, item in items if item_frame == frame]
+        matrices[frame] = found or ([np.eye(4)] if own == frame else [])  # symmetric: the REG's own frame has an identity item
+    if not (matrices[ct_frame] and matrices[series_frame]):
+        return None
+    ct_matrix, series_matrix = matrices[ct_frame], matrices[series_frame]
+    if len(ct_matrix) > 1 or len(series_matrix) > 1 or ct_matrix[0] is None or series_matrix[0] is None:
+        return ''
+    return ' '.join('%.10g' % v for v in (np.linalg.inv(ct_matrix[0]) @ series_matrix[0]).ravel())
+
+
+def registration(ct_frame, series_frame, regs, headers_by_sop):
+    """
+    (registered, reg_matrix) of a series on `series_frame` against the planning CT on `ct_frame`.
+
+    `regs`: the patient's REG headers, already deduplicated by SOPInstanceUID and without those in an excluded study (the
+    caller does both). `headers_by_sop`: {SOPInstanceUID: header} of every readable file of the patient, excluded studies
+    and localizers included; it resolves an item that has no FrameOfReferenceUID from its ReferencedImageSequence.
+    reg_matrix: 'identity' for the same frame (no REG is read); else, from the first qualifying REG by SOPInstanceUID
+    (string order, no fallback), 16 values row-major '%.10g' = inv(M_ct) . M_series (series frame -> CT frame), or '' when
+    that REG's items do not give exactly one usable rigid matrix per frame, or when no REG qualifies (registered False).
+    A REG qualifies with an item (real or implied by its own frame) for each frame, whatever its matrices hold; a REG with a
+    malformed tag does not qualify. Nothing here raises for a bad header.
+    """
+    if ct_frame == series_frame:
+        return True, IDENTITY
+    keyed = [(sop, reg) for reg in regs if (sop := _header_call(lambda r: str(r.SOPInstanceUID), reg)) is not None]
+    for _, reg in sorted(keyed, key=lambda pair: pair[0]):
+        text = _header_call(_reg_text, reg, ct_frame, series_frame, headers_by_sop)
+        if text is not None:
+            return True, text
+    return False, ''
