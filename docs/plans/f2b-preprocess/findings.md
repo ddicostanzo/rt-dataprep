@@ -53,3 +53,27 @@ Gotchas:
 - WARNING (deferred, hardening at PR time): an axis with N >= 2 and N*s < s' gets size 0 and aborts the run
   (REASON_INTERNAL) instead of refusing one plan. Plan gap; unlikely for a CT.
 - NOTEs: the float32 rescale test uses float32 input (int16 checked by hand); the array-view test is a regression guard.
+
+## task-02
+
+Files: `src/rt_dataprep/preprocess.py` (walk, report, plan/patient functions), `src/rt_dataprep/convert.py` (`_crash_site` -> `crash_site`, 2 sites,
+no behaviour change), `tests/test_preprocess.py` (+42 tests).
+
+Decisions:
+- `preprocess_plan` writes into `partial/plan_<n>`; `preprocess_one` removes that folder on any refusal. `check_rows` runs kind, ct/dose counts,
+  file presence (membership in the folder's non-symlink file listing) and the grid check from `read_info` (header only) before `mkdir`.
+- The crop check (`check_crop`) needs the pixels, so it runs per image at write time. A REASON_CROP refusal after earlier files were written
+  still removes the whole plan folder. It uses the nonzero bounding box: with the CT's direction, each final axis follows one native axis, so
+  the box corners are the extremes.
+- Without a geometric step (rescale only) dose and masks are `shutil.copyfile`d under `output_name` (the native name) and never read.
+- `REASON_EXISTS`, `REASON_NO_PLANS` and `REASON_IO_ERROR` are preprocess's own constants (convert's texts name the organized tree).
+- The report row class is `PreprocessRow`; outcomes reuse `conv.OUTCOME_SKIPPED/REFUSED`.
+
+Gotchas:
+- `preprocess(..., steps=PreprocessSteps())` needs `# noqa: B008` (frozen dataclass default).
+- A one-voxel NN-emptied fixture needs native 0.5 mm: final centres land on native indices 1.5, 4, 6.5, 9, ..., so index 10 is never nearest.
+- A final-grid boundary voxel (continuous index exactly -0.5) is inside; tests place cut-offs well past it, one at 4.3 on a 4-voxel axis.
+
+Deferred (not fixed here):
+- Two series.csv rows naming one file write the same output twice. A series.csv with extra columns fails in `write_series_csv`
+  (ValueError -> REASON_INTERNAL abort). Both only arise from a hand-edited series.csv.

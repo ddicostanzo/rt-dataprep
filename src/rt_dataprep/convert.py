@@ -111,7 +111,7 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',)):
             rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_IO_ERROR))
             log.warning('convert: %s', REASON_IO_ERROR)
         except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
-            module, line = _crash_site(sys.exc_info()[2])
+            module, line = crash_site(sys.exc_info()[2])
             rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_INTERNAL))
             log.error('convert: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
             aborted = True
@@ -131,7 +131,7 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',)):
     return ConvertReport(rows)
 
 
-def _crash_site(tb):
+def crash_site(tb):
     """(module name, line) of the innermost rt_dataprep frame of `tb`; the file name only selects it and is never formatted."""
     site = ('unknown', 0)
     for frame, lineno in traceback.walk_tb(tb):

@@ -1,12 +1,16 @@
-"""preprocess core (task-01): grid, crop/pad, rescale, names, CT pipeline, dose and mask resampling. Images are in memory."""
+"""preprocess: grid, crop/pad, rescale, names, CT pipeline, dose and mask resampling (task-01); the tree walk (task-02)."""
 import ast
+import csv
 import dataclasses
 import inspect
+import re
+import traceback
 
 import numpy as np
 import pytest
 import SimpleITK as sitk
 
+from rt_dataprep import convert as conv
 from rt_dataprep import preprocess as pre
 from rt_dataprep.dicom_io import CaseRefused
 from rt_dataprep.preprocess import LEGACY_RNT, PreprocessSteps
@@ -255,3 +259,414 @@ def test_no_array_view_of_a_temporary_image():
     tree = ast.parse(inspect.getsource(pre))
     views = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, 'attr', '') == 'GetArrayViewFromImage']
     assert all(isinstance(n.args[0], ast.Name) for n in views)
+
+
+# ---- task-02: the tree walk. A synthetic converted tree lives in tmp_path; patient IDs hold no digits or underscores. ----
+
+SMALL = dataclasses.replace(LEGACY_RNT, new_shape=(10, 10, 10))
+CT_FILE = 'reshape_resample_rescale_initialresample_planning_ct.nii.gz'
+DOSE_FILE = 'reshape_resample_initialresample_dose.nii.gz'
+PTV_FILE, BLADDER_FILE = 'reshape_resample_initialresample_ptv.nii.gz', 'reshape_resample_initialresample_bladder.nii.gz'
+APPLICATOR_BYTES = b'1.5 2.5 3.5\n4.5 5.5 6.5\n'
+
+
+def grid(n=12, spacing=1.0):
+    """Geometry of an n^3 grid centred on the origin."""
+    return dict(spacing=(spacing,) * 3, origin=(-(n - 1) * spacing / 2,) * 3)
+
+
+def box(lo, hi, n=12, value=1.0):
+    array = np.zeros((n, n, n))
+    array[lo[2]:hi[2], lo[1]:hi[1], lo[0]:hi[0]] = value
+    return array
+
+
+DEFAULT_DOSE = box((3, 3, 3), (9, 9, 9), value=2.0)
+DEFAULT_MASKS = {'ptv': box((4, 4, 4), (8, 8, 8)), 'bladder': box((5, 5, 5), (8, 8, 8))}
+
+
+def series_row(file, kind, **extra):
+    return dict.fromkeys(conv.SERIES_COLUMNS, '') | dict(file=file, kind=kind, **extra)
+
+
+def write_plan(root, patient='SYNTHETICPTA', plan='plan_1', n=12, spacing=1.0, dose=DEFAULT_DOSE, masks=None, applicator=True):
+    """<root>/<patient>/<plan>/ as F2a writes it. Returns (folder, series.csv rows)."""
+    masks = DEFAULT_MASKS if masks is None else masks
+    geometry = grid(n, spacing)
+    folder = root / patient / plan
+    folder.mkdir(parents=True)
+    ct = make_image(np.linspace(-1000, 200, n ** 3).reshape(n, n, n), **geometry)
+    sitk.WriteImage(ct, str(folder / conv.CT_NAME))
+    rows = [series_row(conv.CT_NAME, 'ct', modality='CT', series_instance_uid='SYNTHETICCTUID', rtplan_label='SYNTHETICPLAN')]
+    if dose is not None:
+        sitk.WriteImage(make_image(dose, **geometry), str(folder / conv.DOSE_NAME))
+        rows.append(series_row(conv.DOSE_NAME, 'dose', modality='RTDOSE', dose_summation_type='PLAN'))
+    for name, array in masks.items():
+        sitk.WriteImage(sitk.Cast(make_image(array, **geometry), sitk.sitkUInt8), str(folder / f'{name}.nii.gz'))
+        rows.append(series_row(f'{name}.nii.gz', 'mask', modality='RTSTRUCT', roi_name=name))
+    if applicator:
+        (folder / 'applicator_a.txt').write_bytes(APPLICATOR_BYTES)
+        rows.append(series_row('applicator_a.txt', 'applicator', modality='RTSTRUCT', roi_name='applicator_a'))
+    save_rows(folder, rows)
+    return folder, rows
+
+
+def save_rows(folder, rows):
+    conv.write_series_csv(rows, folder / conv.SERIES_NAME)
+
+
+def state(root):
+    """Every file under root with its bytes: a before/after comparison."""
+    return {p.relative_to(root): p.read_bytes() for p in sorted(root.rglob('*')) if p.is_file()}
+
+
+def report_rows(out):
+    with open(out / 'preprocess_report.csv', newline='') as handle:
+        reader = csv.DictReader(handle)
+        assert reader.fieldnames == ['patient', 'folder', 'outcome', 'reason', 'files']
+        return list(reader)
+
+
+def plan_row(report, patient='SYNTHETICPTA', folder='plan_1'):
+    return next(r for r in report.rows if (r.patient, r.folder) == (patient, folder))
+
+
+def test_preset_writes_the_prefixed_files_and_leaves_the_input_alone(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, rows = write_plan(converted)
+    before = state(converted)
+    report = pre.preprocess(converted, out, SMALL)
+    assert isinstance(report, pre.PreprocessReport)
+    expected = [CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt', 'series.csv']
+    row = plan_row(report)
+    assert (row.outcome, row.reason, row.files) == ('preprocessed', '', expected) and len(report.rows) == 1
+    assert sorted(p.name for p in (out / 'SYNTHETICPTA' / 'plan_1').iterdir()) == sorted(expected)
+    assert sorted(p.name for p in out.iterdir()) == ['SYNTHETICPTA', 'preprocess_report.csv']  # no partial left
+    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='plan_1', outcome='preprocessed', reason='', files=';'.join(expected))]
+    done = out / 'SYNTHETICPTA' / 'plan_1'
+    assert (done / 'applicator_a.txt').read_bytes() == APPLICATOR_BYTES
+    final = sitk.ReadImage(str(done / CT_FILE))
+    assert final.GetSize() == (10, 10, 10) and final.GetSpacing() == (1.25, 1.25, 1.25)
+    assert np.array_equal(sitk.GetArrayFromImage(final), sitk.GetArrayFromImage(pre.process_ct(sitk.ReadImage(str(folder / conv.CT_NAME)), SMALL)))
+    for name in expected[1:4]:
+        image = sitk.ReadImage(str(done / name))
+        assert (image.GetSize(), image.GetOrigin(), image.GetSpacing(), image.GetDirection()) == (
+            final.GetSize(), final.GetOrigin(), final.GetSpacing(), final.GetDirection())
+    assert sitk.ReadImage(str(done / PTV_FILE)).GetPixelID() == sitk.sitkUInt8
+    assert state(converted) == before
+
+
+def test_rescale_only_renames_the_ct_and_copies_dose_and_masks_byte_equal(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, _ = write_plan(converted)
+    steps = PreprocessSteps(rescale=True, legacy_linear_masks=True)  # linear masks have no effect without a geometric step
+    report = pre.preprocess(converted, out, steps)
+    done = out / 'SYNTHETICPTA' / 'plan_1'
+    assert plan_row(report).files == ['rescale_planning_ct.nii.gz', 'dose.nii.gz', 'ptv.nii.gz', 'bladder.nii.gz', 'applicator_a.txt', 'series.csv']
+    for name in ('dose.nii.gz', 'ptv.nii.gz', 'bladder.nii.gz', 'applicator_a.txt'):
+        assert (done / name).read_bytes() == (folder / name).read_bytes()
+    hu = sitk.GetArrayFromImage(sitk.ReadImage(str(folder / conv.CT_NAME)))
+    assert np.abs(sitk.GetArrayFromImage(sitk.ReadImage(str(done / 'rescale_planning_ct.nii.gz'))) - (hu + 1024) / 4096).max() < 1e-6
+
+
+def test_series_csv_keeps_every_column_renames_files_and_drops_series_rows(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, rows = write_plan(converted)
+    series = series_row('series_MR_1.nii.gz', 'series', modality='MR')  # its file is not in the folder: series rows are not read
+    save_rows(folder, [*rows[:2], series, *rows[2:]])
+    pre.preprocess(converted, out, SMALL)
+    with open(out / 'SYNTHETICPTA' / 'plan_1' / 'series.csv', newline='') as handle:
+        written = list(csv.DictReader(handle))
+    names = [CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt']
+    assert [r['file'] for r in written] == names
+    assert [{k: v for k, v in r.items() if k != 'file'} for r in written] == [{k: v for k, v in r.items() if k != 'file'} for r in rows]
+
+
+def test_a_plan_without_a_dose_writes_no_dose(tmp_path):
+    write_plan(tmp_path / 'converted', dose=None, applicator=False)
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', SMALL)
+    assert plan_row(report).files == [CT_FILE, PTV_FILE, BLADDER_FILE, 'series.csv']
+
+
+def test_the_walk_skips_images_hidden_and_folders_without_a_series_csv(tmp_path):
+    converted = tmp_path / 'converted'
+    write_plan(converted, plan='plan_2')
+    write_plan(converted, plan='plan_10')
+    write_plan(converted, patient='.hidden')
+    (converted / 'SYNTHETICPTA' / 'images').mkdir()
+    (converted / 'SYNTHETICPTA' / 'images' / 'series.csv').write_text('file,kind\n')
+    (converted / 'SYNTHETICPTA' / 'plan_3').mkdir()
+    report = pre.preprocess(converted, tmp_path / 'out', SMALL)
+    assert [(r.patient, r.folder, r.outcome) for r in report.rows] == [
+        ('SYNTHETICPTA', 'plan_2', 'preprocessed'), ('SYNTHETICPTA', 'plan_10', 'preprocessed')]
+    assert sorted(p.name for p in (tmp_path / 'out' / 'SYNTHETICPTA').iterdir()) == ['plan_10', 'plan_2']
+
+
+def test_other_kinds_refuse_the_plan(tmp_path):
+    folder, rows = write_plan(tmp_path / 'converted')
+    save_rows(folder, [*rows, series_row('extra.nii.gz', 'surprise')])
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', SMALL)
+    assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_KIND)
+    assert not (tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1').exists()
+
+
+@pytest.mark.parametrize('value', ['../outside.nii.gz', 'sub/ptv.nii.gz', '..', 'ABSOLUTE', 'sub', 'LINK'])
+def test_a_file_value_outside_the_plan_folder_counts_as_missing(tmp_path, value, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, rows = write_plan(converted)
+    sitk.WriteImage(sitk.Cast(make_image(box((4, 4, 4), (8, 8, 8)), **grid()), sitk.sitkUInt8), str(converted / 'SYNTHETICPTA' / 'outside.nii.gz'))
+    (folder / 'sub').mkdir()
+    sitk.WriteImage(sitk.Cast(make_image(box((4, 4, 4), (8, 8, 8)), **grid()), sitk.sitkUInt8), str(folder / 'sub' / 'ptv.nii.gz'))
+    (folder / 'link.nii.gz').symlink_to(converted / 'SYNTHETICPTA' / 'outside.nii.gz')  # a regular file only: not a link out of the folder
+    value = {'ABSOLUTE': str(converted / 'SYNTHETICPTA' / 'outside.nii.gz'), 'LINK': 'link.nii.gz'}.get(value, value)
+    save_rows(folder, [*rows, series_row(value, 'mask')])
+    before = state(converted)  # the link reads through to outside.nii.gz, which is in the snapshot
+    seen = []
+    for name in ('read_image', 'read_info'):
+        real = getattr(pre, name)
+        monkeypatch.setattr(pre, name, lambda path, real=real: (seen.append(path), real(path))[1])
+    report = pre.preprocess(converted, out, SMALL)
+    assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_FILE_MISSING)
+    assert all(path.parent == folder for path in seen)  # nothing outside the plan folder was opened
+    assert state(converted) == before
+    assert not (out / 'SYNTHETICPTA' / 'plan_1').exists() and not any(p.name.startswith('outside') for p in out.rglob('*'))
+
+
+def test_out_root_in_or_equal_to_the_input_raises_before_any_write(tmp_path):
+    converted = tmp_path / 'converted'
+    write_plan(converted)
+    before = state(converted)
+    for out in (converted, converted / 'sub', converted / 'sub' / 'deeper'):
+        with pytest.raises(ValueError) as caught:
+            pre.preprocess(converted, out, SMALL)
+        assert str(caught.value) == pre.REASON_OUTSIDE_INPUT
+    with pytest.raises(ValueError) as caught:  # checked first: this one has no step on either
+        pre.preprocess(converted, converted / 'sub', PreprocessSteps())
+    assert str(caught.value) == pre.REASON_OUTSIDE_INPUT
+    assert state(converted) == before and not (converted / 'sub').exists()
+
+
+def test_no_step_on_raises_before_any_write_even_with_linear_masks(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    for steps in (PreprocessSteps(), PreprocessSteps(legacy_linear_masks=True)):
+        with pytest.raises(ValueError) as caught:
+            pre.preprocess(converted, out, steps)
+        assert str(caught.value) == pre.REASON_NO_STEPS and not out.exists()
+
+
+def test_an_existing_patient_is_skipped_and_a_rerun_skips_everything(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    write_plan(converted, patient='SYNTHETICPTB')
+    (out / 'SYNTHETICPTA').mkdir(parents=True)
+    report = pre.preprocess(converted, out, SMALL)
+    assert [(r.patient, r.folder, r.outcome, r.reason) for r in report.rows] == [
+        ('SYNTHETICPTA', '', 'skipped', pre.REASON_EXISTS), ('SYNTHETICPTB', 'plan_1', 'preprocessed', '')]
+    assert not any((out / 'SYNTHETICPTA').iterdir())
+    again = pre.preprocess(converted, out, SMALL)
+    assert [(r.folder, r.outcome, r.reason) for r in again.rows] == [('', 'skipped', pre.REASON_EXISTS)] * 2
+
+
+def test_a_patient_without_a_plan_folder_with_a_series_csv_is_skipped_and_writes_nothing(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    (converted / 'SYNTHETICPTA' / 'images').mkdir(parents=True)
+    (converted / 'SYNTHETICPTA' / 'plan_1').mkdir()
+    report = pre.preprocess(converted, out, SMALL)
+    assert [(r.patient, r.folder, r.outcome, r.reason, r.files) for r in report.rows] == [
+        ('SYNTHETICPTA', '', 'skipped', pre.REASON_NO_PLANS, [])]
+    assert sorted(p.name for p in out.iterdir()) == ['preprocess_report.csv']
+
+
+def refuse(tmp_path, reason, change):
+    """Build a plan, let `change(folder, rows)` break it, and assert the plan is refused with `reason` and leaves no folder."""
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, rows = write_plan(converted)
+    write_plan(converted, plan='plan_2')
+    change(folder, rows)
+    report = pre.preprocess(converted, out, SMALL)
+    assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', reason)
+    assert not (out / 'SYNTHETICPTA' / 'plan_1').exists()
+    assert plan_row(report, folder='plan_2').outcome == 'preprocessed' and (out / 'SYNTHETICPTA' / 'plan_2' / CT_FILE).is_file()
+    assert [r for r in report.rows if r.folder == ''] == []
+
+
+def test_zero_or_several_ct_rows_refuse(tmp_path):
+    refuse(tmp_path / 'a', pre.REASON_NO_CT, lambda folder, rows: save_rows(folder, rows[1:]))
+    refuse(tmp_path / 'b', pre.REASON_NO_CT, lambda folder, rows: save_rows(folder, [*rows, series_row('ptv.nii.gz', 'ct')]))
+
+
+def test_several_dose_rows_refuse(tmp_path):
+    refuse(tmp_path, pre.REASON_DOSE_COUNT, lambda folder, rows: save_rows(folder, [*rows, series_row('dose.nii.gz', 'dose')]))
+
+
+def test_a_row_naming_a_missing_file_refuses(tmp_path):
+    refuse(tmp_path, pre.REASON_FILE_MISSING, lambda folder, rows: (folder / 'ptv.nii.gz').unlink())
+
+
+def test_an_unreadable_nifti_refuses_for_every_nifti_kind(tmp_path):
+    for i, name in enumerate(('planning_ct.nii.gz', 'dose.nii.gz', 'bladder.nii.gz')):
+        refuse(tmp_path / str(i), pre.REASON_FILE_UNREADABLE, lambda folder, rows, name=name: (folder / name).write_bytes(b'not an image'))
+
+
+GRID_BREAKS = {
+    'size': dict(),
+    'origin': dict(origin=(-5.49, -5.5, -5.5)),
+    'spacing': dict(spacing=(1.01, 1.0, 1.0)),
+    'direction': dict(direction=ROTATED),
+}
+
+
+@pytest.mark.parametrize('kind', ['dose.nii.gz', 'ptv.nii.gz'])
+@pytest.mark.parametrize('what', list(GRID_BREAKS))
+def test_a_dose_or_mask_off_the_native_ct_grid_refuses(tmp_path, kind, what):
+    size = (12, 12, 13) if what == 'size' else (12, 12, 12)
+    change = lambda folder, rows: sitk.WriteImage(blank(size, **{**grid(), **GRID_BREAKS[what]}), str(folder / kind))  # noqa: E731
+    refuse(tmp_path, pre.REASON_GRID, change)
+
+
+def test_a_grid_difference_inside_the_tolerance_is_accepted(tmp_path):
+    folder, _ = write_plan(tmp_path / 'converted')
+    sitk.WriteImage(make_image(DEFAULT_DOSE, **{**grid(), 'origin': (-5.5 + 5e-4, -5.5, -5.5)}), str(folder / 'dose.nii.gz'))
+    assert plan_row(pre.preprocess(tmp_path / 'converted', tmp_path / 'out', SMALL)).outcome == 'preprocessed'
+
+
+def test_a_refusal_on_the_last_mask_happens_before_the_first_write(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, _ = write_plan(converted)
+    (folder / 'bladder.nii.gz').write_bytes(b'not an image')  # the last mask row
+    writes = []
+    real = conv.write_atomic
+    monkeypatch.setattr(conv, 'write_atomic', lambda image, path: (writes.append(path), real(image, path))[1])
+    report = pre.preprocess(converted, out, SMALL)
+    assert plan_row(report).reason == pre.REASON_FILE_UNREADABLE and writes == []
+    assert not (out / 'SYNTHETICPTA' / 'plan_1').exists()
+
+
+def test_a_mask_is_written_before_the_next_one_is_read(tmp_path, monkeypatch):
+    converted = tmp_path / 'converted'
+    write_plan(converted)
+    events = []
+    real_read, real_write = pre.read_image, conv.write_atomic
+    monkeypatch.setattr(pre, 'read_image', lambda path: (events.append('r'), real_read(path))[1])
+    monkeypatch.setattr(conv, 'write_atomic', lambda image, path: (events.append('w'), real_write(image, path))[1])
+    pre.preprocess(converted, tmp_path / 'out', SMALL)
+    assert events == ['r', 'w'] * 4  # CT, dose, two masks: each written before the next is read
+
+
+def crop_case(tmp_path, **plan):
+    """A plan whose objects sit in the corner voxels, cut off by new_shape (4, 4, 4); the final grid covers +-2.5 mm."""
+    small = dataclasses.replace(LEGACY_RNT, new_shape=(4, 4, 4))
+    write_plan(tmp_path / 'converted', **plan)
+    write_plan(tmp_path / 'converted', plan='plan_2', dose=box((5, 5, 5), (7, 7, 7), value=2.0), masks={'ptv': box((5, 5, 5), (7, 7, 7))})
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', small)
+    assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_CROP)
+    assert not (tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1').exists()
+    assert plan_row(report, folder='plan_2').outcome == 'preprocessed'  # the sibling inside the crop is kept
+
+
+def test_a_dose_cut_off_by_the_shape_refuses(tmp_path):
+    crop_case(tmp_path, dose=box((0, 0, 0), (3, 3, 3), value=2.0), masks={'ptv': box((5, 5, 5), (7, 7, 7))})
+
+
+def test_a_mask_cut_off_by_the_shape_refuses(tmp_path):
+    # the last cut-off voxel centre sits at 3.5 mm: continuous index 4.3 on the 4-voxel axis, beyond the buffer edge 3.5
+    crop_case(tmp_path, dose=box((5, 5, 5), (7, 7, 7), value=2.0), masks={'ptv': box((5, 5, 5), (7, 7, 7)), 'bladder': box((5, 5, 5), (10, 7, 7))})
+
+
+def test_a_one_voxel_mask_that_nearest_neighbour_empties_refuses(tmp_path):
+    # 24^3 at 0.5 mm: the final centres sit on native indices 1.5, 4, 6.5, 9, 11.5, ... so index 10 is never the nearest
+    one = np.zeros((24, 24, 24))
+    one[10, 10, 10] = 1
+    write_plan(tmp_path / 'converted', n=24, spacing=0.5, dose=None, masks={'ptv': one}, applicator=False)
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', SMALL)
+    assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_CROP)
+    assert not (tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1').exists()
+
+
+def test_an_oserror_while_writing_refuses_the_patient_and_removes_the_partial(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    write_plan(converted, plan='plan_2')
+    write_plan(converted, patient='SYNTHETICPTB')
+    real = conv.write_atomic
+
+    def write(image, path):
+        if 'SYNTHETICPTA' in path.parts[-3] and path.parts[-2] == 'plan_2':
+            raise OSError(conv.REASON_WRITE)
+        real(image, path)
+    monkeypatch.setattr(conv, 'write_atomic', write)
+    report = pre.preprocess(converted, out, SMALL)
+    assert [(r.patient, r.folder, r.outcome, r.reason) for r in report.rows] == [
+        ('SYNTHETICPTA', '', 'refused', pre.REASON_IO_ERROR), ('SYNTHETICPTB', 'plan_1', 'preprocessed', '')]
+    assert sorted(p.name for p in out.iterdir()) == ['SYNTHETICPTB', 'preprocess_report.csv']
+
+
+def test_a_compute_failure_aborts_with_a_flushed_report_and_nothing_chained(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    write_plan(converted, patient='SYNTHETICPTB')
+
+    def boom(image, spacing):
+        raise RuntimeError('SYNTHETICPTA')
+    monkeypatch.setattr(pre, 'resample_to', boom)
+    with pytest.raises(pre.PreprocessAborted) as caught:
+        pre.preprocess(converted, out, SMALL)
+    assert str(caught.value) == pre.REASON_INTERNAL
+    chain = ''.join(traceback.format_exception(caught.value))
+    assert 'direct cause' not in chain and 'During handling' not in chain  # nothing chained
+    assert not issubclass(pre.PreprocessAborted, (ValueError, OSError))
+    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='')]
+    assert sorted(p.name for p in out.iterdir()) == ['preprocess_report.csv']  # no partial, and the next patient was not started
+
+
+def test_each_patient_is_built_under_a_partial_name_and_renamed(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    stale = out / '.SYNTHETICPTA.partial'
+    stale.mkdir(parents=True)
+    (stale / 'junk').write_text('left by a dead run')
+    seen = []
+    real = conv.write_atomic
+    monkeypatch.setattr(conv, 'write_atomic', lambda image, path: (seen.append(path.parts[-3]), real(image, path))[1])
+    pre.preprocess(converted, out, SMALL)
+    assert set(seen) == {'.SYNTHETICPTA.partial'}
+    assert not stale.exists() and not (out / 'SYNTHETICPTA' / 'junk').exists() and (out / 'SYNTHETICPTA' / 'plan_1').is_dir()
+
+
+def test_a_patient_whose_plans_are_all_refused_is_renamed_and_a_rerun_skips_it(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, _ = write_plan(converted)
+    (folder / 'ptv.nii.gz').unlink()
+    report = pre.preprocess(converted, out, SMALL)
+    assert plan_row(report).reason == pre.REASON_FILE_MISSING
+    assert (out / 'SYNTHETICPTA').is_dir() and not any((out / 'SYNTHETICPTA').iterdir())
+    assert [(r.folder, r.outcome, r.reason) for r in pre.preprocess(converted, out, SMALL).rows] == [('', 'skipped', pre.REASON_EXISTS)]
+
+
+def test_no_log_line_carries_a_path_a_folder_name_or_a_series_value(tmp_path, monkeypatch, caplog):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    folder, _ = write_plan(converted, plan='plan_2')
+    (folder / 'ptv.nii.gz').write_bytes(b'not an image')
+    write_plan(converted, patient='SYNTHETICPTB')
+    with caplog.at_level('DEBUG'):
+        pre.preprocess(converted, out, SMALL)
+        monkeypatch.setattr(pre, 'resample_to', lambda image, spacing: 1 / 0)
+        with pytest.raises(pre.PreprocessAborted):
+            pre.preprocess(converted, tmp_path / 'out2', SMALL)
+    assert caplog.records and not any(s in caplog.text for s in ('SYNTHETICPT', str(tmp_path), 'ptv', 'SYNTHETICCTUID', 'SYNTHETICPLAN'))
+
+
+def test_reasons_hold_no_separator_digit_run_or_uid():
+    reasons = {name: value for name, value in vars(pre).items() if name.startswith('REASON_')}
+    assert {'REASON_OUTSIDE_INPUT', 'REASON_NO_STEPS', 'REASON_EXISTS', 'REASON_NO_PLANS', 'REASON_NO_CT', 'REASON_DOSE_COUNT',
+            'REASON_KIND', 'REASON_FILE_MISSING', 'REASON_FILE_UNREADABLE', 'REASON_GRID', 'REASON_CROP', 'REASON_IO_ERROR',
+            'REASON_INTERNAL'} <= set(reasons)
+    assert len(set(reasons.values())) == len(reasons)
+    for value in reasons.values():
+        assert not re.search(r'[/\\]|\d{3,}|\d+(\.\d+){2,}', value)
+
+
+def test_convert_exposes_crash_site():
+    assert callable(conv.crash_site) and not hasattr(conv, '_crash_site')
