@@ -2,7 +2,7 @@
 
 Branch `fix/hardening-b7-robustness`, in its own worktree off `main`. Run tests with `uv run --group dev pytest -q --tb=short`, lint with `uv run --group dev ruff check .`. Red first: each new test fails on the pre-change code (say so in the report), then passes.
 
-Scope: `src/rt_dataprep/dicom_io.py`, `src/rt_dataprep/split.py`, `src/rt_dataprep/__main__.py`, and `tests/test_dicom_io.py`, `tests/test_split.py`, `tests/test_cli.py`. Nothing else.
+Scope: `src/rt_dataprep/dicom_io.py`, `src/rt_dataprep/split.py`, `src/rt_dataprep/__main__.py`, and `tests/test_dicom_io.py`, `tests/test_split.py`, `tests/test_cli.py`; T5 adds `src/rt_dataprep/organize.py` and `tests/test_organize.py`. Nothing else.
 
 ## Guardrails
 - **PHI:** `quiet_call` and `read_pooled` exist to keep tag values and paths off stderr. No new message, log or exception may carry a path, ID or tag value. Test data is `SYNTHETIC_`-prefixed.
