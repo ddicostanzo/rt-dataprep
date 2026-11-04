@@ -60,3 +60,25 @@ No BLOCKING. WARNING: tests do not pin the tag-catch wrappers of masks.classify,
 _dose_candidates (mutation check: removing them leaves the suite green); _read_dose outside the catch untested.
 NOTE: synthetic_dicom sop_class KeyError on other modalities; _crash_site matches top-level package modules only; a
 report-write OSError replaces ConvertAborted (CLI message still path-free). Deferred to the review round.
+
+## task-03
+- Files: src/rt_dataprep/series.py (new), tests/test_series.py (29 tests appended), this file. convert.py untouched.
+- Public API (task-06 calls these; a skip is `None`, never an exception):
+  - `check_volume(slices)`: `slices` = `[(path, header Dataset)]` of ONE series; returns the slices sorted ascending along
+    row x column, or None. Header-only; any of the five tag-error types becomes None.
+  - `read_series(slices)`: runs `check_volume` itself, then reads; returns the float32 `sitk.Image` with origin = first
+    position, spacing = (column, row, step), direction = (row, column, normal) columns, or None (check skip, failed
+    read, size mismatch). Callers need not call `check_volume` first.
+  - Constants `SERIES_ATOL_MM = 0.01`, `ORTHO_ATOL = 1e-4`, `DIRECTION_ATOL = 1e-6`, `REASON_SERIES_UNREADABLE`
+    (the quiet_call reason; never surfaces, read_series swallows the CaseRefused).
+- Decisions: position tolerance is the Euclidean distance from the k-th point of the line `first + k*step*normal`
+  (not per axis), so sideways and along-normal jitter share one 0.01 mm budget. Row and column are normalized, the normal
+  is cross(row, column) normalized. Sort key = position . normal of the first input slice's orientation (all slices share it
+  once the check passes). PixelSpacing equality uses SERIES_ATOL_MM (spec says "within SERIES_ATOL_MM").
+- Gotchas:
+  - SimpleITK 2.5.7 with `SetOutputPixelType(float32)` before Execute applies EACH slice's own RescaleSlope/Intercept:
+    no per-slice pydicom fallback was needed (B5 test uses four different slopes; dropping the float32 line fails it).
+  - ITK's reader already sets origin/spacing/direction itself, so a "geometry set outside quiet_call" test cannot compare
+    values; it spies on `sitk.Image.SetOrigin/SetSpacing/SetDirection` and quiet_call instead.
+  - pydicom refuses to assign a non-numeric string to NumberOfFrames (IS); a malformed-tag test uses None.
+  - A truncated pixel buffer makes `ImageSeriesReader.Execute` raise (no silent zero fill).

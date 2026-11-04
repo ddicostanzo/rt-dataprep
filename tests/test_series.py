@@ -1,15 +1,22 @@
 """convert error paths (task-01, #33): the narrowed tag catch and the REASON_INTERNAL crash path. Every tree is synthetic."""
+import ast
 import csv
 import inspect
 import logging
+import random
 import re
+from pathlib import Path
 
+import numpy as np
 import pytest
+import SimpleITK as sitk
+import synthetic_dicom as sd
 from test_convert import PID, dose_spec, edit, make_plan
 
 from rt_dataprep import convert as conv
 from rt_dataprep import masks
-from rt_dataprep.dicom_io import CaseRefused
+from rt_dataprep import series as ser
+from rt_dataprep.dicom_io import CaseRefused, read_header
 
 PID_B = 'SYNTHETICPTB'
 SECRET = '1.2.3.4.5'  # UID-like, in the message of the exception the tests raise
@@ -145,3 +152,175 @@ def test_an_output_side_oserror_is_still_an_io_error_row_and_the_run_goes_on(tre
     rows = conv.convert(org, out).rows
     assert [(r.patient, r.outcome, r.reason) for r in rows] == [
         (PID, conv.OUTCOME_CONVERTED, ''), (PID_B, conv.OUTCOME_REFUSED, conv.REASON_IO_ERROR)]
+
+
+# ---------------------------------------------------------------- task-03: series.py (generic volume check and read)
+
+SAG = (0, 1, 0, 0, 0, -1)  # row cosine +y, column cosine -z, normal -x
+VALUES = np.random.default_rng(3).integers(-500, 500, size=(4, 3, 5))  # (slices, rows, columns)
+PID_S = 'SYNTHETICPTS'
+
+
+def make_series(folder, values=VALUES, shuffle=True, **kwargs):
+    """(the write_ct_series dict, [(path, header)] in a shuffled order) for a synthetic MR series in `folder`."""
+    kwargs.setdefault('modality', 'MR')
+    ct = sd.write_ct_series(folder, values, patient_id=PID_S, **kwargs)
+    items = [(Path(p), read_header(p)) for p in ct['paths']]
+    if shuffle:
+        random.Random(1).shuffle(items)
+    return ct, items
+
+
+def test_the_sagittal_mr_is_read_with_the_geometry_of_its_headers(tmp_path):
+    _, items = make_series(tmp_path, spacing=(1.5, 2.0, 3.0), origin=(10, 20, 30), orientation=SAG)
+    image = ser.read_series(items)
+    assert image.GetPixelID() == sitk.sitkFloat32 and image.GetSize() == (5, 3, 4)
+    assert np.allclose(image.GetSpacing(), (1.5, 2.0, 3.0), rtol=0, atol=1e-9)
+    assert np.allclose(image.GetOrigin(), (10, 20, 30), rtol=0, atol=1e-9)
+    assert np.allclose(image.GetDirection(), (0, 0, -1, 1, 0, 0, 0, -1, 0), rtol=0, atol=1e-9)  # columns: row, column, normal
+    assert np.array_equal(sitk.GetArrayFromImage(image), VALUES.astype(np.float32))
+
+
+def test_check_volume_returns_the_slices_sorted_along_the_normal(tmp_path):
+    ct, items = make_series(tmp_path)
+    assert [str(p) for p, _ in ser.check_volume(items)] == [str(p) for p in ct['paths']]
+
+
+def test_a_tilted_in_plane_rotation_is_read(tmp_path):
+    c, s = np.cos(0.5), np.sin(0.5)
+    _, items = make_series(tmp_path, orientation=(c, s, 0, -s, c, 0))
+    image = ser.read_series(items)
+    assert np.allclose(image.GetDirection(), (c, -s, 0, s, c, 0, 0, 0, 1), rtol=0, atol=1e-9)
+
+
+def spaced(**kwargs):
+    return dict(spacing=(1.0, 1.0, 2.0), **kwargs)
+
+
+@pytest.mark.parametrize('kwargs', [
+    dict(positions=[(0, 0, 0), (0, 0, 0), (0, 0, 2), (0, 0, 2)]),  # two echoes: duplicate positions
+    dict(number_of_frames=3),  # multi-frame
+    dict(positions=[(0, 0, 0), (0, 0, 2), (0, 0, 6), (0, 0, 8)]),  # missing middle slice
+    dict(pixel_spacing=False),
+    dict(orientation=(1, 0, 0, 0.001, 1, 0)),  # off-orthogonal by 1e-3
+    dict(orientation=(1.001, 0, 0, 0, 1, 0)),  # off unit length by 1e-3
+    dict(positions=[(0, 0, 0), (0.02, 0, 2), (0.04, 0, 4), (0.06, 0, 6)]),  # shear
+    dict(positions=[(0, 0, 0), (0, 0, 2.02), (0, 0, 4), (0, 0, 6)]),  # 0.02 mm jitter
+], ids=['two-echo', 'multi-frame', 'gap', 'no-pixel-spacing', 'off-orthogonal', 'off-unit', 'shear', 'big-jitter'])
+def test_a_series_that_is_not_a_uniform_single_frame_volume_is_skipped(tmp_path, kwargs):
+    _, items = make_series(tmp_path, **spaced(**kwargs))
+    assert ser.check_volume(items) is None and ser.read_series(items) is None
+
+
+@pytest.mark.parametrize('kwargs', [
+    dict(positions=[(0, 0, 0), (0, 0, 2.005), (0, 0, 3.995), (0, 0, 6)]),  # 0.005 mm jitter
+    dict(orientation=(1, 0, 0, 1e-6, 1, 0)),  # DS rounding, orthogonality
+    dict(orientation=(1.000001, 0, 0, 0, 1, 0)),  # DS rounding, length
+], ids=['jitter', 'ds-orthogonality', 'ds-length'])
+def test_scanner_rounding_is_read(tmp_path, kwargs):
+    _, items = make_series(tmp_path, **spaced(**kwargs))
+    assert ser.read_series(items).GetSize() == (5, 3, 4)
+
+
+def header_edit(tmp_path, change, count=None):
+    """items of a good series, `change(index, header)` applied to each header (in memory)."""
+    _, items = make_series(tmp_path, shuffle=False, **spaced())
+    for index, (_, ds) in enumerate(items):
+        change(index, ds)
+    return items
+
+
+def test_one_slice_off_in_orientation_size_spacing_or_frame_is_skipped(tmp_path):
+    def last(change):
+        return lambda i, ds: change(ds) if i == 3 else None
+    changes = [lambda ds: setattr(ds, 'ImageOrientationPatient', [1, 0, 0, 0.001, 1, 0]),
+               lambda ds: setattr(ds, 'Rows', 4),
+               lambda ds: setattr(ds, 'PixelSpacing', [1.0, 1.02]),
+               lambda ds: setattr(ds, 'FrameOfReferenceUID', '1.2.3')]
+    for change in changes:
+        assert ser.check_volume(header_edit(tmp_path, last(change))) is None
+    assert ser.check_volume(header_edit(tmp_path, last(lambda ds: setattr(ds, 'PixelSpacing', [1.0, 1.005])))) is not None
+
+
+def test_a_single_slice_and_an_empty_list_are_skipped(tmp_path):
+    _, items = make_series(tmp_path, shuffle=False, **spaced())
+    assert ser.check_volume(items[:1]) is None and ser.check_volume([]) is None
+
+
+@pytest.mark.parametrize('damage', [
+    lambda ds: delattr(ds, 'ImagePositionPatient'),
+    lambda ds: delattr(ds, 'FrameOfReferenceUID'),
+    lambda ds: delattr(ds, 'Rows'),
+    lambda ds: setattr(ds, 'ImageOrientationPatient', [1, 0, 0]),
+    lambda ds: setattr(ds, 'ImagePositionPatient', [0, 0]),
+    lambda ds: setattr(ds, 'PixelSpacing', [1.0]),
+    lambda ds: setattr(ds, 'NumberOfFrames', None),
+    lambda ds: setattr(ds, 'ImageOrientationPatient', None),
+], ids=['no-position', 'no-frame', 'no-rows', 'short-orientation', 'short-position', 'short-spacing', 'frames-empty', 'none'])
+def test_a_missing_or_malformed_tag_skips_the_series_without_an_exception(tmp_path, damage):
+    items = header_edit(tmp_path, lambda i, ds: damage(ds) if i == 1 else None)
+    assert ser.check_volume(items) is None and ser.read_series(items) is None
+
+
+def test_a_size_mismatch_or_an_unreadable_file_skips_the_series(tmp_path):
+    items = header_edit(tmp_path, lambda i, ds: setattr(ds, 'Rows', 4))  # all headers agree, the pixels do not
+    assert ser.read_series(items) is None
+    items = header_edit(tmp_path, lambda i, ds: None)
+    items[2][0].write_bytes(b'not dicom')
+    assert ser.read_series(items) is None
+
+
+def test_only_execute_runs_inside_quiet_call_the_geometry_is_set_after_it(tmp_path, monkeypatch):
+    _, items = make_series(tmp_path, spacing=(1.5, 2.0, 3.0), origin=(10, 20, 30), orientation=SAG)
+    inside, calls = [False], []
+    real = ser.quiet_call
+
+    def spy(fn, reason):
+        inside[0] = True
+        try:
+            return real(fn, reason)
+        finally:
+            inside[0] = False
+    monkeypatch.setattr(ser, 'quiet_call', spy)
+    def recording(name, real_method):
+        def wrap(self, value):
+            calls.append((name, inside[0]))
+            return real_method(self, value)
+        return wrap
+    for name in ('SetOrigin', 'SetSpacing', 'SetDirection'):
+        monkeypatch.setattr(sitk.Image, name, recording(name, getattr(sitk.Image, name)))
+    assert ser.read_series(items) is not None
+    assert sorted(calls) == [('SetDirection', False), ('SetOrigin', False), ('SetSpacing', False)]
+
+
+def test_pt_reads_stored_times_each_slices_own_slope_plus_intercept(tmp_path):
+    rescales = [(1.0, 0.0), (2.0, 5.0), (0.5, -3.0), (3.25, 1.0)]
+    _, items = make_series(tmp_path, modality='PT', rescales=rescales, **spaced())
+    expected = np.stack([(plane.astype(np.float32) * np.float32(slope) + np.float32(intercept))
+                         for plane, (slope, intercept) in zip(VALUES, rescales, strict=True)])
+    image = ser.read_series(items)
+    assert image.GetPixelID() == sitk.sitkFloat32
+    assert np.allclose(sitk.GetArrayFromImage(image), expected, rtol=1e-6, atol=1e-6)
+    assert not np.allclose(sitk.GetArrayFromImage(image), VALUES)  # the slopes were applied, not just stored values
+
+
+def test_b8_truncated_pixel_data_skips_the_series_and_nothing_names_the_id_a_path_or_a_uid(tmp_path, capfd, caplog, recwarn):
+    ct, items = make_series(tmp_path, **spaced())
+    victim = Path(ct['paths'][1])
+    victim.write_bytes(victim.read_bytes()[:-40])
+    secrets = [PID_S, str(tmp_path), ct['series_uid'], ct['frame_uid'], ct['study_uid'], *ct['sop_uids']]
+    caplog.set_level(logging.DEBUG)
+    capfd.readouterr()
+    assert ser.read_series(items) is None
+    captured = capfd.readouterr()
+    texts = [captured.out, captured.err, caplog.text, *(r.getMessage() for r in caplog.records),
+             *(str(w.message) for w in recwarn.list)]
+    assert [s for s in secrets for t in texts if s in t] == []
+
+
+def test_series_py_imports_nothing_from_convert_and_owns_its_tolerances():
+    tree = ast.parse(inspect.getsource(ser))
+    modules = [n.module or '' for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
+    modules += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
+    assert not [m for m in modules if 'convert' in m]
+    assert (ser.SERIES_ATOL_MM, ser.ORTHO_ATOL, ser.DIRECTION_ATOL) == (0.01, 1e-4, 1e-6)
