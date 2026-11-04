@@ -9,6 +9,7 @@ import operator
 import os
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -1022,6 +1023,18 @@ def test_a_dose_with_a_nan_frame_offset_refuses_with_the_grid_reason(tree):
     assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_GRID)
 
 
+def test_two_adjacent_inf_frame_offsets_refuse_with_the_grid_reason_and_no_numpy_warning(tree):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    held = resave_dose(plan['folder'], lambda ds: setattr(ds, 'GridFrameOffsetVector', [0.0, float('inf'), float('inf'), 3.0]))
+    assert np.isinf(float(held.GridFrameOffsetVector[1])) and np.isinf(float(held.GridFrameOffsetVector[2]))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        rows = conv.convert(org, out).rows
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_GRID)
+    assert not [w for w in caught if issubclass(w.category, RuntimeWarning)]
+
+
 @pytest.mark.parametrize('tag, value', [('ImagePositionPatient', [float('nan'), 5.0, 7.0]),
                                         ('ImageOrientationPatient', [1.0, 0.0, 0.0, 0.0, float('nan'), 0.0]),
                                         ('PixelSpacing', [1.5, float('nan')])], ids=['ipp', 'iop', 'spacing'])
@@ -1080,6 +1093,17 @@ def test_a_missing_tag_refuses_with_one_info_record_naming_class_and_site(read, 
     assert len(records) == 1 and records[0].levelno == logging.INFO
     assert re.fullmatch(rf'convert: {conv.REASON_MISSING_TAG}: (AttributeError|KeyError) at rt_dataprep\.\w+:\d+', records[0].getMessage())
     assert 'SYNTHETIC_' not in records[0].getMessage() and '/' not in records[0].getMessage()
+
+
+def test_the_missing_tag_site_is_the_line_in_the_wrapped_function_not_header_call(caplog):
+    caplog.set_level(logging.INFO)
+    check = getattr(conv, '_check_dose_header')  # noqa: B009
+    with pytest.raises(CaseRefused):
+        header_call(lambda: check(empty_dataset(), 'SYNTHETIC_frame'))
+    lines, start = inspect.getsourcelines(check)
+    line = start + next(i for i, text in enumerate(lines) if 'ds.DoseUnits' in text)
+    records = [r for r in caplog.records if r.name == 'rt_dataprep.convert']
+    assert records[0].getMessage().endswith(f' at rt_dataprep.convert:{line}')
 
 
 def test_an_attribute_error_from_our_own_frame_in_the_classifier_aborts_the_run(tree, monkeypatch):
