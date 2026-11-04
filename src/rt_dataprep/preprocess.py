@@ -38,6 +38,8 @@ REASON_NO_PLANS = 'patient folder holds no plan folder with a series.csv'
 REASON_NO_CT = 'series.csv does not list exactly one ct file'
 REASON_DOSE_COUNT = 'series.csv lists more than one dose file'
 REASON_KIND = 'series.csv has a row of an unknown kind'
+REASON_SERIES_CSV = 'series.csv is malformed: columns, row length, encoding, or one file named twice'
+REASON_TOO_SMALL = 'the CT is shorter than one output voxel along an axis'
 REASON_FILE_MISSING = 'a series.csv row names a file that is not in the plan folder'
 REASON_GRID = 'a dose or mask is not on the planning CT grid'
 REASON_CROP = 'a dose or mask would lose voxels to the final grid'
@@ -76,13 +78,29 @@ def read_info(path):
     return quiet_call(read, REASON_FILE_UNREADABLE)
 
 
+def resampled_size(size, spacing, new_spacing):
+    """torchio 1.2.1's output size: floor(N*s/s') in float64 on GetSpacing() values; an axis of 1 stays 1."""
+    size = np.array(size)
+    new = np.floor(size * np.array(spacing) / np.array(new_spacing, float)).astype(int)
+    new[size == 1] = 1
+    return new
+
+
+def too_small(info, steps):
+    """True when a resample step would leave a CT axis (read_info result) with no voxel."""
+    size, spacing = info[0], info[2]
+    for on, target in ((steps.resample, steps.new_spacing), (steps.harmonize_spacing, steps.final_spacing)):
+        if on:
+            size, spacing = resampled_size(size, spacing, target), target
+    return bool((np.array(size) == 0).any())
+
+
 def reference_grid(image, spacing):
     """(size, origin, spacing, direction) of `image` resampled to `spacing`, as torchio 1.2.1 Resample builds it."""
     old_size = np.array(image.GetSize())
     old_spacing = np.array(image.GetSpacing())
     new_spacing = np.array(spacing, float)
-    size = np.floor(old_size * old_spacing / new_spacing).astype(int)  # float64 on GetSpacing() values, as torchio
-    size[old_size == 1] = 1
+    size = resampled_size(old_size, old_spacing, new_spacing)
     direction = np.array(image.GetDirection()).reshape(3, 3)
     centre = np.array(image.GetOrigin()) + direction @ ((old_size - 1) * old_spacing / 2)
     origin = centre - direction @ ((size - 1) / 2 * new_spacing)
@@ -177,9 +195,10 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps()):  # noqa: B008
         raise ValueError(REASON_OUTSIDE_INPUT)
     if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape):
         raise ValueError(REASON_NO_STEPS)
+    folders = sorted(p for p in converted_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
     rows, aborted = [], False
-    for folder in sorted(p for p in converted_root.iterdir() if p.is_dir() and not p.name.startswith('.')):
+    for folder in folders:
         try:
             rows += preprocess_patient(folder, out_root, steps)
         except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
@@ -253,8 +272,16 @@ def same_grid(a, b):
 
 def check_rows(plan_dir):
     """The kept series.csv rows (ct first) of a plan. Every row is checked here, headers only, before the plan's first write."""
+    malformed = False
     with open(plan_dir / conv.SERIES_NAME, newline='') as handle:
-        rows = list(csv.DictReader(handle))
+        try:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            malformed = reader.fieldnames != conv.SERIES_COLUMNS or any(None in row or None in row.values() for row in rows)
+        except (ValueError, csv.Error):  # UnicodeDecodeError is a ValueError
+            malformed = True
+    if malformed:  # raised here, after the except block: nothing chained
+        raise CaseRefused(REASON_SERIES_CSV)
     if any(row['kind'] not in (*KINDS, 'series') for row in rows):
         raise CaseRefused(REASON_KIND)
     kept = [row for row in rows if row['kind'] != 'series']
@@ -262,6 +289,8 @@ def check_rows(plan_dir):
         raise CaseRefused(REASON_NO_CT)
     if sum(row['kind'] == 'dose' for row in kept) > 1:
         raise CaseRefused(REASON_DOSE_COUNT)
+    if len({row['file'] for row in rows}) != len(rows):  # after the counts: two ct or dose rows are refused as such
+        raise CaseRefused(REASON_SERIES_CSV)
     present = {p.name for p in plan_dir.iterdir() if p.is_file() and not p.is_symlink()}  # a value with a separator or '..' is never in it
     if any(row['file'] not in present for row in kept):
         raise CaseRefused(REASON_FILE_MISSING)
@@ -296,6 +325,8 @@ def check_crop(native, final):
 def preprocess_plan(plan_dir, out_dir, steps):
     """Write the plan into `out_dir` (which must not exist); returns the output file names, series.csv last. CaseRefused on a refusal."""
     kept = check_rows(plan_dir)
+    if too_small(read_info(plan_dir / kept[0]['file']), steps):
+        raise CaseRefused(REASON_TOO_SMALL)
     geometric = steps.resample or steps.harmonize_spacing or steps.reshape
     out_dir.mkdir()
     files, series_rows = [], []
