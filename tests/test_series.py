@@ -281,6 +281,22 @@ def test_a_degenerate_spacing_or_step_skips_the_series_without_an_exception(tmp_
     assert ser.check_volume(items) is None and ser.read_series(items) is None
 
 
+NON_FINITE_SERIES = [(tag, x, scope) for tag in ('PixelSpacing', 'RescaleSlope', 'RescaleIntercept')
+                     for x in (float('nan'), float('inf')) for scope in ('all', 'one')]
+
+
+@pytest.mark.parametrize('tag, x, scope', NON_FINITE_SERIES, ids=[f'{t}-{x}-{s}' for t, x, s in NON_FINITE_SERIES])
+def test_a_series_with_a_non_finite_header_value_is_skipped(tmp_path, tag, x, scope):
+    """GDCM reads an inf PixelSpacing as 1.0 and a non-finite rescale as 1 or 0: the series would read with a wrong grid or values."""
+    ct, _ = make_series(tmp_path, shuffle=False, **spaced())
+    paths = ct['paths'] if scope == 'all' else ct['paths'][1:2]
+    for path in paths:
+        edit(path, lambda ds: setattr(ds, tag, [x, *ds.PixelSpacing[1:]] if tag == 'PixelSpacing' else x))
+    assert not np.isfinite(np.ravel(np.asarray(pydicom.dcmread(paths[0], stop_before_pixels=True).get(tag), dtype=float))).all()
+    items = [(Path(p), read_header(p)) for p in ct['paths']]
+    assert ser.check_volume(items) is None and ser.read_series(items) is None
+
+
 def test_a_size_mismatch_or_an_unreadable_file_skips_the_series(tmp_path):
     items = header_edit(tmp_path, lambda i, ds: setattr(ds, 'Rows', 4))  # all headers agree, the pixels do not
     assert ser.read_series(items) is None
