@@ -345,7 +345,7 @@ def _header_call(fn, *args, **kwargs):
         result = fn(*args, **kwargs)
     except (AttributeError, KeyError, IndexError, TypeError, ValueError) as exc:  # not quoted
         tb = sys.exc_info()[2]
-        origin = [frame.f_globals['__name__'] for frame, _ in traceback.walk_tb(tb)][-1]
+        origin = [frame.f_globals.get('__name__', '') for frame, _ in traceback.walk_tb(tb)][-1]
         ours = origin != 'pydicom' and not origin.startswith('pydicom.')
         if isinstance(exc, (AttributeError, KeyError)) and (ours or (isinstance(exc, AttributeError)
                                                                      and tag_for_keyword(getattr(exc, 'name', None)) is None)):
@@ -519,9 +519,9 @@ def _check_dose_header(ds, ct_frame_uid):
         raise CaseRefused(REASON_DOSE_RULE)
     frames = int(ds.NumberOfFrames)
     offsets = np.asarray([float(o) for o in ds.GridFrameOffsetVector])
-    steps = np.diff(offsets)
-    if not np.all(np.isfinite(offsets)):
+    if not np.all(np.isfinite(offsets)):  # before np.diff: inf - inf warns
         raise CaseRefused(REASON_DOSE_GRID)
+    steps = np.diff(offsets)
     if (frames < 2 or len(offsets) != frames or np.any(np.abs(steps - steps[0]) > OFFSET_TOL_MM) or steps[0] == 0):
         raise CaseRefused(REASON_DOSE_GRID)
     if str(ds.FrameOfReferenceUID) != ct_frame_uid:
@@ -560,12 +560,14 @@ def _read_dose(path, offsets, ct):
         values = values[::-1]
         origin = origin + (offsets[-1] - offsets[0]) * n
     row_spacing, column_spacing = spacing
+    spacing = (column_spacing, row_spacing, abs(float(step)))
     direction = tuple(np.column_stack([r, c, n]).ravel())
+    origin = tuple(origin)
     def build():
         dose = sitk.GetImageFromArray(values)
-        dose.SetSpacing((column_spacing, row_spacing, abs(float(step))))
+        dose.SetSpacing(spacing)
         dose.SetDirection(direction)
-        dose.SetOrigin(tuple(origin))
+        dose.SetOrigin(origin)
         return resample_dose(dose, ct)
     return quiet_call(build, REASON_DOSE_UNREADABLE)
 
