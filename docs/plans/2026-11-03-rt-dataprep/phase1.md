@@ -77,8 +77,8 @@ Acceptance tests (synthetic):
 
 ## F2: convert (`rt_dataprep/convert.py`, `preprocess.py`, `masks.py`)
 
-> **Superseded (2026-11-03)** by `docs/specs/2026-11-03-f2a-convert.md` (F2a, native grid, in two PRs) and a later F2b
-> (`preprocess.py`, `--legacy-rnt` without ahe, A2.5, A2.6). Changes from the text below: no `--flat` and no A2.7
+> **Superseded (2026-11-03)** by `docs/specs/2026-11-03-f2a-convert.md` (F2a, native grid, in two PRs) and F2b
+> (`docs/specs/2026-11-03-f2b-preprocess.md`; `preprocess.py`, `--legacy-rnt` without ahe, A2.5, A2.6). Changes from the text below: no `--flat` and no A2.7
 > (the output does not recreate the RNT layout), `<patient>/plan_<n>/` plus `<patient>/images/`, a per-folder
 > `series.csv`, PLAN > FRACTION > BEAM-sum dose precedence, and no AHE (#16). The parity check below needs a fresh
 > plan once F2b exists.
@@ -170,8 +170,8 @@ Acceptance tests:
 
 ## Parity check on real data (OSC, run by the user, after F2)
 
-**Convert parity.** The OSC `raw/<mrn>/fx_<n>/` tree is already organized, so run `convert --flat --legacy-rnt
---legacy-linear-masks` on it directly and match against the pooled legacy folders by folder name, the same pairing
+**Convert parity.** The OSC `raw/<mrn>/fx_<n>/` tree is already organized, so run `convert`, then `preprocess --legacy-rnt
+--legacy-linear-masks`, on it directly and match against the pooled legacy folders by folder name, the same pairing
 `scripts/convert_dose.py` uses. This keeps convert parity separate from organize. `scripts/parity.py` prints
 aggregate counts only, with no identifiers. Run on N ≥ 20 fractions. Pass criteria:
 - CT: `geometry_equal` to legacy, and voxel max abs diff ≤ 1e-3 on the rescaled scale. With `ahe` on, it is checked
