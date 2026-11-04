@@ -558,13 +558,13 @@ def test_b9_an_item_without_a_frame_takes_the_one_frame_of_the_present_sops_it_r
 def test_a_malformed_reg_tag_makes_that_reg_not_qualify_and_no_exception_escapes(world):
     good = world.reg(world.items(rigid(), rigid(translation=(10, 0, 0))), sop_uid='1.2.9')
     damaged = []
-    for change in ('no_ref_uid', 'empty_reference_item', 'frame_none', 'no_sop'):
+    for change in ('no_ref_uid', 'empty_reference_item', 'ct_item_frame_emptied', 'no_sop'):
         reg = world.reg([*world.items(rigid(), rigid()), dict(matrices=rigid(), images=world.mr['sop_uids'])], sop_uid='1.2.0')
         if change == 'no_ref_uid':
             del reg.RegistrationSequence[2].ReferencedImageSequence[0].ReferencedSOPInstanceUID
         elif change == 'empty_reference_item':
             reg.RegistrationSequence[2].ReferencedImageSequence = [Dataset()]
-        elif change == 'frame_none':
+        elif change == 'ct_item_frame_emptied':
             reg.RegistrationSequence[0].FrameOfReferenceUID = None
         else:
             del reg.SOPInstanceUID
@@ -1072,6 +1072,24 @@ def test_itks_out_of_memory_reading_the_planning_ct_aborts_the_run_and_leaves_no
     assert any('MemoryError' in message for message in caplog.messages) and PID not in caplog.text
 
 
+@pytest.mark.parametrize('step', ['GetImageFromArray', 'Resample'])
+def test_itks_out_of_memory_reading_the_dose_aborts_the_run_and_leaves_no_partial_folder(tree, monkeypatch, caplog, step):
+    org, out = tree
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10)])
+
+    def allocate(*args, **kwargs):
+        raise RuntimeError('SYNTHETIC_SOURCE:179:\nFailed to allocate memory for image.')  # ITK's, a RuntimeError
+    monkeypatch.setattr(sitk, step, allocate)
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(conv.ConvertAborted) as caught:
+        conv.convert(org, out)
+    assert str(caught.value) == conv.REASON_INTERNAL
+    assert [(r['patient'], r['folder'], r['outcome'], r['reason']) for r in report(out)] == [
+        (PID, '', conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
+    assert listing(out) == [conv.REPORT_NAME]  # no patient folder, no partial
+    assert any('MemoryError' in message for message in caplog.messages) and PID not in caplog.text
+
+
 # ---------------------------------------------------------------- hardening B6 (#21): an RTSTRUCT in a study of its own
 
 @pytest.mark.parametrize('registered', [False, True])
@@ -1361,3 +1379,73 @@ def test_a_plan_whose_planning_ct_end_slice_sits_in_misc_with_a_blank_id_is_refu
     assert [(r.folder, r.outcome, r.reason) for r in rows if r.folder == 'plan_1'] == [
         ('plan_1', 'refused', conv.REASON_CT_SLICE_MISSING)]
     assert not (out / PID / 'plan_1').exists()
+
+
+# ---------------------------------------------------------------- hardening B8 (#42): series scenarios
+
+def images_rows(out):
+    return [(r['modality'], r['series_instance_uid'], r['reg_matrix'], r['rtplan_uid']) for r in csv_at(out / PID / 'images')]
+
+
+def test_a_series_registered_only_to_a_refused_plan_goes_to_images_with_no_matrix_and_no_plan(tree):
+    org, out = tree
+    refused = make_plan(org / PID / 'plan_1', doses=[dose_spec(1, 'BRACHY')])
+    misc = org / PID / 'misc_files'
+    mr = put(misc)
+    reg_for(misc / 'reg.dcm', refused['ct'], mr)
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [
+        ('plan_1', 'refused', conv.REASON_DOSE_RULE), ('images', 'converted', '')]
+    # only converted plans are targets: the MR is not written for plan_1, it goes to images/ without a matrix
+    assert images_rows(out) == [('CT', refused['ct']['series_uid'], '', ''), ('MR', mr['series_uid'], '', '')]
+    assert not (out / PID / 'plan_1').exists()
+
+
+@pytest.mark.parametrize('plan', ['refused', 'absent'])
+def test_a_pt_on_the_planning_ct_frame_of_a_patient_without_a_converted_plan_lands_in_images(tree, plan):
+    org, out = tree
+    misc = org / PID / 'misc_files'
+    if plan == 'refused':
+        ct = make_plan(org / PID / 'plan_1', doses=[dose_spec(1, 'BRACHY')])['ct']
+    else:
+        ct = put(misc, prefix='ct', modality='CT')
+    pt = put(misc, prefix='pt', modality='PT', frame_uid=ct['frame_uid'])
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome) for r in rows if r.folder != 'plan_1'] == [('images', 'converted')]
+    assert images_rows(out) == [('CT', ct['series_uid'], '', ''), ('PT', pt['series_uid'], '', '')]  # the same frame, but no plan to be identity to
+
+
+@pytest.mark.parametrize('anchor', ['excluded study', 'localizer'])
+def test_a_reg_item_resolved_through_an_excluded_study_or_localizer_header_still_registers_the_series(tree, anchor):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    misc = org / PID / 'misc_files'
+    mr = put(misc)
+    kwargs = dict(manufacturer_model_name='Acuity Sim') if anchor == 'excluded study' else dict(image_type=['ORIGINAL', 'PRIMARY', 'LOCALIZER'])
+    ref = put(misc, prefix='ref', values=VALUES[:1], frame_uid=mr['frame_uid'], **kwargs)  # one slice on the MR frame, itself written nowhere
+    sd.write_reg(misc / 'reg.dcm', plan['ct']['study_uid'], mr['study_uid'], patient_id=PID, registrations=[
+        dict(frame_uid=plan['ct']['frame_uid'], matrices=rigid()), dict(images=ref['sop_uids'], matrices=rigid(translation=(10, 0, 0)))])
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.skipped_series) for r in rows] == [
+        ('plan_1', 'converted', 0), ('images', 'skipped', 0)]  # the MR went to the plan: nothing for images/
+    assert [(r['modality'], r['series_instance_uid'], r['reg_matrix']) for r in csv_at(out / PID / 'plan_1')[1:]] == [
+        ('MR', mr['series_uid'], '1 0 0 10 0 1 0 0 0 0 1 0 0 0 0 1')]
+    assert not (out / PID / 'images').exists()
+
+
+@pytest.mark.parametrize('kwargs', [
+    spaced(positions=[(0, 0, 0), (0, 0, 0), (0, 0, 2), (0, 0, 2)]),  # two echoes
+    spaced(number_of_frames=3),  # multi-frame
+    spaced(pixel_spacing=False),
+    spaced(orientation=(1, 0, 0, 0.001, 1, 0)),  # off-orthonormal
+], ids=['two-echo', 'multi-frame', 'no-pixel-spacing', 'off-orthonormal'])
+def test_each_series_skip_kind_adds_one_to_the_skipped_count_of_the_report(tree, kwargs):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    misc = org / PID / 'misc_files'
+    good = put(misc, prefix='good')
+    put(misc, prefix='bad', **kwargs)
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.skipped_series) for r in rows] == [('plan_1', 'converted', 0), ('images', 'converted', 1)]
+    assert [(r['folder'], r['skipped_series']) for r in report(out)] == [('plan_1', '0'), ('images', '1')]
+    assert [r['series_instance_uid'] for r in csv_at(out / PID / 'images')] == [good['series_uid']]
