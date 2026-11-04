@@ -1039,3 +1039,60 @@ def test_an_rtstruct_study_that_also_holds_another_series_still_converts_and_the
         assert files_of(rows, 'plan_1') == ['planning_ct.nii.gz', 'liver.nii.gz', 'series.csv']
         assert [(r.folder, r.outcome, r.files) for r in rows[1:]] == [('images', 'converted', ['series_MR_1.nii.gz', 'series.csv'])]
         assert csv_at(out / PID / 'images')[0]['reg_matrix'] == ''
+
+
+# ---------------------------------------------------------------- hardening B6 (#42, subset): tolerance boundaries
+
+@pytest.mark.parametrize('axis', [2, 0], ids=['along-the-normal', 'sideways'])
+@pytest.mark.parametrize('deviation, kept', [(0.009, True), (0.011, False)])
+def test_a_slice_position_just_under_series_atol_is_kept_and_just_over_is_skipped(tmp_path, axis, deviation, kept):
+    positions = [[0, 0, 0], [0, 0, 2], [0, 0, 4], [0, 0, 6]]
+    positions[1][axis] += deviation  # one slice off its place on the line
+    _, items = make_series(tmp_path, **spaced(positions=positions))
+    assert (ser.check_volume(items) is not None) is kept
+    assert (ser.read_series(items) is not None) is kept
+
+
+def last_row(last_row_value, index):
+    row = [0, 0, 0, 1]
+    row[index] += last_row_value
+    return [(RIGID, [*sd.transformation_matrix(translation=(10, 0, 0))[:12], *row])]
+
+
+@pytest.mark.parametrize('bad, usable', [
+    (rigid(rotation=np.eye(3) * (1 + 4.5e-5), translation=(10, 0, 0)), True),  # |R^T R - I| = 9.0e-5
+    (rigid(rotation=np.eye(3) * (1 + 5.5e-5), translation=(10, 0, 0)), False),  # 1.1e-4
+    (last_row(0.9e-6, 2), True),
+    (last_row(1.1e-6, 2), False),
+    (last_row(0.9e-6, 3), True),
+    (last_row(1.1e-6, 3), False),
+], ids=['rigid-inside', 'rigid-outside', 'last-row-inside', 'last-row-outside', 'last-corner-inside', 'last-corner-outside'])
+def test_a_matrix_just_inside_rigid_atol_or_last_row_atol_is_used_and_just_outside_gives_an_empty_text(world, bad, usable):
+    registered, text = world.registration([world.reg(world.items(rigid(), bad))])
+    assert registered is True
+    assert (text != '') is usable
+    if usable:
+        assert np.allclose(apply(text, MR_POINT), CT_POINT, rtol=0, atol=1e-3)
+
+
+@pytest.mark.parametrize('own', ['ct', 'mr'])
+def test_a_reg_whose_own_frame_also_has_an_explicit_item_uses_that_item_not_an_extra_identity(world, own):
+    # the implied identity only fills in a frame with no item: with one present there is still exactly one matrix to use
+    if own == 'ct':
+        sequence, frame = world.items(rigid(translation=(3, 0, 0)), rigid(translation=(13, 0, 0))), world.ct_frame
+    else:
+        sequence, frame = world.items(rigid(translation=(-13, 0, 0)), rigid(translation=(-3, 0, 0))), world.mr_frame
+    registered, text = world.registration([world.reg(sequence, frame_uid=frame)])
+    assert registered is True and text != ''
+    assert np.allclose(apply(text, MR_POINT), CT_POINT, rtol=0, atol=1e-6)
+
+
+def test_a_single_slice_is_skipped_by_its_own_guard_before_any_geometry_is_read(tmp_path, monkeypatch):
+    _, items = make_series(tmp_path, shuffle=False, **spaced())
+    def read_past_the_guard(ds):
+        raise AssertionError('a single slice got past the guard')
+    monkeypatch.setattr(ser, '_pixel_spacing', read_past_the_guard)
+    monkeypatch.setattr(ser, '_position', read_past_the_guard)
+    assert ser.check_volume(items[:1]) is None and ser.check_volume([]) is None
+    with pytest.raises(AssertionError):  # the spy is live: two slices do reach the geometry
+        ser.check_volume(items[:2])
