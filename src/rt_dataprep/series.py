@@ -233,7 +233,9 @@ def tainted_studies(headers):
     """
     studies, blind = set(), False
     for _, ds in headers:
-        if _or_none(_file_keys, ds) is None:
+        # candidates() also drops a file whose _candidate_series fails, a bad SeriesInstanceUID or ImageType (#69): '' stands
+        # for its normal None, so None here means it raised
+        if _or_none(_file_keys, ds) is None or _or_none(lambda d: _candidate_series(d) or '', ds) is None:
             study = _or_none(lambda d: str(d.StudyInstanceUID), ds)
             if study:
                 studies.add(study)

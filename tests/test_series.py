@@ -1197,6 +1197,73 @@ def test_a_file_dropped_for_a_bad_tag_skips_every_series_of_its_study(tree, monk
     assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1  # the sibling; the first was dropped whole
 
 
+def test_a_slice_dropped_by_candidate_series_skips_every_series_of_its_study(tree, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    misc = org / PID / 'misc_files'
+    first = put(misc, prefix='a')
+    sibling = put(misc, prefix='c', study_uid=first['study_uid'])
+    other = put(misc, prefix='b')
+    bad = pydicom.dcmread(first['paths'][-1], stop_before_pixels=True).SOPInstanceUID  # an end slice: the rest would pass
+    real = getattr(ser, '_candidate_series')  # noqa: B009 (a private name, never dotted)
+
+    def series_uid(ds):
+        if str(ds.get('SOPInstanceUID', '')) == bad:
+            raise TypeError('SYNTHETIC bad ImageType')
+        return real(ds)
+    monkeypatch.setattr(ser, '_candidate_series', series_uid)
+    rows = conv.convert(org, out).rows
+    assert images_uids(out) == {other['series_uid']}  # not first, one slice short, nor its sibling
+    assert sibling['series_uid'] not in images_uids(out)
+    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 2
+
+
+def test_a_bad_tag_file_with_no_readable_study_skips_every_misc_only_series(tree, monkeypatch):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    misc = org / PID / 'misc_files'
+    first = put(misc, prefix='a')
+    put(misc, prefix='b')
+    kept = put(org / PID / 'plan_1', prefix='c', frame_uid=plan['ct']['frame_uid'])
+    ds = pydicom.dcmread(first['paths'][0])
+    del ds.StudyInstanceUID
+    ds.save_as(first['paths'][0])
+    bad = ds.SOPInstanceUID
+    real = getattr(ser, '_file_keys')  # noqa: B009 (a private name, never dotted)
+
+    def keys(ds):
+        if str(ds.get('SOPInstanceUID', '')) == bad:
+            raise ValueError('SYNTHETIC bad tag')
+        return real(ds)
+    monkeypatch.setattr(ser, '_file_keys', keys)
+    conv.convert(org, out)
+    assert images_uids(out) == set()
+    assert [r['series_instance_uid'] for r in csv_at(out / PID / 'plan_1') if r['kind'] == 'series'] == [kept['series_uid']]
+
+
+def test_a_plan_folder_series_of_a_salvaged_tainted_study_is_skipped(tree):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    at_risk = put(org / PID / 'plan_1', prefix='c', frame_uid=plan['ct']['frame_uid'])  # registered to plan_1 by its frame
+    misc = org / PID / 'misc_files'
+    misc.mkdir()
+    (misc / 'stray.dcm').write_bytes(Path(at_risk['paths'][0]).read_bytes()[132:])  # unreadable, its study salvaged
+    conv.convert(org, out)
+    assert [r for r in csv_at(out / PID / 'plan_1') if r['kind'] == 'series'] == []  # the #36 deviation: skipped, not placed
+
+
+def test_a_series_whose_slices_disagree_on_study_is_skipped(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    mixed = put(org / PID / 'misc_files', prefix='a')
+    ds = pydicom.dcmread(mixed['paths'][1])
+    ds.StudyInstanceUID = pydicom.uid.generate_uid()
+    ds.save_as(mixed['paths'][1])
+    rows = conv.convert(org, out).rows
+    assert images_uids(out) == set()
+    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1
+
+
 def test_salvaging_a_study_tag_prints_and_logs_nothing_of_its_value(tree, capfd, caplog, recwarn):
     org, out = tree
     make_plan(org / PID / 'plan_1')
