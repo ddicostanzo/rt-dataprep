@@ -68,3 +68,13 @@ the shutdown join restores the quiet state while workers still read. NOTEs for t
   .dcm and a text file; both are the same OSError path in convert, there is no separate non-DICOM case.
 - Count test: patient with 6 + 4 headers (plan_1 and misc_files, 2 bad files each), a no-plans patient with 2 headers, and
   a patient whose misc_files read raises OSError after its plan folder was read (adds 0): 12 headers of 16+ files.
+
+## review-group-2
+
+No blocking findings; all task-02/03 criteria met; workers=1 behaviour unchanged; full suite 564 passed, 1 skipped.
+Correction to the task-02 section: after 36a3e45 the organize timing test expects 7 walked files (6 DICOM + 1 text).
+Deferred (file as hardening at the review round):
+- W1: no convert test patches dicom_io.read_header_core, so a from-import there would pass every test.
+- W2: the organize timing test does not pin that the line follows the summary (convert's does).
+- N3: no organize "no timing line on Ctrl-C" test (code is right: the interrupt leaves before the log line).
+- N5: the organize Ctrl-C .partial assertion passes trivially (interrupt during reading, before any partial exists).
