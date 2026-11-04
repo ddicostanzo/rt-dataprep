@@ -163,7 +163,10 @@ From the F2a spec, unchanged: **A2.4**, **A2.4b** (the `images/` part), **A2.4c*
   volume check or failing to read is skipped and counted.
 - An `OSError` on the output side refuses the patient (PR 1 rule) and removes the partial.
 - After #33, an exception outside the tag catch becomes a `REASON_INTERNAL` patient row, the report is written, and
-  the run stops with a fixed-text error (decision J1).
+  the run stops with a fixed-text error (decision J1). If writing the report itself fails, that `OSError` is what
+  propagates, in place of `ConvertAborted` (#43).
+- A refused plan's planning CT is an other-series candidate. One that the 1e-3 mm planning check refused can still
+  pass the 0.01 mm `SERIES_ATOL_MM` series check, and then lands in `images/` (#43).
 
 ## Deferred
 
