@@ -170,7 +170,7 @@ def _convert_patient(folder, out_root, exclude_models):
         # A plan refused for a lost or unreadable file may hold a CT missing an end slice, which still passes the volume check.
         short = {plan_dir for plan_dir, (row, _) in zip(plans, outcomes, strict=True)
                  if row.reason in (REASON_FILE_UNREADABLE, REASON_CT_SLICE_MISSING)}
-        # A slice-missing refusal names its planning CT: short wherever its copies are. _assemble passed for that plan.
+        # A slice-missing refusal names its planning CT: short wherever its copies are. Assembly already passed for that plan.
         lost = {_assemble(found)[3] for (found, _), (row, _) in zip(plan_headers, outcomes, strict=True)
                 if row.reason == REASON_CT_SLICE_MISSING}
         # Organize copies a study whole into every folder that holds it, so a converted folder's copy is complete: the

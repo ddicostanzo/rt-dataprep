@@ -942,6 +942,9 @@ def test_a_file_whose_identifying_tags_raise_is_dropped_not_the_patient(tmp_path
     for headers in ([(tmp_path / 'bad.dcm', Unreadable()), *good], [*good, (tmp_path / 'bad.dcm', Unreadable())]):
         found, regs, by_sop = ser.candidates(headers, ('Acuity',))
         assert [uid for uid, _ in found] == [mr['series_uid']] and regs == [] and len(by_sop) == len(good)
+    slice_of_mr = Unreadable()
+    slice_of_mr.SeriesInstanceUID = mr['series_uid']  # a dropped slice of the MR: the MR may now lack an end slice
+    assert ser.candidates([*good, (tmp_path / 'bad.dcm', slice_of_mr)], ('Acuity',))[0] == []
 
 
 def copy_renamed(paths, folder):

@@ -227,14 +227,21 @@ def candidates(headers, exclude_models):
     """
     (series, regs, headers_by_sop) of one patient. `headers`: [(path, Dataset)] of every readable file, in folder order
     (the caller's; the first copy of a SOP is the one kept). A file whose SOPInstanceUID, StudyInstanceUID, Modality or
-    ManufacturerModelName cannot be read is dropped first, as if it were not there.
+    ManufacturerModelName cannot be read is dropped first, and so is the series it belongs to (when that UID reads).
     series: [(SeriesInstanceUID, [(path, header)])] of the CT/MR/PT series, first-seen order; localizer files are dropped one
     by one, files without a SeriesInstanceUID are dropped, and so is every file of a study that holds a file whose
     ManufacturerModelName contains an excluded model (case-sensitive substring) or that has no StudyInstanceUID.
     regs: the REG headers outside those studies. headers_by_sop: {SOPInstanceUID: header} of all kept files, excluded
     studies and localizers included. The caller still removes the planning CTs of converted plans from `series`.
     """
-    keyed = [(path, ds, keys) for path, ds in headers if (keys := _header_call(_file_keys, ds)) is not None]
+    keyed, broken = [], set()
+    for path, ds in headers:
+        keys = _header_call(_file_keys, ds)
+        if keys is None:  # a dropped slice may be an end slice, which check_volume cannot see: drop its whole series
+            # shortcut: a file whose SeriesInstanceUID is unreadable too taints nothing, upgrade if one shows up in real data
+            broken.add(_header_call(lambda d: str(d.SeriesInstanceUID), ds))
+        else:
+            keyed.append((path, ds, keys))
     excluded = {study for _, _, (_, study, _, model) in keyed if any(m in model for m in exclude_models)}
     excluded.add('')
     unique, seen = [], set()
@@ -251,4 +258,4 @@ def candidates(headers, exclude_models):
     by_sop = {}
     for _, ds, (sop, *_) in keyed:
         by_sop.setdefault(sop, ds)
-    return list(series.items()), regs, by_sop
+    return [(uid, slices) for uid, slices in series.items() if uid not in broken], regs, by_sop
