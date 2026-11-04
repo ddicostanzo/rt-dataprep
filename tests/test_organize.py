@@ -2,6 +2,7 @@
 import csv
 import hashlib
 import logging
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -16,6 +17,11 @@ from rt_dataprep.organize import organize
 
 PID = 'SYNTHETIC_P1'
 EARLY, LATE = '20240105', '20240301'
+
+def listing(root):
+    """Sorted names under root, without the dated per-run copies of the report."""
+    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv', p.name))
+
 
 
 def planning_study(folder, pid=PID, date=EARLY, slices=3, model=None, tag=''):
@@ -240,7 +246,7 @@ def test_folder_without_readable_dicom_is_refused_not_fatal(tree):
     (src / 'empty' / 'bad.dcm').write_bytes(b'junk')
     report = organize(src, out)
     assert [(r.outcome, r.reason, r.unreadable) for r in report.rows] == [(org.OUTCOME_REFUSED, org.REASON_NO_DICOM, 1)]
-    assert list(out.iterdir()) == [out / 'organize_report.csv']
+    assert listing(out) == ['organize_report.csv']
 
 
 def test_cli_runs_organize_and_exits_zero(tree):
@@ -267,7 +273,7 @@ def test_copy_failure_keeps_nothing_leaks_nothing_and_reruns(tree, monkeypatch, 
     with caplog.at_level(logging.DEBUG):
         report = organize(src, out)
     assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_REFUSED, org.REASON_IO_ERROR)]
-    assert sorted(p.name for p in out.iterdir()) == ['organize_report.csv']  # no target, no partial left behind
+    assert listing(out) == ['organize_report.csv']  # no target, no partial left behind
     assert PID not in caplog.text and str(out.parent) not in caplog.text
     monkeypatch.setattr(org.shutil, 'copy2', real_copy)
     assert organize(src, out).rows[0].outcome == org.OUTCOME_ORGANIZED  # the failed patient is redone, not skipped
@@ -337,6 +343,44 @@ def test_an_out_root_inside_the_source_root_is_refused_before_any_write(tree):
     with pytest.raises(ValueError, match=org.REASON_OUTSIDE_SRC):
         organize(src, src / 'out')
     assert snapshot(src) == before and not (src / 'out').exists()
+
+
+def blank_id(path):
+    ds = pydicom.dcmread(path)
+    ds.PatientID = ''
+    ds.save_as(path)
+
+
+def test_a_file_with_a_blank_patient_id_goes_to_misc_and_the_patient_is_organized(tree):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    planning_study(src / PID / 'q', tag='b')  # a second plan whose RTPLAN loses its PatientID
+    blank_id(src / PID / 'q' / 'planb.dcm')
+    organize(src, out)
+    assert (rows(out)[0]['outcome'], rows(out)[0]['plan_count']) == ('organized', '1')
+    assert modalities(out / PID / 'misc_files')['RTPLAN'] == 1
+
+
+def test_a_folder_of_blank_patient_ids_only_is_refused(tree):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    for path in (src / PID / 'p').iterdir():
+        blank_id(path)
+    organize(src, out)
+    assert (rows(out)[0]['outcome'], rows(out)[0]['reason']) == ('refused', org.REASON_NO_ID)
+
+
+def test_each_run_keeps_its_own_report_and_the_fixed_name_is_the_latest(tree, monkeypatch):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    stamps = iter(['20260101T000000Z', '20260101T000001Z'])
+    monkeypatch.setattr('rt_dataprep.dicom_io.time.strftime', lambda fmt, t=None: next(stamps))
+    organize(src, out)
+    organize(src, out)  # the rerun skips the patient
+    first = (out / 'organize_report_20260101T000000Z.csv').read_text(encoding='utf-8')
+    second = (out / 'organize_report_20260101T000001Z.csv').read_text(encoding='utf-8')
+    assert ',organized,' in first and ',skipped,' in second
+    assert (out / 'organize_report.csv').read_text(encoding='utf-8') == second
 
 
 @pytest.mark.parametrize('where', ['same', 'link_into_src'])

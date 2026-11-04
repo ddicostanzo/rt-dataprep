@@ -25,11 +25,12 @@ import SimpleITK as sitk
 
 from rt_dataprep import masks
 from rt_dataprep import series as ser
-from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_header
+from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_header, write_report
 from rt_dataprep.series import DIRECTION_ATOL
 
 log = logging.getLogger(__name__)
 
+PLAN_FOLDER = r'(plan|fx)_\d+'  # organize writes plan_<n>; a legacy tree (OSC raw/) has fx_<n>, kept as named
 REPORT_NAME = 'convert_report.csv'
 CT_NAME, DOSE_NAME, SERIES_NAME = 'planning_ct.nii.gz', 'dose.nii.gz', 'series.csv'
 SERIES_COLUMNS = ['file', 'kind', 'modality', 'series_description', 'series_instance_uid', 'study_instance_uid',
@@ -105,22 +106,22 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',)):
     folders = sorted(p for p in org_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
     rows, aborted = [], False
-    for folder in folders:
-        try:
-            rows += _convert_patient(folder, out_root, exclude_models)
-        except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
-            rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_IO_ERROR))
-            log.warning('convert: %s', REASON_IO_ERROR)
-        except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
-            module, line = crash_site(sys.exc_info()[2])
-            rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_INTERNAL))
-            log.error('convert: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
-            aborted = True
-            break
-    with open(out_root / REPORT_NAME, 'w', newline='', encoding='utf-8') as handle:
-        writer = csv.writer(handle)
-        writer.writerow(['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'])
-        writer.writerows([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows)
+    try:
+        for folder in folders:
+            try:
+                rows += _convert_patient(folder, out_root, exclude_models)
+            except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
+                rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_IO_ERROR))
+                log.warning('convert: %s', REASON_IO_ERROR)
+            except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
+                module, line = crash_site(sys.exc_info()[2])
+                rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_INTERNAL))
+                log.error('convert: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
+                aborted = True
+                break
+    finally:  # Ctrl-C too: the report lists what was done
+        write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'],
+                     ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows))
     plan_rows = [r for r in rows if r.folder not in ('', IMAGES_NAME)]
     patient_rows = [r for r in rows if r.folder == '']
     log.info('convert: %d plan rows (%d converted, %d refused, %d skipped), %d images rows, %d patient rows (%d refused, %d skipped)',
@@ -148,13 +149,14 @@ def _convert_patient(folder, out_root, exclude_models):
     target = out_root / folder.name
     if target.exists():
         return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_EXISTS)]
-    plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(r'plan_\d+', p.name)),
-                   key=lambda p: int(p.name[len('plan_'):]))
+    plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(PLAN_FOLDER, p.name)),
+                   key=lambda p: (int(p.name.split('_')[1]), p.name))  # plan_1 and fx_1: a fixed order
     # Headers are read once per patient. An unreadable file in misc_files/ is not a series and is ignored: only its count
     # reaches the log.
     plan_headers = [read_folder_headers(plan_dir) for plan_dir in plans]
     misc_dir = folder / 'misc_files'
     misc_headers, misc_unreadable = read_folder_headers(misc_dir) if misc_dir.is_dir() else ([], False)
+    misc_headers = [(p, ds) for p, ds in misc_headers if str(ds.get('PatientID', '')).strip()]  # blank id: kept, never placed (#12)
     if misc_unreadable:
         log.info('convert: %d unreadable files in misc_files', sum(p.is_file() for p in misc_dir.iterdir()) - len(misc_headers))
     headers = [item for found, _ in plan_headers for item in found] + misc_headers  # folder order: plan_<n> by n, then misc_files
@@ -169,14 +171,15 @@ def _convert_patient(folder, out_root, exclude_models):
         partial.mkdir()
         outcomes = [_convert_one(plan_dir, found, unreadable, partial)
                     for plan_dir, (found, unreadable) in zip(plans, plan_headers, strict=True)]
+        # A slice-missing refusal names its planning CT: short wherever its copies are. Assembly already passed for that plan.
+        lost = {_assemble(found)[3] for (found, _), (row, _) in zip(plan_headers, outcomes, strict=True)
+                if row.reason == REASON_CT_SLICE_MISSING}
+        outcomes = [_refuse_on_lost_ct(row, result, partial, lost) for row, result in outcomes]
         rows = [row for row, _ in outcomes]
         # After every plan has its outcome: which CTs are planning CTs, and which plans a series is registered to, depend on it.
         # A plan refused for a lost or unreadable file may hold a CT missing an end slice, which still passes the volume check.
         short = {plan_dir for plan_dir, (row, _) in zip(plans, outcomes, strict=True)
                  if row.reason in (REASON_FILE_UNREADABLE, REASON_CT_SLICE_MISSING)}
-        # A slice-missing refusal names its planning CT: short wherever its copies are. Assembly already passed for that plan.
-        lost = {_assemble(found)[3] for (found, _), (row, _) in zip(plan_headers, outcomes, strict=True)
-                if row.reason == REASON_CT_SLICE_MISSING}
         # Organize copies a study whole into every folder that holds it, so a converted folder's copy is complete: the
         # SOP dedup keeps it over a short folder's copy (#35). Only a SOP found nowhere else stays in a short folder.
         ordered = sorted(headers, key=lambda item: item[0].parent in short)
@@ -191,6 +194,15 @@ def _convert_patient(folder, out_root, exclude_models):
         if not done:
             shutil.rmtree(partial, ignore_errors=True)
     return rows
+
+
+def _refuse_on_lost_ct(row, result, partial, lost):
+    """(row, result) of a plan, refused as REASON_CT_SLICE_MISSING when it converted on a planning CT a sibling found short (#44)."""
+    if result is None or result.ct_series_uid not in lost:
+        return row, result
+    shutil.rmtree(partial / row.folder)
+    log.warning('convert: plan refused: %s', REASON_CT_SLICE_MISSING)
+    return ConvertRow(row.patient, row.folder, OUTCOME_REFUSED, REASON_CT_SLICE_MISSING), None
 
 
 def _place_series(patient, headers, exclude_models, outcomes, partial, short=frozenset(), lost=frozenset()):

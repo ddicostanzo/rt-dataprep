@@ -4,14 +4,13 @@ Sort an export tree into <out>/<patient>/plan_<n>/, one folder per RTPLAN (spec:
 Files are copied, never moved. Log lines and exception messages carry counts and the fixed REASON_ constants only, never a
 PatientID, folder name, date or path; organize_report.csv in the output root is the one place the sanitized id appears.
 """
-import csv
 import logging
 import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from rt_dataprep.dicom_io import read_header, sanitize_path_component
+from rt_dataprep.dicom_io import read_header, sanitize_path_component, write_report
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +20,7 @@ REASON_EXISTS = 'output folder already exists'
 REASON_NAME_CLAIMED = 'output folder name already used by an earlier patient folder in this run'
 REASON_MIXED_IDS = 'source folder holds more than one PatientID'
 REASON_NO_DICOM = 'source folder holds no readable DICOM file'
+REASON_NO_ID = 'source folder holds no file with a PatientID'
 REASON_OUTSIDE_ROOT = 'output folder resolves outside the output root'
 REASON_IO_ERROR = 'file system error while reading or copying; nothing kept for this patient'
 REASON_OUTSIDE_SRC = 'output root is the source root or inside it'
@@ -49,16 +49,16 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',)):
     out_root.mkdir(parents=True, exist_ok=True)
     claimed = set()  # casefolded output names taken in this run: a case-insensitive filesystem would merge them
     rows = []
-    for folder in sorted(p for p in src_root.iterdir() if p.is_dir()):
-        try:
-            rows.append(_organize_patient(folder, out_root, claimed, exclude_models))
-        except OSError:  # its message names a path, i.e. the patient: report a fixed reason and go on
-            rows.append(PatientRow(sanitize_path_component(folder.name), 0, 0, 0, OUTCOME_REFUSED, REASON_IO_ERROR))
-            log.warning('organize: %s', REASON_IO_ERROR)
-    with open(out_root / REPORT_NAME, 'w', newline='') as handle:
-        writer = csv.writer(handle)
-        writer.writerow(['patient', 'plan_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'])
-        writer.writerows([r.patient, r.plans, r.misc, r.unreadable, r.outcome, r.reason] for r in rows)
+    try:
+        for folder in sorted(p for p in src_root.iterdir() if p.is_dir()):
+            try:
+                rows.append(_organize_patient(folder, out_root, claimed, exclude_models))
+            except OSError:  # its message names a path, i.e. the patient: report a fixed reason and go on
+                rows.append(PatientRow(sanitize_path_component(folder.name), 0, 0, 0, OUTCOME_REFUSED, REASON_IO_ERROR))
+                log.warning('organize: %s', REASON_IO_ERROR)
+    finally:  # Ctrl-C too: the report lists what was done
+        write_report(out_root, REPORT_NAME, ['patient', 'plan_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'],
+                     ([r.patient, r.plans, r.misc, r.unreadable, r.outcome, r.reason] for r in rows))
     log.info('organize: %d patient folders, %d organized, %d plan folders, %d misc files, %d unreadable files',
              len(rows), sum(r.outcome == OUTCOME_ORGANIZED for r in rows), sum(r.plans for r in rows),
              sum(r.misc for r in rows), sum(r.unreadable for r in rows))
@@ -72,9 +72,12 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
             headers.append((path, read_header(path)))
         except OSError:
             unreadable += 1
+    # A file with a blank PatientID is the folder's but never placed in a plan: it is copied to misc_files (#12).
+    blank = [path for path, ds in headers if not str(ds.get('PatientID', '')).strip()]
+    headers = [(path, ds) for path, ds in headers if str(ds.get('PatientID', '')).strip()]
     ids = {str(ds.get('PatientID', '')) for _, ds in headers}
     if len(ids) != 1:  # never pick one of several ids: that would file one patient's data under another
-        reason = REASON_MIXED_IDS if ids else REASON_NO_DICOM
+        reason = REASON_MIXED_IDS if ids else REASON_NO_ID if blank else REASON_NO_DICOM
         return PatientRow(sanitize_path_component(folder.name), 0, 0, unreadable, OUTCOME_REFUSED, reason)
     name = sanitize_path_component(ids.pop())
     if any('SOPInstanceUID' not in ds for _, ds in headers):  # type 1, and grouping keys on it: dropping the file could drop a dose
@@ -88,6 +91,7 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
     if target.exists():
         return PatientRow(name, 0, 0, unreadable, OUTCOME_SKIPPED, REASON_EXISTS)
     cases, misc = _group(headers, exclude_models)
+    misc += blank
     # Build under a hidden name and rename at the end: a run that dies part-way leaves no folder that a later run
     # would skip as already done.
     partial = out_root / f'.{name}.partial'

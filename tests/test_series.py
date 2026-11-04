@@ -32,6 +32,11 @@ def tree(tmp_path):
     org.mkdir()
     return org, out
 
+def listing(root):
+    """Sorted names under root, without the dated per-run copies of the report."""
+    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv', p.name))
+
+
 
 def report(out):
     with open(out / conv.REPORT_NAME, newline='') as handle:
@@ -118,7 +123,7 @@ def test_an_unexpected_error_on_the_second_patient_keeps_the_first_and_flushes_t
     assert getattr(err, '__cause__') is None and getattr(err, '__context__') is None  # noqa: B009
     assert [(r['patient'], r['folder'], r['outcome'], r['reason']) for r in report(out)] == [
         (PID, 'plan_1', conv.OUTCOME_CONVERTED, ''), (PID_B, '', conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
-    assert sorted(p.name for p in out.iterdir()) == sorted([conv.REPORT_NAME, PID])  # no output and no partial folder of the second
+    assert listing(out) == sorted([conv.REPORT_NAME, PID])  # no output and no partial folder of the second
 
     captured = capfd.readouterr()
     texts = [captured.out, captured.err, caplog.text, f'{err!r} {err}']
@@ -140,7 +145,7 @@ def test_ctrl_c_and_exit_add_no_row_and_still_remove_the_partial(tree, monkeypat
     crash_in_masks_for(monkeypatch, PID_B, exc())
     with pytest.raises(exc):
         conv.convert(org, out)
-    assert [p.name for p in out.iterdir()] == [PID]  # the first patient is done; no partial, no report
+    assert listing(out) == [PID, conv.REPORT_NAME]  # the first patient is done, no partial; the report lists what was done
 
 
 def test_an_output_side_oserror_is_still_an_io_error_row_and_the_run_goes_on(tree, monkeypatch):
@@ -674,7 +679,7 @@ def test_a2_4c_registered_to_two_plans_unregistered_and_refused_ct_and_misc_only
     assert [(r['file'], r['series_instance_uid']) for r in csv_at(out / PID / 'images')] == [
         ('series_CT_1.nii.gz', refused['ct']['series_uid']), ('series_MR_1.nii.gz', free['series_uid'])]
     assert sorted(p.name for p in (out / PID_B).iterdir()) == ['images'] and csv_at(out / PID_B / 'images')[0]['series_instance_uid'] == lone['series_uid']
-    assert sorted(p.name for p in out.iterdir()) == [PID, PID_B, conv.REPORT_NAME]
+    assert listing(out) == [PID, PID_B, conv.REPORT_NAME]
 
 
 def test_k_counts_per_folder_and_modality_in_date_time_uid_order_with_no_gap_for_a_skipped_series(tree):
@@ -817,7 +822,7 @@ def test_b7_a_patient_with_neither_plans_nor_candidates_keeps_the_no_plans_row_a
     rows = conv.convert(org, out).rows
     assert [(r.patient, r.folder, r.outcome, r.reason) for r in rows] == [
         (PID, '', 'skipped', conv.REASON_NO_PLANS), (PID_B, '', 'skipped', conv.REASON_NO_PLANS)]
-    assert [p.name for p in out.iterdir()] == [conv.REPORT_NAME]
+    assert listing(out) == [conv.REPORT_NAME]
 
 
 def test_b7_a_plan_less_patient_whose_candidates_all_fail_gets_an_empty_folder_and_a_rerun_skips_it(tree):
@@ -902,7 +907,7 @@ def test_a_type_error_in_placement_is_an_internal_error_row_and_aborts(tree, mon
         conv.convert(org, out)
     assert str(caught.value) == conv.REASON_INTERNAL
     assert [(r['patient'], r['folder'], r['outcome'], r['reason']) for r in report(out)] == [(PID, '', conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
-    assert [p.name for p in out.iterdir()] == [conv.REPORT_NAME]
+    assert listing(out) == [conv.REPORT_NAME]
 
 
 def test_an_oserror_writing_a_series_is_still_an_io_error_row(tree, monkeypatch):
@@ -918,7 +923,7 @@ def test_an_oserror_writing_a_series_is_still_an_io_error_row(tree, monkeypatch)
     monkeypatch.setattr(conv, 'write_atomic', write)
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', conv.OUTCOME_REFUSED, conv.REASON_IO_ERROR)]
-    assert [p.name for p in out.iterdir()] == [conv.REPORT_NAME]
+    assert listing(out) == [conv.REPORT_NAME]
 
 
 # ---------------------------------------------------------------- review: a CT known to be short never reaches images/
@@ -993,6 +998,28 @@ def test_a_slice_missing_planning_ct_is_skipped_even_where_a_converted_sibling_h
     assert len(csv_at(out / PID / 'plan_2')) == 1  # the planning CT row only
 
 
+def test_a_plan_on_a_planning_ct_its_sibling_found_short_is_refused_too(tree):
+    org, out = tree
+    one = make_plan(org / PID / 'plan_1')
+    second = org / PID / 'plan_2'  # a second RTPLAN on the same CT and RTSTRUCT, its CT copy complete
+    copy_renamed([*one['ct']['paths'], one['folder'] / 'struct.dcm'], second)
+    sd.write_rtplan(second / 'plan.dcm', one['struct'], np.zeros((2, 3)), patient_id=PID, study_uid=one['ct']['study_uid'])
+    Path(one['ct']['paths'][-1]).unlink()  # plan_1: REASON_CT_SLICE_MISSING, so this CT series is known short
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows if r.folder.startswith('plan_')] == [
+        ('plan_1', 'refused', conv.REASON_CT_SLICE_MISSING), ('plan_2', 'refused', conv.REASON_CT_SLICE_MISSING)]
+    assert listing(out / PID) == []
+
+
+def test_legacy_fx_folders_convert_like_plan_folders(tree):
+    org, out = tree
+    make_plan(org / PID / 'fx_2')
+    make_plan(org / PID / 'fx_10')
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome) for r in rows if r.folder.startswith('fx_')] == [('fx_2', 'converted'), ('fx_10', 'converted')]
+    assert {'fx_2', 'fx_10'} <= set(listing(out / PID))
+
+
 # ---------------------------------------------------------------- hardening B6 (#53)
 
 def test_itks_out_of_memory_reading_the_planning_ct_aborts_the_run_and_leaves_no_partial_folder(tree, monkeypatch, caplog):
@@ -1008,7 +1035,7 @@ def test_itks_out_of_memory_reading_the_planning_ct_aborts_the_run_and_leaves_no
     assert str(caught.value) == conv.REASON_INTERNAL
     assert [(r['patient'], r['folder'], r['outcome'], r['reason']) for r in report(out)] == [
         (PID, '', conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
-    assert [p.name for p in out.iterdir()] == [conv.REPORT_NAME]  # no patient folder, no partial
+    assert listing(out) == [conv.REPORT_NAME]  # no patient folder, no partial
     assert any('MemoryError' in message for message in caplog.messages) and PID not in caplog.text
 
 
@@ -1096,3 +1123,16 @@ def test_a_single_slice_is_skipped_by_its_own_guard_before_any_geometry_is_read(
     assert ser.check_volume(items[:1]) is None and ser.check_volume([]) is None
     with pytest.raises(AssertionError):  # the spy is live: two slices do reach the geometry
         ser.check_volume(items[:2])
+
+
+def test_a_blank_patient_id_series_in_misc_files_is_never_placed(tree):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    mr = put(org / PID / 'misc_files', frame_uid=plan['ct']['frame_uid'])  # an MR on the plan's frame
+    for path in mr['paths']:  # organize put it in misc_files because its PatientID is blank
+        ds = pydicom.dcmread(path)
+        ds.PatientID = ''
+        ds.save_as(path)
+    conv.convert(org, out)
+    assert len(csv_at(out / PID / 'plan_1')) == 1  # the planning CT row only
+    assert not (out / PID / conv.IMAGES_NAME).exists()

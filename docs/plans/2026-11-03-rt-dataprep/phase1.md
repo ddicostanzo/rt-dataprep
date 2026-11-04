@@ -170,7 +170,8 @@ Acceptance tests:
 
 ## Parity check on real data (OSC, run by the user, after F2)
 
-**Convert parity.** The OSC `raw/<mrn>/fx_<n>/` tree is already organized, so run `convert` on it directly, then
+**Convert parity.** The OSC `raw/<mrn>/fx_<n>/` tree is already organized (convert and preprocess read `fx_<n>` like
+`plan_<n>` and keep the name), so run `convert` on it directly, then
 `preprocess --legacy-rnt --legacy-linear-masks` on convert's output (never on `raw/`), and match against the pooled
 legacy folders by folder name, the same pairing `scripts/convert_dose.py` uses. This keeps convert parity separate from organize. `scripts/parity.py` prints
 aggregate counts only, with no identifiers. Run on N ≥ 20 fractions. Pass criteria:

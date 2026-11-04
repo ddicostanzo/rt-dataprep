@@ -18,6 +18,11 @@ from rt_dataprep.preprocess import LEGACY_RNT, PreprocessSteps
 ROTATED = (0.8660254037844387, -0.5, 0.0, 0.5, 0.8660254037844387, 0.0, 0.0, 0.0, 1.0)  # 30 degrees about z
 QUARTER = (0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)  # 90 degrees about z: D @ (a, b, c) = (-b, a, c)
 
+def listing(root):
+    """Sorted names under root, without the dated per-run copies of the report."""
+    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv', p.name))
+
+
 
 def make_image(array, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), direction=(1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0)):
     """A float32 image from a (z, y, x) array; spacing, origin and direction are in (x, y, z) order."""
@@ -341,7 +346,7 @@ def test_preset_writes_the_prefixed_files_and_leaves_the_input_alone(tmp_path):
     row = plan_row(report)
     assert (row.outcome, row.reason, row.files) == ('preprocessed', '', expected) and len(report.rows) == 1
     assert sorted(p.name for p in (out / 'SYNTHETICPTA' / 'plan_1').iterdir()) == sorted(expected)
-    assert sorted(p.name for p in out.iterdir()) == ['SYNTHETICPTA', 'preprocess_report.csv']  # no partial left
+    assert listing(out) == ['SYNTHETICPTA', 'preprocess_report.csv']  # no partial left
     assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='plan_1', outcome='preprocessed', reason='', files=';'.join(expected))]
     done = out / 'SYNTHETICPTA' / 'plan_1'
     assert (done / 'applicator_a.txt').read_bytes() == APPLICATOR_BYTES
@@ -475,7 +480,7 @@ def test_a_patient_without_a_plan_folder_with_a_series_csv_is_skipped_and_writes
     report = pre.preprocess(converted, out, SMALL)
     assert [(r.patient, r.folder, r.outcome, r.reason, r.files) for r in report.rows] == [
         ('SYNTHETICPTA', '', 'skipped', pre.REASON_NO_PLANS, [])]
-    assert sorted(p.name for p in out.iterdir()) == ['preprocess_report.csv']
+    assert listing(out) == ['preprocess_report.csv']
 
 
 def refuse(tmp_path, reason, change):
@@ -579,7 +584,7 @@ def test_a_refused_plan_folder_that_cannot_be_removed_drops_the_patient(tmp_path
     monkeypatch.setattr(pre, 'check_crop', crop)
     report = pre.preprocess(converted, out, SMALL)
     assert [(r.folder, r.reason) for r in report.rows] == [('', pre.REASON_IO_ERROR)]
-    assert sorted(p.name for p in out.iterdir()) == ['preprocess_report.csv']
+    assert listing(out) == ['preprocess_report.csv']
 
 
 def test_a_missing_converted_root_writes_no_output_root(tmp_path):
@@ -693,7 +698,7 @@ def test_an_oserror_while_writing_refuses_the_patient_and_removes_the_partial(tm
     report = pre.preprocess(converted, out, SMALL)
     assert [(r.patient, r.folder, r.outcome, r.reason) for r in report.rows] == [
         ('SYNTHETICPTA', '', 'refused', pre.REASON_IO_ERROR), ('SYNTHETICPTB', 'plan_1', 'preprocessed', '')]
-    assert sorted(p.name for p in out.iterdir()) == ['SYNTHETICPTB', 'preprocess_report.csv']
+    assert listing(out) == ['SYNTHETICPTB', 'preprocess_report.csv']
 
 
 def test_a_compute_failure_aborts_with_a_flushed_report_and_nothing_chained(tmp_path, monkeypatch):
@@ -711,7 +716,7 @@ def test_a_compute_failure_aborts_with_a_flushed_report_and_nothing_chained(tmp_
     assert 'direct cause' not in chain and 'During handling' not in chain  # nothing chained
     assert not issubclass(pre.PreprocessAborted, (ValueError, OSError))
     assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='')]
-    assert sorted(p.name for p in out.iterdir()) == ['preprocess_report.csv']  # no partial, and the next patient was not started
+    assert listing(out) == ['preprocess_report.csv']  # no partial, and the next patient was not started
 
 
 def test_running_out_of_memory_reading_a_nifti_aborts_instead_of_refusing_the_plan(tmp_path, monkeypatch):
@@ -725,7 +730,7 @@ def test_running_out_of_memory_reading_a_nifti_aborts_instead_of_refusing_the_pl
     with pytest.raises(pre.PreprocessAborted):
         pre.preprocess(converted, out, SMALL)
     assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='')]
-    assert sorted(p.name for p in out.iterdir()) == ['preprocess_report.csv']
+    assert listing(out) == ['preprocess_report.csv']
 
 
 def test_each_patient_is_built_under_a_partial_name_and_renamed(tmp_path, monkeypatch):
