@@ -544,10 +544,12 @@ def test_a_ct_shorter_than_one_output_voxel_refuses_the_plan_only(tmp_path):
     assert plan_row(report, folder='plan_2').outcome == 'preprocessed'
 
 
-def test_a_ct_that_only_harmonize_spacing_would_empty_refuses(tmp_path):
+@pytest.mark.parametrize('resample', [False, True])  # True: 2 voxels after a 0.5 mm resample, none at 1.25 mm (#55)
+def test_a_ct_that_only_harmonize_spacing_would_empty_refuses(tmp_path, resample):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
-    write_plan(converted, n=2, spacing=0.6, dose=None, masks={})  # 1.2 mm per axis: one voxel at 1 mm, none at 1.25 mm
-    report = pre.preprocess(converted, out, dataclasses.replace(SMALL, resample=False))
+    write_plan(converted, n=2, spacing=0.6, dose=None, masks={})  # 1.2 mm per axis: none at 1.25 mm
+    # an axis at 1 voxel stays 1 (torchio), so only a finer initial spacing can survive it and then empty
+    report = pre.preprocess(converted, out, dataclasses.replace(SMALL, resample=resample, new_spacing=(0.5, 0.5, 0.5)))
     assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_TOO_SMALL)
 
 
@@ -825,3 +827,28 @@ def test_matches_torchio(tmp_path):
     assert mine_labels.GetSize() == tio_labels.GetSize() == mine.GetSize()
     assert np.array_equal(sitk.GetArrayFromImage(mine_labels), sitk.GetArrayFromImage(tio_labels).astype(np.uint8))
     assert sitk.GetArrayFromImage(mine_labels).any()
+
+
+def test_legacy_fx_folders_are_preprocessed(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted, plan='fx_1')
+    report = pre.preprocess(converted, out, SMALL)
+    assert plan_row(report, folder='fx_1').outcome == 'preprocessed'
+
+
+def test_ctrl_c_still_writes_the_report_of_what_was_done(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    write_plan(converted, patient='SYNTHETICPTB')
+    real, calls = pre.preprocess_patient, []
+
+    def interrupt(*args):
+        calls.append(1)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return real(*args)
+
+    monkeypatch.setattr(pre, 'preprocess_patient', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        pre.preprocess(converted, out, SMALL)
+    assert [(r['patient'], r['outcome']) for r in report_rows(out)] == [('SYNTHETICPTA', 'preprocessed')]

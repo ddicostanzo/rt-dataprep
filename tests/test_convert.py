@@ -596,7 +596,7 @@ def test_series_csv_is_the_last_file_and_goes_through_a_temp_name(tree, monkeypa
         real(source, target)
     monkeypatch.setattr(conv.os, 'replace', spy)
     conv.convert(org, out)
-    source, target, _ = replaced[-1]
+    source, target, _ = [r for r in replaced if r[2] == 'plan_1'][-1]  # the run report is replaced after it, in out/
     assert target == 'series.csv' and source != target and source.endswith('series.csv')
     assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == ['liver.nii.gz', 'planning_ct.nii.gz', 'series.csv']
 
@@ -876,6 +876,21 @@ def test_a_dose_with_negative_or_absolute_frame_offsets_converts_to_the_grid_of_
     assert got.GetOrigin() == ct.GetOrigin() and got.GetSize() == ct.GetSize()
     np.testing.assert_allclose(sitk.GetArrayFromImage(got), STORED * SCALING, atol=1e-5)  # the relative-positive form's dose
     assert value_at(got, physical_point((1, 0, 0, 0, 1, 0), NAMED)) == pytest.approx(STORED[NAMED] * SCALING, abs=1e-5)
+
+
+def test_a_kept_roi_whose_only_points_are_point_items_refuses_the_plan(tree):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', rois=[dict(number=1, name='Liver', kind='box', box=INSIDE)])
+    struct = pydicom.dcmread(plan['folder'] / 'struct.dcm')
+    for item in struct.ROIContourSequence[0].ContourSequence:  # planar items left with no points
+        item.NumberOfContourPoints, item.ContourData = 0, []
+    point = pydicom.Dataset()
+    point.ContourGeometricType, point.NumberOfContourPoints, point.ContourData = 'POINT', 1, list(ORIGIN)
+    struct.ROIContourSequence[0].ContourSequence.append(point)
+    struct.save_as(plan['folder'] / 'struct.dcm')
+    rows = conv.convert(org, out).rows
+    # an empty ContourData reads back as no value: refused at the tag read, before DicomRTTool (#69)
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_MISSING_TAG)
 
 
 def test_point_items_of_a_kept_roi_are_dropped_and_the_mask_is_its_planar_contours(tree):

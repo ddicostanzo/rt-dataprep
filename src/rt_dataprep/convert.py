@@ -167,8 +167,11 @@ def _convert_patient(folder, out_root, exclude_models):
     blank = [ds for _, ds in misc_headers if not str(ds.get('PatientID', '')).strip()]
     misc_headers = [(p, ds) for p, ds in misc_headers if str(ds.get('PatientID', '')).strip()]  # blank id: kept, never placed (#12)
     headers = [item for found, _ in plan_headers for item in found] + misc_headers  # folder order: plan_<n> by n, then misc_files
-    # A series with a blank-id slice in misc_files is short without it: known short, like a slice-missing planning CT.
-    split = {_tag(ds, 'SeriesInstanceUID') for ds in blank} & {_tag(ds, 'SeriesInstanceUID') for _, ds in headers} - {''}
+    # A series with a blank-id slice in misc_files is short without it: known short, like a slice-missing planning CT. A blank-id
+    # copy of a slice already present (same SOPInstanceUID) takes nothing away, and a blank or whitespace UID is no series (#71).
+    present = {_tag(ds, 'SOPInstanceUID') for _, ds in headers}
+    series_of = lambda items: {u for ds in items if (u := _tag(ds, 'SeriesInstanceUID')).strip()}  # noqa: E731
+    split = series_of(ds for ds in blank if _tag(ds, 'SOPInstanceUID') not in present) & series_of(ds for _, ds in headers)
     if not plans and not ser.candidates(headers, exclude_models)[0]:
         return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_NO_PLANS)]
     # Built under a hidden name and renamed at the end: a run that dies part-way leaves no folder that a later run would
@@ -192,7 +195,7 @@ def _convert_patient(folder, out_root, exclude_models):
         # Organize copies a study whole into every folder that holds it, so a converted folder's copy is complete: the
         # SOP dedup keeps it over a short folder's copy (#35). Only a SOP found nowhere else stays in a short folder.
         ordered = sorted(headers, key=lambda item: item[0].parent in short)
-        images_row = _place_series(folder.name, ordered, exclude_models, outcomes, partial, short, lost, misc_taint)
+        images_row = _place_series(folder.name, ordered, exclude_models, outcomes, partial, short, lost, misc_taint, misc_dir)
         rows += [images_row] if images_row else []
         for row, result in outcomes:  # series.csv of each converted plan folder goes in last
             if result is not None:
@@ -226,7 +229,8 @@ def _refuse_on_lost_ct(row, result, partial, lost):
     return ConvertRow(row.patient, row.folder, OUTCOME_REFUSED, REASON_CT_SLICE_MISSING), None
 
 
-def _place_series(patient, headers, exclude_models, outcomes, partial, short=frozenset(), lost=frozenset(), misc_taint=(frozenset(), False)):
+def _place_series(patient, headers, exclude_models, outcomes, partial, short=frozenset(), lost=frozenset(), misc_taint=(frozenset(), False),
+                  misc_dir=None):
     """
     Write every other series of the patient into the converted plan folders it is registered to, else into images/, each
     series read once. Adds the series files and rows to the plan rows and results; writes images/series.csv. Returns the
@@ -234,10 +238,11 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
     series.py, anything else is the patient's REASON_INTERNAL. A series with a kept file in a folder of `short` (refused
     plan folders that may have lost a slice) or whose SeriesInstanceUID is in `lost` (known short) is skipped and counted,
     and so is a series of a tainted study (`misc_taint` and series.tainted_studies) or, when a taint has no study, a series
-    held only in misc_files.
+    held only in `misc_dir` (the patient's misc_files), or whose slices disagree on study.
     """
     found, regs, by_sop = ser.candidates(headers, exclude_models)
     converted = [(row, result, result.series_rows[0]) for row, result in outcomes if result is not None]  # row 0 is the CT row
+    assert all(ct['kind'] == 'ct' for _, _, ct in converted)
     planning = {result.ct_series_uid for _, result, _ in converted}
     found = [(uid, slices) for uid, slices in found if uid not in planning]
     if not found:
@@ -246,8 +251,8 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
     tainted, blind = misc_taint[0] | dropped, misc_taint[1] or dropped_blind
 
     def at_risk(slices):
-        return (_tag(slices[0][1], 'StudyInstanceUID') in tainted
-                or (blind and all(path.parent.name == 'misc_files' for path, _ in slices)))
+        studies = {_tag(ds, 'StudyInstanceUID') for _, ds in slices}  # slices that disagree on study are skipped too (#69)
+        return len(studies) > 1 or bool(studies & tainted) or (blind and all(path.parent == misc_dir for path, _ in slices))
     checked = [None if uid in lost or any(path.parent in short for path, _ in slices) or at_risk(slices) else ser.check_volume(slices)
                for uid, slices in found]
     skipped = checked.count(None)
