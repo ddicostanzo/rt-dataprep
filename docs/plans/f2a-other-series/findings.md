@@ -34,3 +34,23 @@ Plan: `docs/plans/f2a-other-series/plan.json`. Read both before exploring. Appen
 - Criterion 7 was amended by the user (the CLI's basicConfig puts the crash-site log line and the summary line on stderr):
   stdout empty, stderr's last line exactly 'rt_dataprep: ' + REASON_INTERNAL, no stderr line holds the exception message,
   a UID or a path. The log level and the summary line are unchanged; the CLI test asserts the amended wording.
+## task-02
+Fixtures in `tests/synthetic_dicom.py` (all new keywords optional; defaults checked identical to the old output tag for tag):
+- `write_reg(..., frame_uid=None, registrations=None)`: `frame_uid` is the REG's own FrameOfReferenceUID.
+  `registrations` is a list of dicts `frame_uid` (item frame, omitted if absent), `images` (SOP UIDs, omitted if absent)
+  and `matrices` (required) = `[(type, 16 values)]`, all in ONE MatrixRegistrationSequence item's MatrixSequence.
+  Without it no RegistrationSequence is written.
+- `transformation_matrix(rotation=None, translation=(0, 0, 0))`: the 16 row-major values (M11 M12 M13 M14 M21 ...) of
+  x_reg = R . x_item + t, i.e. item frame -> REG frame. A2.4 fixture (MR frame at +10 mm x of the CT frame, so
+  p_ct = p_mr + (10, 0, 0)): REG in the CT frame = CT item `transformation_matrix()`, MR item
+  `transformation_matrix(translation=(10, 0, 0))`; REG in the MR frame = MR item identity, CT item `translation=(-10, 0, 0)`.
+- `write_ct_series(..., orientation=None, positions=None, rescales=None, number_of_frames=None, pixel_spacing=True)`:
+  `orientation` = 6 cosines (slices then step `spacing[2]` along row x column); `positions` = one (x, y, z) per slice
+  replacing the computed ones (jitter, gap, duplicate; must match the slice count); `rescales` = one (slope, intercept)
+  per slice; `number_of_frames` sets the tag only (pixel data stays single-frame); `pixel_spacing=False` omits the tag.
+  `modality='PT'` writes PET Image Storage (only the SOP class changes: no Units or other PET tags).
+- Gotchas: `spacing` is (between columns, between rows, between slices) whatever the orientation. Sagittal
+  `(0, 1, 0, 0, 0, -1)` has normal (-1, 0, 0), so slices step toward -x. Matrix values are written as `%.10g` strings
+  (DS limit 16 chars). `images` items always carry the CT SOPClass UID. `matrices=[]` writes an item with an empty
+  MatrixSequence; an item with no MatrixRegistrationSequence at all is not expressible (add a keyword if task-04 needs it).
+  Any `modality` other than CT/MR/PT now raises KeyError (it used to fall back to CT Image Storage).

@@ -104,3 +104,85 @@ def test_rtdose_parameters_round_trip(tmp_path):
     ds = pydicom.dcmread(path)
     assert (ds.DoseUnits, ds.DoseSummationType, ds.FrameOfReferenceUID) == ('RELATIVE', 'FRACTION', frame_uid)
     assert ds.ReferencedRTPlanSequence[0].ReferencedSOPInstanceUID == plan_uid
+
+
+def test_reg_defaults_have_no_registration_sequence(tmp_path):
+    path = tmp_path / 'reg.dcm'
+    sd.write_reg(path, sd.generate_uid(), sd.generate_uid())
+    ds = pydicom.dcmread(path)
+    assert 'RegistrationSequence' not in ds and 'FrameOfReferenceUID' not in ds
+
+
+def test_reg_registration_sequence_round_trip(tmp_path):
+    path = tmp_path / 'reg.dcm'
+    reg_frame, ct_frame, mr_frame, image = (sd.generate_uid() for _ in range(4))
+    shift = sd.transformation_matrix(translation=(10.0, -2.5, 0.125))
+    items = [
+        dict(frame_uid=ct_frame, matrices=[('RIGID', sd.transformation_matrix())]),
+        dict(frame_uid=mr_frame, images=[image], matrices=[('RIGID', shift), ('AFFINE', [2.0] + [0.0] * 15)]),
+        dict(matrices=[('RIGID_SCALE', shift)]),  # no frame, no images
+    ]
+    sd.write_reg(path, sd.generate_uid(), sd.generate_uid(), frame_uid=reg_frame, registrations=items)
+    ds = pydicom.dcmread(path)
+    assert ds.FrameOfReferenceUID == reg_frame
+    first, second, third = ds.RegistrationSequence
+    assert first.FrameOfReferenceUID == ct_frame and 'ReferencedImageSequence' not in first
+    assert second.FrameOfReferenceUID == mr_frame
+    assert [i.ReferencedSOPInstanceUID for i in second.ReferencedImageSequence] == [image]
+    assert 'FrameOfReferenceUID' not in third
+    matrices = [[(m.FrameOfReferenceTransformationMatrixType, [float(v) for v in m.FrameOfReferenceTransformationMatrix])
+                 for m in item.MatrixRegistrationSequence[0].MatrixSequence] for item in (first, second, third)]
+    assert matrices[0] == [('RIGID', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])]
+    assert matrices[1] == [('RIGID', [1, 0, 0, 10, 0, 1, 0, -2.5, 0, 0, 1, 0.125, 0, 0, 0, 1]),
+                           ('AFFINE', [2.0] + [0.0] * 15)]
+    assert matrices[2][0][0] == 'RIGID_SCALE'
+
+
+def test_transformation_matrix_maps_item_frame_to_reg_frame():
+    rotation = [[0, -1, 0], [1, 0, 0], [0, 0, 1]]  # 90 degrees about z
+    values = sd.transformation_matrix(rotation=rotation, translation=(10, 20, 30))
+    assert values == [0, -1, 0, 10, 1, 0, 0, 20, 0, 0, 1, 30, 0, 0, 0, 1]  # M11 M12 M13 M14 M21 ...
+    point = np.array(values).reshape(4, 4) @ [1, 0, 0, 1]  # (1, 0, 0) in the item frame
+    assert list(point[:3]) == [10, 21, 30]
+
+
+def test_ct_series_defaults_unchanged(tmp_path):
+    ct = sd.write_ct_series(tmp_path, np.zeros((2, 3, 4)), spacing=(0.5, 2.0, 3.0), origin=(10.0, 20.0, 30.0))
+    ds = [pydicom.dcmread(p) for p in ct['paths']]
+    assert [list(d.ImagePositionPatient) for d in ds] == [[10.0, 20.0, 30.0], [10.0, 20.0, 33.0]]
+    assert list(ds[0].ImageOrientationPatient) == [1, 0, 0, 0, 1, 0]
+    assert list(ds[0].PixelSpacing) == [2.0, 0.5] and ds[0].Modality == 'CT'
+    assert (ds[0].RescaleSlope, ds[0].RescaleIntercept) == (1, 0)
+    assert 'NumberOfFrames' not in ds[0]
+
+
+def test_ct_series_sagittal_orientation(tmp_path):
+    orientation = (0, 1, 0, 0, 0, -1)  # normal = row x column = (-1, 0, 0)
+    ct = sd.write_ct_series(tmp_path, np.zeros((3, 4, 5)), spacing=(1.0, 1.0, 2.5), origin=(10.0, 20.0, 30.0),
+                            orientation=orientation)
+    ds = [pydicom.dcmread(p) for p in ct['paths']]
+    assert list(ds[0].ImageOrientationPatient) == list(orientation)
+    assert [list(d.ImagePositionPatient) for d in ds] == [[10.0, 20.0, 30.0], [7.5, 20.0, 30.0], [5.0, 20.0, 30.0]]
+
+
+def test_ct_series_explicit_positions(tmp_path):
+    positions = [(0, 0, 0), (0, 0, 1.01), (0, 0, 1.01), (0, 0, 5)]  # jitter, a duplicate, a gap
+    ct = sd.write_ct_series(tmp_path, np.zeros((4, 2, 2)), positions=positions)
+    ds = [pydicom.dcmread(p) for p in ct['paths']]
+    assert [list(d.ImagePositionPatient) for d in ds] == [list(p) for p in positions]
+    assert [d.InstanceNumber for d in ds] == [1, 2, 3, 4]
+
+
+def test_ct_series_pet_modality_and_rescale(tmp_path):
+    ct = sd.write_ct_series(tmp_path, np.zeros((2, 2, 2)), modality='PT', rescales=[(0.5, 1), (2.25, -3)])
+    ds = [pydicom.dcmread(p) for p in ct['paths']]
+    assert {d.Modality for d in ds} == {'PT'}
+    assert {d.SOPClassUID for d in ds} == {pydicom.uid.PositronEmissionTomographyImageStorage}
+    assert [(float(d.RescaleSlope), float(d.RescaleIntercept)) for d in ds] == [(0.5, 1), (2.25, -3)]
+
+
+def test_ct_series_number_of_frames_and_no_pixel_spacing(tmp_path):
+    ct = sd.write_ct_series(tmp_path, np.zeros((2, 2, 2)), number_of_frames=4, pixel_spacing=False)
+    ds = [pydicom.dcmread(p) for p in ct['paths']]
+    assert {d.NumberOfFrames for d in ds} == {4}
+    assert all('PixelSpacing' not in d for d in ds)

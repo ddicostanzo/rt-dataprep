@@ -71,29 +71,44 @@ def _writing_unvalidated():
 
 
 def write_ct_series(folder, values, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), series_uid=None, frame_uid=None,
-                    prefix='ct', image_type=None, modality='CT', **meta):
+                    prefix='ct', image_type=None, modality='CT', orientation=None, positions=None, rescales=None,
+                    number_of_frames=None, pixel_spacing=True, **meta):
     """
     One CT slice file per z of `values` (a (z, y, x) int array; HU as stored, slope 1, intercept 0), axial, slice k at
     origin z + k * spacing z, in files named <prefix>_<k>.dcm (a second series in the folder needs its own prefix).
     image_type: the ImageType list (None omits it), e.g. ['ORIGINAL', 'PRIMARY', 'LOCALIZER']. All slices share one study
-    (study_uid= or a fresh one). modality='MR' writes MR Image Storage instead (a diagnostic series). Returns {'series_uid', 'frame_uid', 'study_uid', 'sop_uids', 'paths'}.
+    (study_uid= or a fresh one). modality='MR' or 'PT' writes MR or PET Image Storage instead. Returns {'series_uid', 'frame_uid', 'study_uid', 'sop_uids', 'paths'}.
+    All optional, defaults as above: orientation: the 6 ImageOrientationPatient values (slices then step spacing z along
+    row x column cosines; spacing is (between columns, between rows, between slices)). positions: one ImagePositionPatient
+    (x, y, z) per slice, replacing the computed ones (jitter, a gap, duplicates). rescales: one (slope, intercept) per
+    slice. number_of_frames sets the NumberOfFrames tag only. pixel_spacing=False omits PixelSpacing.
     """
     series_uid, frame_uid = series_uid or generate_uid(), frame_uid or generate_uid()
     values = np.asarray(values, dtype=np.int16)
     meta['study_uid'] = meta.get('study_uid') or generate_uid()
     sop_uids, paths = [], []
-    for k, plane in enumerate(values):
-        sop_class = pydicom.uid.MRImageStorage if modality == 'MR' else pydicom.uid.CTImageStorage
+    if positions is None and orientation is None:
+        positions = [[origin[0], origin[1], origin[2] + k * spacing[2]] for k in range(len(values))]
+    elif positions is None:
+        normal = np.cross(orientation[:3], orientation[3:])
+        positions = [np.asarray(origin) + k * spacing[2] * normal for k in range(len(values))]
+    rescales = rescales or [(1, 0)] * len(values)
+    sop_class = dict(MR=pydicom.uid.MRImageStorage, PT=pydicom.uid.PositronEmissionTomographyImageStorage,
+                     CT=pydicom.uid.CTImageStorage)[modality]
+    for k, (plane, position, (slope, intercept)) in enumerate(zip(values, positions, rescales, strict=True)):
         ds = _dataset(Path(folder) / f'{prefix}_{k:03d}.dcm', sop_class, modality, frame_uid=frame_uid,
                       series_uid=series_uid, **meta)
         if image_type:
             ds.ImageType = list(image_type)
         ds.InstanceNumber = k + 1
-        ds.ImagePositionPatient = [origin[0], origin[1], origin[2] + k * spacing[2]]
-        ds.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
-        ds.PixelSpacing = [spacing[1], spacing[0]]  # [between rows, between columns]
+        ds.ImagePositionPatient = list(position)
+        ds.ImageOrientationPatient = [1, 0, 0, 0, 1, 0] if orientation is None else list(orientation)
+        if pixel_spacing:
+            ds.PixelSpacing = [spacing[1], spacing[0]]  # [between rows, between columns]
         ds.SliceThickness = spacing[2]
-        ds.RescaleSlope, ds.RescaleIntercept = 1, 0
+        ds.RescaleSlope, ds.RescaleIntercept = slope, intercept
+        if number_of_frames is not None:
+            ds.NumberOfFrames = number_of_frames
         _set_pixels(ds, plane, bits=16, signed=True)
         sop_uids.append(ds.SOPInstanceUID)
         paths.append(_save(ds))
@@ -356,12 +371,18 @@ def write_rtdose(path, stored, scaling=1e-4, position=(0.0, 0.0, 0.0), orientati
     return ds.SOPInstanceUID
 
 
-def write_reg(path, study_uid, other_study_uid, sop_uid=None, **meta):
+def write_reg(path, study_uid, other_study_uid, sop_uid=None, frame_uid=None, registrations=None, **meta):
     """
     A spatial registration (REG) in study `study_uid` whose StudiesContainingOtherReferencedInstancesSequence names
-    `other_study_uid` (a study UID, or a list of them). Returns its SOPInstanceUID.
+    `other_study_uid` (a study UID, or a list of them). frame_uid: the REG's own FrameOfReferenceUID (default none).
+    registrations: a RegistrationSequence, a list of dicts with frame_uid (the item's FrameOfReferenceUID, omitted when
+    absent), images (SOP instance UIDs for its ReferencedImageSequence, omitted when absent; the class written is CT
+    Image Storage whatever the series) and matrices (required): [(FrameOfReferenceTransformationMatrixType, 16 values)],
+    one MatrixSequence item each, in one MatrixRegistrationSequence item. Each matrix maps the item's frame into the REG's
+    frame (PS3.3 C.20.2.1.1); see transformation_matrix. Returns its SOPInstanceUID.
     """
-    ds = _dataset(path, pydicom.uid.SpatialRegistrationStorage, 'REG', sop_uid=sop_uid, study_uid=study_uid, **meta)
+    ds = _dataset(path, pydicom.uid.SpatialRegistrationStorage, 'REG', sop_uid=sop_uid, study_uid=study_uid,
+                  frame_uid=frame_uid, **meta)
     others = [other_study_uid] if isinstance(other_study_uid, str) else other_study_uid
     items = []
     for uid in others:
@@ -369,8 +390,38 @@ def write_reg(path, study_uid, other_study_uid, sop_uid=None, **meta):
         item.StudyInstanceUID = uid
         items.append(item)
     ds.StudiesContainingOtherReferencedInstancesSequence = items
+    if registrations is not None:
+        ds.RegistrationSequence = [_registration_item(**item) for item in registrations]
     _save(ds)
     return ds.SOPInstanceUID
+
+
+def _registration_item(matrices, frame_uid=None, images=None):
+    sequence = []
+    for matrix_type, values in matrices:
+        matrix = Dataset()
+        matrix.FrameOfReferenceTransformationMatrixType = matrix_type
+        matrix.FrameOfReferenceTransformationMatrix = [format(float(v), '.10g') for v in values]  # DS: 16 chars at most
+        sequence.append(matrix)
+    registration = Dataset()
+    registration.MatrixSequence = sequence
+    item = Dataset()
+    if frame_uid:
+        item.FrameOfReferenceUID = frame_uid
+    if images:
+        item.ReferencedImageSequence = [_image_reference(uid) for uid in images]
+    item.MatrixRegistrationSequence = [registration]
+    return item
+
+
+def transformation_matrix(rotation=None, translation=(0.0, 0.0, 0.0)):
+    """
+    The 16 FrameOfReferenceTransformationMatrix values, row-major (M11 M12 M13 M14 M21 ... M44), of x_reg = R . x_item + t:
+    the top three rows are R (3x3, default identity) then t, the last row is 0 0 0 1.
+    """
+    rotation = np.eye(3) if rotation is None else np.asarray(rotation, dtype=float)
+    top = np.hstack([rotation, np.asarray(translation, dtype=float).reshape(3, 1)])
+    return [*top.ravel().tolist(), 0.0, 0.0, 0.0, 1.0]
 
 
 def _set_pixels(ds, array, bits, signed):
