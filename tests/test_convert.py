@@ -746,8 +746,8 @@ def test_a2_10_a_slice_lost_after_the_header_read_refuses_without_the_path_ITK_n
     assert len(secrets) > 10
     real = conv.read_folder_headers
 
-    def read_then_lose_a_slice(folder):
-        found = real(folder)
+    def read_then_lose_a_slice(folder, *args, **kwargs):
+        found = real(folder, *args, **kwargs)
         if Path(folder).name == 'plan_1':
             lost.unlink()  # setup only: a slice lost between the header read and ITK's read; the code under test deletes nothing
         return found
@@ -1118,3 +1118,113 @@ def test_an_attribute_error_from_our_own_frame_in_the_classifier_aborts_the_run(
     with open(out / conv.REPORT_NAME, newline='') as handle:
         rows = list(csv.DictReader(handle))
     assert [(r['patient'], r['outcome'], r['reason']) for r in rows] == [(PID, conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
+
+
+# ---------------------------------------------------------------- pooled header reads, workers, run timing line
+
+TIMING = re.compile(r'convert: (\d+\.\d) s total, (\d+\.\d) s reading, (\d+\.\d) s converting, (\d+) files, workers (\d+)')
+
+
+def add_bad_files(folder):
+    """Two files that fail the read (pydicom tolerates a cut-off DICOM, so: an empty .dcm and a text file); neither is a header."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'SYNTHETIC_empty.dcm').write_bytes(b'')
+    (folder / 'SYNTHETIC_text.txt').write_bytes(b'not a dicom file')
+
+
+def timing_records(caplog):
+    return [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.convert' and ' s total, ' in r.getMessage()]
+
+
+def rows_of(report):
+    return [(r.patient, r.folder, r.outcome, r.reason, r.files, r.skipped_series) for r in report.rows]
+
+
+@pytest.mark.parametrize('workers', [1, 4])
+def test_read_folder_headers_sorted_by_path_with_the_flag_for_any_workers(tree, workers):
+    org, _ = tree
+    make_plan(org / PID / 'plan_1')
+    add_bad_files(org / PID / 'plan_1')
+    headers, unreadable = conv.read_folder_headers(org / PID / 'plan_1', workers=workers)
+    assert unreadable and [p for p, _ in headers] == sorted(p for p, _ in headers)
+    assert sorted(p.name for p, _ in headers) == sorted(p.name for p in (org / PID / 'plan_1').glob('*.dcm') if 'empty' not in p.name)
+
+
+def test_the_rows_are_identical_for_workers_1_and_4_with_bad_files_in_a_plan_folder_and_in_misc_files(tree, tmp_path):
+    org, out = tree
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    add_bad_files(org / PID / 'plan_1')
+    make_plan(org / PID / 'plan_2', doses=[dose_spec(20, 'PLAN')])
+    misc = org / PID / 'misc_files'
+    misc.mkdir()
+    sd.write_ct_series(misc, np.zeros(SHAPE), patient_id=PID)
+    add_bad_files(misc)
+    serial = rows_of(conv.convert(org, out))
+    pooled = rows_of(conv.convert(org, tmp_path / 'out4', workers=4))
+    assert pooled == serial
+    assert [(r[1], r[2], r[3]) for r in serial if r[1] != 'images'] == [
+        ('plan_1', conv.OUTCOME_REFUSED, conv.REASON_FILE_UNREADABLE), ('plan_2', conv.OUTCOME_CONVERTED, '')]  # not a vacuous equality
+
+
+def test_one_timing_line_after_the_summary_counts_the_headers_read_and_nothing_of_a_refused_patient(tree, caplog, monkeypatch):
+    org, out = tree
+    other, refused = 'SYNTHETICPTB', 'SYNTHETICPTC'
+    make_plan(org / PID / 'plan_1')  # 6 headers
+    add_bad_files(org / PID / 'plan_1')
+    misc = org / PID / 'misc_files'
+    misc.mkdir()
+    sd.write_ct_series(misc, np.zeros(SHAPE), patient_id=PID)  # 4 headers
+    add_bad_files(misc)
+    make_plan(org.parent / 'scratch', patient=other)
+    (org / other / 'misc_files').mkdir(parents=True)
+    for name in ('struct.dcm', 'plan.dcm'):  # 2 headers, no image series and no plan folder: the patient is skipped
+        (org / other / 'misc_files' / name).write_bytes((org.parent / 'scratch' / name).read_bytes())
+    make_plan(org / refused / 'plan_1', patient=refused)  # read, then its misc_files read fails: none of it counts
+    add_bad_files(org / refused / 'misc_files')
+    real = conv.read_folder_headers
+
+    def fail_misc_of_refused(folder, *args, **kwargs):
+        if Path(folder).name == 'misc_files' and Path(folder).parent.name == refused:
+            raise OSError('SYNTHETIC_unlistable')
+        return real(folder, *args, **kwargs)
+    monkeypatch.setattr(conv, 'read_folder_headers', fail_misc_of_refused)
+    caplog.set_level(logging.INFO)
+    rows = conv.convert(org, out, workers=2).rows
+    assert (row_of(rows, '').reason, [r.reason for r in rows if r.patient == refused]) == (
+        conv.REASON_NO_PLANS, [conv.REASON_IO_ERROR])
+    texts = [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.convert']
+    line = timing_records(caplog)
+    assert len(line) == 1
+    total, reading, converting, files, workers = TIMING.fullmatch(line[0]).groups()
+    assert (int(files), int(workers)) == (6 + 4 + 2, 2)  # 16 files on disk in the counted patients, 12 are headers; the refused patient adds nothing
+    assert float(total) >= float(reading) >= 0 and float(converting) >= 0
+    assert texts.index(line[0]) == next(i for i, t in enumerate(texts) if t.startswith('convert: ') and 'plan rows' in t) + 1
+    assert 'SYNTHETIC' not in line[0] and '/' not in line[0]
+
+
+def test_the_timing_line_is_logged_before_convert_aborted_and_counts_nothing_of_the_aborted_patient(tree, caplog, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+
+    def classify(*args, **kwargs):
+        raise AttributeError('SYNTHETIC_missing')
+    monkeypatch.setattr(masks, 'classify', classify)
+    caplog.set_level(logging.INFO)
+    with pytest.raises(conv.ConvertAborted):
+        conv.convert(org, out)
+    line = timing_records(caplog)
+    assert len(line) == 1
+    assert TIMING.fullmatch(line[0]).group(4) == '0'  # its 6 headers were read, but an aborted patient contributes none
+
+
+def test_no_timing_line_on_ctrl_c(tree, caplog, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+
+    def classify(*args, **kwargs):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(masks, 'classify', classify)
+    caplog.set_level(logging.INFO)
+    with pytest.raises(KeyboardInterrupt):
+        conv.convert(org, out)
+    assert timing_records(caplog) == []
