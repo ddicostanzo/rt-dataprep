@@ -642,3 +642,53 @@ def test_an_unlistable_subfolder_refuses_the_patient(tree):
         locked.chmod(0o755)
     assert (row.outcome, row.reason) == (org.OUTCOME_REFUSED, org.REASON_IO_ERROR)
     assert not (out / PID).exists()
+
+
+# ---------------------------------------------------------------- hardening B8 (#98): workers, timing line, Ctrl-C
+
+def summary_and_timing(caplog):
+    texts = [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.organize']
+    return texts, next(i for i, t in enumerate(texts) if 'patient folders' in t)
+
+
+def test_every_pooled_header_read_gets_the_workers_value(tree, monkeypatch):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    planning_study(src / 'SYNTHETIC_SECOND' / 'a', pid='SYNTHETIC_SECOND')
+    seen, real = [], org.read_pooled
+
+    def record(step, paths, workers):
+        seen.append(workers)
+        return real(step, paths, workers)
+
+    monkeypatch.setattr(org, 'read_pooled', record)
+    organize(src, out, workers=3)
+    assert seen == [3, 3]  # one pooled read per patient folder
+
+
+def test_the_timing_line_comes_right_after_the_summary_line(tree, caplog):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    caplog.set_level(logging.INFO)
+    organize(src, out)
+    texts, at = summary_and_timing(caplog)
+    assert TIMING.fullmatch(texts[at + 1]) and len(texts) == at + 2
+
+
+@pytest.mark.parametrize('workers', [1, 4])
+def test_no_timing_line_on_ctrl_c(tree, monkeypatch, caplog, workers):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    real = getattr(dicom_io, 'read_header_core')  # noqa: B009
+
+    def interrupt(path):
+        if 'a' == path.parent.name and path.name.startswith('plan'):
+            raise KeyboardInterrupt
+        return real(path)
+
+    monkeypatch.setattr(dicom_io, 'read_header_core', interrupt)
+    caplog.set_level(logging.INFO)
+    with pytest.raises(KeyboardInterrupt):
+        organize(src, out, workers=workers)
+    assert not [r for r in caplog.records if ' s total' in r.getMessage()]
+
