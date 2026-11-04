@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "Pin plan-folder convert output (characterization test)",
+      "depends_on": [],
+      "files": [
+        "tests/test_plan_regression.py"
+      ],
+      "file_ops": {
+        "tests/test_plan_regression.py": "create"
+      },
+      "test_approach": "Characterization test, GREEN before any source change: its job is to stay green through task-02, never to go red first. Build one synthetic patient (tests/synthetic_dicom.py helpers, SYNTHETIC_ ids) with two plans, an MR registered to plan_1, and an unregistered MR and PT; run convert on main (eed0659) code; pin each plan folder's sorted file list, series.csv text, and per volume a sha256 of the voxel array bytes (sitk.GetArrayFromImage) plus size, spacing, origin and direction as literal constants in the test. Reuse the REG/registration setup pattern of tests/test_series.py `World`. Date values in the pinned text come from named constants (as test_convert.py CT_DATE), never 8-digit literals inline in the expected text (phi-guard).",
+      "criteria": [
+        "tests/test_plan_regression.py passes on unmodified eed0659 source",
+        "It pins, per plan folder, the sorted file list, the exact series.csv text, and per volume the voxel sha256, size, spacing, origin and direction as literals (not recomputed from the code under test)",
+        "The fixture holds at least two plans, one series registered to a plan and at least one unregistered series",
+        "The fixture passes a fixed UID for every value that reaches a plan series.csv (series, study, frame, RTPLAN SOP), built with pydicom.uid.generate_uid(entropy_srcs=['SYNTHETIC_<name>']); the pinned series.csv text names each UID by a placeholder ({CT_SERIES} etc.) filled in at test time; the test passes twice in a row"
+      ]
+    },
+    {
+      "id": "task-07",
+      "title": "Synthetic DICOM helpers: optional StudyDate/StudyTime",
+      "depends_on": [],
+      "files": [
+        "tests/synthetic_dicom.py",
+        "tests/test_synthetic_dicom.py"
+      ],
+      "file_ops": {
+        "tests/synthetic_dicom.py": "modify",
+        "tests/test_synthetic_dicom.py": "modify"
+      },
+      "test_approach": "One test in tests/test_synthetic_dicom.py that the new parameters write StudyDate/StudyTime and that the default writes no StudyDate/StudyTime tag (invalid_values still writes INVALID_DA). Full suite green.",
+      "criteria": [
+        "_dataset, write_ct_series and the MR/PT series writers take study_date/study_time (default None, tag omitted), passed through like series_date/series_time",
+        "With the new parameters left at None every existing fixture is unchanged: no StudyDate/StudyTime tag unless invalid_values (INVALID_DA) as today",
+        "Full suite and ruff pass"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "convert: study_<n>/ folders replace images/",
+      "depends_on": [
+        "task-01",
+        "task-07"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_series.py",
+        "tests/test_convert.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_series.py": "modify",
+        "tests/test_convert.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_series.py and tests/test_convert.py with synthetic DICOM (SYNTHETIC_ ids). Move every existing images/ assertion to study_<n>/. tests/test_plan_regression.py must stay green unchanged. Spec: docs/specs/2026-11-04-imaging-cases.md D3, D6-D8, Design/convert.",
+      "criteria": [
+        "A no-RTPLAN patient with two studies (one CT series; one with two MR series) converts to study_1/series_CT_1.nii.gz and study_2/series_MR_1.nii.gz, study_2/series_MR_2.nii.gz, each study with a series.csv of its rows; no images/ folder and no hidden folder left",
+        "Study numbering follows the D7 key (min of (StudyDate == '', StudyDate, StudyTime), stripped, over each written series' first header, then StudyInstanceUID) with an undated study last, whatever the folder order; two series of one study with different StudyDate rank the study by the earlier date",
+        "A planned patient's unregistered series goes to study_<n>/ only; its registered series goes to the plan folder and to study_<n>/; a converted plan's planning CT never appears in a study folder (a refused plan's CT does); no images/ folder",
+        "tests/test_plan_regression.py passes unchanged",
+        "A series whose pixel read fails leaves the study numbering contiguous (study_1..N) and no hidden study folder",
+        "convert_report.csv holds one 'studies' summary row (files empty; outcome converted, reason empty, skipped_series = count, when at least one study folder is written) and one row per written series with folder = study_<n>/series_<MOD>_<k>; each study's series.csv is listed in the files of that study's first row; with every candidate series skipped the summary row is skipped / REASON_NO_STUDIES and no study folder exists",
+        "The convert run log counts plan rows from PLAN_FOLDER folders only, and imaging series rows separately",
+        "Excluded-model, localizer and short/tainted series never appear in a study folder",
+        "IMAGES_NAME and REASON_NO_IMAGES no longer exist in src/; hidden per-study folder names are index-based, never a UID",
+        "No log line or exception added carries a patient id, folder name, UID, date or path (caplog assertion on the new path)",
+        "A patient's convert_report rows are: plan rows, then the 'studies' summary row, then one row per series ordered by study n, then IMAGE_MODALITIES index, then k (the order of that study's series.csv)",
+        "StudyDate/StudyTime are compared as stripped text via _tag on the already-decoded header, never parsed (an invalid DA sorts, never raises) [[pydicom-validates-lazily-on-first-tag-access]]",
+        "Study volumes reuse the image read_series already returned for the series, written with the existing write_atomic; no second read or write path [[simpleitk-series-reader-and-nifti-writer-geometry-heuristics]]"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "preprocess: check_study_rows validator and reason texts",
+      "depends_on": [
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify"
+      },
+      "test_approach": "Unit tests on check_study_rows over hand-written study folders (series.csv text plus small synthetic NIfTI files). Spec D15, D16, Design/manifest validator bullet.",
+      "criteria": [
+        "check_study_rows(study_dir) returns the rows of a valid study series.csv (columns = convert.SERIES_COLUMNS, every kind 'series', modality in IMAGE_MODALITIES, file a full match of (reshape_)?(resample_)?(rescale_)?(initialresample_)?(series_(CT|MR|PT)_\\d+)\\.nii\\.gz and present in the folder, derived ids unique)",
+        "It raises CaseRefused for each failure, reusing REASON_SERIES_CSV for unparseable, wrong columns, None cells, zero rows, duplicate file and duplicate derived id; REASON_KIND for a non-series kind; REASON_FILE_MISSING for an absent file (presence as in check_rows: is_file and not a symlink); and new REASON_STUDY_MODALITY (modality outside CT/MR/PT) and REASON_STUDY_NAME (file name not a full match), unique values that pass test_reasons_hold_no_separator_digit_run_or_uid",
+        "A helper gives the series id (group 5) of a file name, used by manifest and preprocess",
+        "REASON_FILE_MISSING says 'case folder' and REASON_TOO_SMALL says 'the image' instead of 'plan folder' / 'the CT'",
+        "Existing preprocess tests stay green",
+        "check_study_rows reads no NIfTI header; study_refusal_count(study_dir) returns the number of data rows, or 1 when the reader raises ValueError/csv.Error or there is no row"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "manifest: imaging rows and case_type/modality/image columns",
+      "depends_on": [
+        "task-03"
+      ],
+      "files": [
+        "src/rt_dataprep/manifest.py",
+        "tests/test_manifest.py",
+        "tests/test_split.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/manifest.py": "modify",
+        "tests/test_manifest.py": "modify",
+        "tests/test_split.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_manifest.py on a converted tree built with convert from synthetic DICOM, plus hand-broken study folders; one split test on a manifest with plan and imaging rows of one patient. Spec D9, D14-D16, Design/manifest.",
+      "criteria": [
+        "manifest on a converted tree writes one row per study series with case_type=imaging, the series modality, blank fx/rtplan_uid, dose=0, masks=[], the volume's size/spacing, ct_series_uid = the series UID, study_uid, case_dir = <patient>/study_<n>/series_<MOD>_<k>, and an image that exists in the study folder",
+        "Plan rows gain case_type=plan, modality=CT, blank image; the first ten columns are unchanged in name and order",
+        "A study series.csv that is malformed, empty, has a non-series kind, a modality outside CT/MR/PT, a bad or duplicate-id file name, or a missing file is left out and counted via study_refusal_count (wrong columns or None cells count each data row; unparseable or zero rows count 1); other studies and plans of the patient still get rows",
+        "A study row whose header cannot be read is refused and counted; its sibling rows are kept",
+        "manifest() still returns (written, refused); rows sorted by case_dir",
+        "split on a manifest with plan and imaging rows of one patient puts all of that patient's case ids in one split",
+        "Imaging ct_size/ct_spacing are formatted exactly as plan rows (';'-joined, np.float32 text)",
+        "No log line or exception added carries a patient id, folder name, UID, date or path (caplog)"
+      ]
+    },
+    {
+      "id": "task-05",
+      "title": "preprocess: study folders, one series at a time",
+      "depends_on": [
+        "task-04"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_preprocess.py on a converted tree with study folders from synthetic DICOM; a manifest round-trip test (manifest on converted vs preprocessed tree). Spec D10, Design/preprocess.",
+      "criteria": [
+        "preprocess writes a study's CT with the CT prefixes (rescale included under legacy RNT) and its MR/PT with the geometric prefixes only, intensities not rescaled (an MR voxel value survives a resample to the same spacing)",
+        "One too-small series and one unreadable series in a study are each refused on their own report row, files absent; the sibling series and the study series.csv (siblings only, file names updated) are written",
+        "A study with every series refused leaves no study folder; a study refused by check_study_rows gives one row folder = study_<n> and writes nothing",
+        "The report has one row per series with folder = study_<n>/series_<MOD>_<k>; REASON_INTERNAL and OSError still go to the patient level",
+        "A patient with neither plans nor study folders is skipped with REASON_NO_CASES; the run log counts plan rows and imaging rows separately",
+        "manifest on the preprocessed tree of the same data gives the same case_dir values as on the converted tree, and each image is the prefixed file name",
+        "No log line or exception added carries a patient id, folder name, UID, date or path",
+        "The study series.csv is listed in the files of the study's first written series row",
+        "REASON_NO_PLANS is removed from preprocess.py and the reason-set test lists REASON_NO_CASES"
+      ]
+    },
+    {
+      "id": "task-06",
+      "title": "CLI help and README output layout",
+      "depends_on": [
+        "task-05"
+      ],
+      "files": [
+        "src/rt_dataprep/__main__.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/__main__.py": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "No new test; tests/test_cli.py stays green. Read-through check of the README section against the spec.",
+      "criteria": [
+        "convert help says one folder per plan and one per study; manifest help says one row per plan folder or study series",
+        "README has an output-layout section covering plan folders, study_<n>/ folders, series.csv, the three new manifest columns, case_dir as an id with image as the file, the changed split for the same seed, and that old images/ trees must be re-converted",
+        "Full suite and ruff pass"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01",
+      "task-07"
+    ],
+    [
+      "task-02"
+    ],
+    [
+      "task-03"
+    ],
+    [
+      "task-04"
+    ],
+    [
+      "task-05"
+    ],
+    [
+      "task-06"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-04",
+    "spec": "docs/specs/2026-11-04-imaging-cases.md",
+    "profile": "project-profile.yml",
+    "issue": 17,
+    "guardrails": [
+      "Commit gate: at most 5 staged files per commit",
+      "No raise inside an except block; store and raise after",
+      "PHI: logs/exceptions carry counts and REASON_ constants only; test data SYNTHETIC_-prefixed; no .dcm/.nii committed",
+      "follow [[simpleitk-series-reader-and-nifti-writer-geometry-heuristics]] and [[gdcm-reads-non-finite-dicom-geometry-and-rescale-as-defaults]]: reuse series.check_volume/read_series, add no new geometry path",
+      "follow [[pydicom-validates-lazily-on-first-tag-access]]: every new header access inside dicom_io's quiet wrapper",
+      "follow [[tell-a-pydicom-missing-tag-from-our-own-bug]]: new refusals catch pydicom-origin errors only",
+      "Private-API scan: use getattr(module, '_name')  # noqa: B009 in tests"
+    ],
+    "deferred": [
+      "Plan review NOTE: with only rescale on (no geometric step), an MR/PT study series gets no prefix and passes through unchanged; file as a hardening issue in Step 2.9"
+    ]
+  }
+}
