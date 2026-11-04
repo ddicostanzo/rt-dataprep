@@ -53,14 +53,15 @@ def _fds_quiet():
         os.dup2(sink.fileno(), 2)
         yield
     finally:
-        sys.stdout.flush()  # buffered text must land in the sink, not in the restored fd
-        sys.stderr.flush()
-        if len(saved) == 2:  # both dups made: fd 1 and 2 may have been redirected
-            os.dup2(saved[0], 1)
-            os.dup2(saved[1], 2)
-        for fd in saved:
-            os.close(fd)
-        sink.close()
+        with contextlib.ExitStack() as restore:  # every step runs even when one raises (#85); callbacks run last-in first
+            restore.callback(sink.close)
+            for fd in saved:
+                restore.callback(os.close, fd)
+            if len(saved) == 2:  # both dups made: fd 1 and 2 may have been redirected
+                restore.callback(os.dup2, saved[1], 2)
+                restore.callback(os.dup2, saved[0], 1)
+            sys.stdout.flush()  # buffered text must land in the sink, not in the restored fd
+            sys.stderr.flush()
 
 
 def quiet_call(fn, reason):

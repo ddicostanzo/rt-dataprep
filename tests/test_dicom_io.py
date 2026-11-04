@@ -295,6 +295,31 @@ def test_fds_quiet_leaks_no_fd_when_the_second_dup_fails(monkeypatch):
     assert set(os.listdir('/proc/self/fd')) == before
 
 
+@pytest.mark.skipif(not os.path.isdir('/proc/self/fd'), reason='needs /proc/self/fd')
+def test_fds_quiet_restores_fd_2_and_leaks_no_fd_when_the_first_restore_fails(monkeypatch, capfd):
+    real_dup2, calls = os.dup2, []
+
+    def flaky_dup2(fd, target):
+        calls.append(target)
+        real_dup2(fd, target)  # done, then fails: the rest of the restore must still run
+        if len(calls) == 3:
+            raise OSError('SYNTHETIC dup2 failure')
+    fds_quiet = getattr(dicom_io, '_fds_quiet')  # noqa: B009
+    before = set(os.listdir('/proc/self/fd'))
+    failed = False
+    with monkeypatch.context() as patch:  # os is global: keep the patch to the one call
+        patch.setattr(os, 'dup2', flaky_dup2)
+        try:
+            with fds_quiet():
+                pass
+        except OSError:  # info dropped on leaving: a kept traceback would hold the generator frame
+            failed = True
+    assert failed and calls == [1, 2, 1, 2]
+    assert set(os.listdir('/proc/self/fd')) == before
+    os.write(2, b'after-err')
+    assert capfd.readouterr().err == 'after-err'
+
+
 def test_quiet_call_swallows_a_warning_from_a_thread_started_inside(capfd):
     def warn_in_thread():
         worker = threading.Thread(target=lambda: warnings.warn('SYNTHETIC_x', stacklevel=2))
