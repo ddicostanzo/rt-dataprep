@@ -171,3 +171,12 @@ with a file in such a refused plan folder is skipped and counted; two tests. Sam
 says, per the user: hardening issue. NOTE (deferred): candidates() reads ManufacturerModelName/StudyInstanceUID/
 SOPInstanceUID/Modality without the tag catch; no test for a series registered to a refused plan only, or a PT with an
 identity frame in images/.
+
+## review-integration
+No BLOCKING. Seams (crash path, headers-once, placement, short-CT skip, series.py APIs) hold. Deferred: candidates()
+outside the tag catch (#37); small items (#43).
+
+## review-loop-pass-1
+code-review bug pass: no BLOCKING; one plan-level finding (short refused folder drops a series shared with a converted
+sibling plan; conservative, counted) deferred as #35. Spec axis: 72/76 met, 4 partial/plan-gap, none blocking.
+CLEAN: no blocking fix needed, so no verification pass. Deferred issues: #35-#43.
