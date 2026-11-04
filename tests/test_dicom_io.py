@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pydicom
@@ -448,3 +449,30 @@ def test_read_pooled_ctrl_c_cancels_queued_steps_and_restores_state(tmp_path, mo
         read_pooled(lambda path: dicom_io.read_header_core(path), paths, 4)
     assert len(calls) <= 2 * 4 and paths[-1] not in calls
     assert _quiet_state() == before
+
+
+def test_read_pooled_waits_for_running_steps_even_when_the_shutdown_join_is_interrupted(monkeypatch):
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    shutdowns = []
+    real_shutdown = ThreadPoolExecutor.shutdown
+
+    def step(path):
+        if path == 'SYNTHETIC_1':
+            assert started.wait(timeout=5)
+            raise KeyboardInterrupt
+        started.set()
+        release.wait(timeout=5)  # a timeout fails the test instead of hanging it
+        finished.set()
+
+    def shutdown(self, *args, **kwargs):
+        shutdowns.append(1)
+        if len(shutdowns) == 1:
+            raise KeyboardInterrupt  # the second Ctrl-C, mid-join
+        release.set()
+        return real_shutdown(self, *args, **kwargs)
+
+    monkeypatch.setattr(ThreadPoolExecutor, 'shutdown', shutdown)
+    with pytest.raises(KeyboardInterrupt):
+        read_pooled(step, ['SYNTHETIC_1', 'SYNTHETIC_2'], 2)
+    assert len(shutdowns) == 2
+    assert finished.is_set()  # the running step ended inside the block

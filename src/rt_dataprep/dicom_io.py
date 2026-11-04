@@ -158,7 +158,13 @@ def read_pooled(step, paths, workers):
         try:
             return [future.result() for future in [executor.submit(step, path) for path in paths]]
         finally:
-            executor.shutdown(cancel_futures=True)  # queued steps never start; running ones finish inside the block
+            joined = False
+            while not joined:  # a Ctrl-C mid-join must not end the wait: running steps finish inside the block (#97)
+                try:
+                    executor.shutdown(cancel_futures=True)  # queued steps never start
+                    joined = True
+                except KeyboardInterrupt:
+                    pass
 
 
 # Ported from DICOM_Transport src/common.py. Everything outside this set becomes "_".
