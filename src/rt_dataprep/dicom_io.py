@@ -152,5 +152,9 @@ def write_report(out_root, name, header, rows):
         writer.writerow(header)
         writer.writerows(rows)
     latest = out_root / f'.{os.getpid()}.tmp.{name}'
-    shutil.copyfile(dated, latest)
-    os.replace(latest, out_root / name)  # atomic: a second Ctrl-C mid-copy cannot truncate the latest report (#65)
+    try:
+        shutil.copyfile(dated, latest)
+        os.replace(latest, out_root / name)  # atomic: a second Ctrl-C mid-copy cannot truncate the latest report (#65)
+    finally:
+        with contextlib.suppress(OSError):  # gone after a replace; a failed copy leaves no hidden temp (#81)
+            latest.unlink()

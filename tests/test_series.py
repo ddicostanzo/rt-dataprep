@@ -1306,6 +1306,17 @@ def test_a_blank_id_duplicate_of_a_present_slice_does_not_skip_its_series(tree):
     assert images_uids(out) == {mr['series_uid']}
 
 
+def test_a_blank_id_file_whose_sop_collides_with_another_series_still_skips_its_series(tree):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    mr = put(org / PID / 'misc_files', prefix='a')
+    ds = pydicom.dcmread(plan['ct']['paths'][0])  # a SOP that is present, but in the planning CT series
+    ds.PatientID, ds.SeriesInstanceUID = '', mr['series_uid']
+    ds.save_as(org / PID / 'misc_files' / 'collide.dcm')
+    conv.convert(org, out)
+    assert images_uids(out) == set()
+
+
 def test_a_plan_whose_planning_ct_end_slice_sits_in_misc_with_a_blank_id_is_refused(tree):
     org, out = tree
     plan = make_plan(org / PID / 'plan_1')

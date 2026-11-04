@@ -169,9 +169,10 @@ def _convert_patient(folder, out_root, exclude_models):
     headers = [item for found, _ in plan_headers for item in found] + misc_headers  # folder order: plan_<n> by n, then misc_files
     # A series with a blank-id slice in misc_files is short without it: known short, like a slice-missing planning CT. A blank-id
     # copy of a slice already present (same SOPInstanceUID) takes nothing away, and a blank or whitespace UID is no series (#71).
-    present = {_tag(ds, 'SOPInstanceUID') for _, ds in headers}
+    pair = lambda ds: (_tag(ds, 'SOPInstanceUID'), _tag(ds, 'SeriesInstanceUID'))  # noqa: E731 (a SOP alone may collide, #81)
+    present = {pair(ds) for _, ds in headers}
     series_of = lambda items: {u for ds in items if (u := _tag(ds, 'SeriesInstanceUID')).strip()}  # noqa: E731
-    split = series_of(ds for ds in blank if _tag(ds, 'SOPInstanceUID') not in present) & series_of(ds for _, ds in headers)
+    split = series_of(ds for ds in blank if pair(ds) not in present) & series_of(ds for _, ds in headers)
     if not plans and not ser.candidates(headers, exclude_models)[0]:
         return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_NO_PLANS)]
     # Built under a hidden name and renamed at the end: a run that dies part-way leaves no folder that a later run would
@@ -242,7 +243,8 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
     """
     found, regs, by_sop = ser.candidates(headers, exclude_models)
     converted = [(row, result, result.series_rows[0]) for row, result in outcomes if result is not None]  # row 0 is the CT row
-    assert all(ct['kind'] == 'ct' for _, _, ct in converted)
+    if not all(ct['kind'] == 'ct' for _, _, ct in converted):  # not an assert: python -O would strip it (#81)
+        raise RuntimeError('series_rows[0] is not the CT row')
     planning = {result.ct_series_uid for _, result, _ in converted}
     found = [(uid, slices) for uid, slices in found if uid not in planning]
     if not found:
