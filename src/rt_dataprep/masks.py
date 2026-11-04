@@ -12,6 +12,7 @@ import tempfile
 from dataclasses import dataclass, field
 
 import numpy as np
+import pydicom
 import SimpleITK as sitk
 from DicomRTTool import DicomReaderWriter
 
@@ -101,8 +102,10 @@ def build_masks(kept, ct_paths, struct_path, struct_series_uid, ct_series_uid, c
         return {}
     scratch = tempfile.mkdtemp(prefix='.rttool.', dir=scratch_parent)
     try:
-        for path in [*ct_paths, struct_path]:
+        for path in ct_paths:
             _link_or_copy(path, os.path.join(scratch, os.path.basename(path)))
+        numbers = {number for number, _, _, _ in kept}
+        quiet_call(lambda: _place_struct(struct_path, os.path.join(scratch, os.path.basename(struct_path)), numbers), REASON_MASK_RUN)
         reader, hits = quiet_call(lambda: _run(scratch, [name for _, name, _, _ in kept], ct_series_uid), REASON_MASK_RUN)
         # Linked: the RTSTRUCT's own series UID is a key of the CT index's RTs (DicomRTTool links by the series it references).
         if len(hits) != 1 or struct_series_uid not in reader.series_instances_dictionary[hits[0]].RTs:
@@ -118,6 +121,24 @@ def build_masks(kept, ct_paths, struct_path, struct_series_uid, ct_series_uid, c
         return masks
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _place_struct(source, target, numbers):
+    """
+    The RTSTRUCT at `target` for DicomRTTool, without the POINT items of the kept ROIs `numbers` (#23): a point has no area
+    to draw, and the mask comes from the planar contours only. Linked unchanged when there is none to drop.
+    """
+    ds = pydicom.dcmread(source)
+    dropped = False
+    for roi in ds.get('ROIContourSequence', []):
+        items = roi.get('ContourSequence', [])
+        if int(roi.ReferencedROINumber) in numbers and any(str(item.ContourGeometricType) == 'POINT' for item in items):
+            roi.ContourSequence = [item for item in items if str(item.ContourGeometricType) != 'POINT']
+            dropped = True
+    if dropped:
+        ds.save_as(target)
+    else:
+        _link_or_copy(source, target)
 
 
 def _run(folder, names, ct_series_uid):

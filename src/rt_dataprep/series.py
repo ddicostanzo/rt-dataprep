@@ -226,6 +226,22 @@ def _candidate_series(ds):
     return None
 
 
+def tainted_studies(headers):
+    """
+    (StudyInstanceUIDs, blind) of the files candidates() drops for a bad tag (#44): every other series of such a study is
+    skipped, since the dropped file may be its lost slice or its REG or exclusion context. blind: one had no readable study.
+    """
+    studies, blind = set(), False
+    for _, ds in headers:
+        if _header_call(_file_keys, ds) is None:
+            study = _header_call(lambda d: str(d.StudyInstanceUID), ds)
+            if study:
+                studies.add(study)
+            else:
+                blind = True
+    return studies, blind
+
+
 def candidates(headers, exclude_models):
     """
     (series, regs, headers_by_sop) of one patient. `headers`: [(path, Dataset)] of every readable file, in folder order
