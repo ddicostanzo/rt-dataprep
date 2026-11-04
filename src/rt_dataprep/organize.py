@@ -25,6 +25,7 @@ REASON_OUTSIDE_ROOT = 'output folder resolves outside the output root'
 REASON_IO_ERROR = 'file system error while reading or copying; nothing kept for this patient'
 REASON_OUTSIDE_SRC = 'output root is the source root or inside it'
 REASON_NO_SOP_UID = 'a DICOM file has no SOPInstanceUID'
+_CT_DATES = ('SeriesDate', 'StudyDate', 'AcquisitionDate', 'ContentDate')  # fx order: first non-blank wins
 
 
 @dataclass
@@ -165,8 +166,9 @@ def _group(headers, exclude_models):
         if series is None:
             continue
         ct = min((ds for _, ds in ct_series[series]), key=lambda ds: ds.SOPInstanceUID)
-        key = tuple(str(v) for v in (ct.get('SeriesDate', ''), ct.get('SeriesTime', ''), plan.get('RTPlanDate', ''),
-                                     plan.get('RTPlanTime', ''), plan.SOPInstanceUID))
+        date = next((d for d in (str(ct.get(t, '')).strip() for t in _CT_DATES) if d), '')
+        key = (date == '', date) + tuple(str(v) for v in (ct.get('SeriesTime', ''), plan.get('RTPlanDate', ''),
+                                                          plan.get('RTPlanTime', ''), plan.SOPInstanceUID))  # undated last (#9)
         ct_study = study_of(ct)
         # The resolved RTSTRUCT always comes along, even when it was exported in a study other than the CT's.
         files = [plan_path, struct_paths[_uids(plan, 'ReferencedStructureSetSequence', 'ReferencedSOPInstanceUID')[0]]]

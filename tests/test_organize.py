@@ -415,3 +415,37 @@ def test_files_are_found_by_preamble_not_extension(tree, tmp_path):
     assert modalities(mixed / 'out' / PID / 'plan_1') == modalities(plain / 'out' / PID / 'plan_1')
     assert not (mixed / 'out' / PID / 'misc_files').exists()
     assert not list((mixed / 'out' / PID).rglob('notes.txt')) and not list((mixed / 'out' / PID).rglob('tiny'))
+
+
+def redate_ct(study, **dates):
+    """Set (or, for None, delete) date elements on every slice of a planning_study's CT."""
+    for path in study['ct']['paths']:
+        ds = pydicom.dcmread(path)
+        for name, value in dates.items():
+            if value is None:
+                del ds[name]
+            else:
+                setattr(ds, name, value)
+        ds.save_as(path)
+
+
+def plan_ct_series(out):
+    return [ct_series_uids(out / PID / f'plan_{n}') for n in (1, 2)]
+
+
+def test_ct_without_series_date_sorts_by_study_date(tree):
+    src, out = tree
+    dated = planning_study(src / PID / 'a', date=EARLY)
+    fallback = planning_study(src / PID / 'b', date=EARLY)  # same plan date: only the CT date can order them
+    redate_ct(fallback, SeriesDate=None, StudyDate=LATE)
+    organize(src, out)
+    assert plan_ct_series(out) == [{dated['ct']['series_uid']}, {fallback['ct']['series_uid']}]
+
+
+def test_ct_without_any_date_is_the_last_plan(tree):
+    src, out = tree
+    undated = planning_study(src / PID / 'a', date=EARLY)  # the earliest plan date and first by name: still last
+    dated = planning_study(src / PID / 'b', date=LATE)
+    redate_ct(undated, SeriesDate=None)
+    organize(src, out)
+    assert plan_ct_series(out) == [{dated['ct']['series_uid']}, {undated['ct']['series_uid']}]
