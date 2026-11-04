@@ -101,3 +101,10 @@ A2.6 torchio run, for the PR body:
   crops y by 2+1 and pads z by 2+1, so the ceil/floor split is exercised. Swapping start and end in `crop_or_pad` makes it fail
   (origin x -6.5 vs -7.75), so it does pin the split.
 - torchio side: only public API (`Subject`, `ScalarImage`, `LabelMap`, `Resample(..., antialias=False)`, `CropOrPad`, `set_data`, `save`).
+
+## review-integration (wave 3 + seams)
+- No BLOCKING in group 3 or the seams. Promoted review-2's low-side REASON_CROP gap to BLOCKING (mask clinical
+  output); fixed by the orchestrator with test_check_crop_refuses_exactly_outside_half_a_voxel_on_both_sides
+  (±0.1 voxel around -0.5 and n-0.5 per axis); the `< -1.5` mutant now fails 3 cases.
+- NOTEs (deferred): phase1.md parity wording reads as if preprocess ran on the raw tree; A2.6 covers an identity
+  direction only; a missing converted root leaves an empty output root.

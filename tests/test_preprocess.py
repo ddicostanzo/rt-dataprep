@@ -584,6 +584,22 @@ def test_a_one_voxel_mask_that_nearest_neighbour_empties_refuses(tmp_path):
     assert not (tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1').exists()
 
 
+@pytest.mark.parametrize('axis', range(3))
+@pytest.mark.parametrize(('index', 'refused'), [(-0.4, False), (-0.6, True), (9.4, False), (9.6, True)])
+def test_check_crop_refuses_exactly_outside_half_a_voxel_on_both_sides(axis, index, refused):
+    final = blank((10, 10, 10))
+    origin = [4.0, 4.0, 4.0]
+    origin[axis] = index  # the one nonzero native voxel's centre lands at this continuous index of the final grid
+    array = np.zeros((1, 1, 1))
+    array[0, 0, 0] = 1
+    native = make_image(array, origin=tuple(origin))
+    if refused:
+        with pytest.raises(CaseRefused, match=pre.REASON_CROP):
+            pre.check_crop(native, final)
+    else:
+        pre.check_crop(native, final)
+
+
 def test_an_oserror_while_writing_refuses_the_patient_and_removes_the_partial(tmp_path, monkeypatch):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     write_plan(converted)
