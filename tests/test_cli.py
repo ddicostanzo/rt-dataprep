@@ -323,7 +323,13 @@ def test_workers_reaches_organize_and_convert_and_defaults_to_one(command, flag,
 
 
 @pytest.mark.parametrize('command', ['organize', 'convert'])
-@pytest.mark.parametrize('value', ['0', '-1', 'x', '1.5'])
+def test_workers_accepts_the_cap(command, calls):
+    cli.main([command, 'a', 'b', '--workers', '64'])
+    assert calls == [(command, ('a', 'b'), {'workers': 64})]
+
+
+@pytest.mark.parametrize('command', ['organize', 'convert'])
+@pytest.mark.parametrize('value', ['0', '-1', 'x', '1.5', '1_0', '+3', '٣', ' 3', '65', '1000000'])
 def test_workers_below_one_or_not_an_integer_is_a_usage_error(command, value, calls, capfd):
     with pytest.raises(SystemExit) as exc:
         cli.main([command, 'a', 'b', '--workers', value])

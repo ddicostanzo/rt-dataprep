@@ -21,15 +21,13 @@ from rt_dataprep.split import REASON_COLUMNS, REASON_EXISTS, REASON_NO_TRAIN, RE
 
 PREPROCESS_HELP = 'resample, rescale and crop/pad a converted tree into a separate output tree; --legacy-rnt is required for any output'
 WORKERS_HELP = 'number of threads reading headers; output is the same for any value'
+MAX_WORKERS = 64
 
 
 def positive_int(text):
-    try:
-        value = int(text)
-    except ValueError:
-        value = 0
-    if value < 1:
-        raise argparse.ArgumentTypeError('must be an integer of at least 1')
+    value = int(text) if text.isascii() and text.isdigit() else 0  # no sign, space, underscore or non-ASCII digit
+    if not 1 <= value <= MAX_WORKERS:
+        raise argparse.ArgumentTypeError(f'must be an integer from 1 to {MAX_WORKERS}')
     return value
 
 
