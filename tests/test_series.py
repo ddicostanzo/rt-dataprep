@@ -575,7 +575,7 @@ def test_a_malformed_reg_tag_makes_that_reg_not_qualify_and_no_exception_escapes
     assert world.registration([world.reg(None), 7, None, 'text', good])[0] is True  # not even a Dataset
 
 
-# ---------------------------------------------------------------- task-06: placement, images/, plan-less patients, report rows
+# ---------------------------------------------------------------- task-06: placement, study folders, plan-less patients, report rows
 
 PLAN_COLUMNS = ['rtplan_uid', 'rtplan_label', 'rtplan_date', 'fractions_planned']
 EMPTY_PLAN = dict.fromkeys(PLAN_COLUMNS, '')
@@ -612,6 +612,33 @@ def files_of(rows, folder):
     return next(r for r in rows if r.folder == folder).files
 
 
+STUDY_D1, STUDY_D2, STUDY_D3 = '20240110', '20240220', '20240330'  # StudyDate, earliest first
+STUDY_T1, STUDY_T2 = '080000', '090000'
+
+
+def study(out, n=1, patient=PID):
+    return out / patient / f'study_{n}'
+
+
+def studies_row(rows, patient=PID):
+    return next(r for r in rows if r.folder == conv.STUDIES_NAME and r.patient == patient)
+
+
+def series_rows_of(rows, patient=PID):
+    """The per-series report rows of `patient`: (folder, files) in report order."""
+    return [(r.folder, r.files) for r in rows if r.patient == patient and re.fullmatch(r'study_\d+/series_\w+', r.folder)]
+
+
+def study_uids(out):
+    """Every series UID written to a study folder of PID."""
+    return {r['series_instance_uid'] for d in sorted((out / PID).glob('study_*')) for r in csv_at(d)}
+
+
+def set_study_date(series, date, time=''):
+    for path in series['paths']:
+        edit(path, lambda ds: (setattr(ds, 'StudyDate', date), time and setattr(ds, 'StudyTime', time)))
+
+
 def test_convert_uses_the_one_direction_tolerance_of_series_py():
     tree = ast.parse(inspect.getsource(conv))
     assigned = [t.id for n in ast.walk(tree) if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)]
@@ -624,15 +651,17 @@ def test_a2_4_a_registered_mr_goes_into_the_plan_folder_on_its_own_grid(tree):
     plan = make_plan(folder, doses=[dose_spec(10)], rois=[BOX], plan_meta=dict(label='Plan A', plan_date='20240301', fractions=5))
     baseline = org.parent / 'baseline'
     conv.convert(org, baseline)
-    mr = put(folder, spacing=(1.5, 2.0, 3.0), origin=(7, -4, 12))
-    stray = put(folder, prefix='stray')  # its study is named by the REG, its frame is not
+    mr = put(folder, spacing=(1.5, 2.0, 3.0), origin=(7, -4, 12), study_date=STUDY_D2)
+    stray = put(folder, prefix='stray', study_date=STUDY_D1)  # its study is named by the REG, its frame is not
     describe_series(mr, 'T1 axial', '20240201')
     reg_for(folder / 'reg.dcm', plan['ct'], mr, others=[mr['study_uid'], stray['study_uid']])
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.reason, r.skipped_series) for r in rows] == [
-        ('plan_1', 'converted', '', 0), ('images', 'converted', '', 0)]
+        ('plan_1', 'converted', '', 0), ('studies', 'converted', '', 0),
+        ('study_1/series_MR_1', 'converted', '', 0), ('study_2/series_MR_1', 'converted', '', 0)]
     assert files_of(rows, 'plan_1') == ['planning_ct.nii.gz', 'dose.nii.gz', 'liver.nii.gz', 'series_MR_1.nii.gz', 'series.csv']
-    assert files_of(rows, 'images') == ['series_MR_1.nii.gz', 'series.csv']
+    assert files_of(rows, 'study_1/series_MR_1') == ['series_MR_1.nii.gz', 'series.csv']  # series.csv in the study's first row
+    assert files_of(rows, 'study_2/series_MR_1') == ['series_MR_1.nii.gz', 'series.csv']
     for name in ('planning_ct.nii.gz', 'dose.nii.gz', 'liver.nii.gz'):  # the planning outputs are what they were without the MR
         before, after = nii(baseline / PID / 'plan_1' / name), nii(out / PID / 'plan_1' / name)
         assert np.array_equal(sitk.GetArrayFromImage(before), sitk.GetArrayFromImage(after))
@@ -653,23 +682,33 @@ def test_a2_4_a_registered_mr_goes_into_the_plan_folder_on_its_own_grid(tree):
     assert {k: mr_row[k] for k in PLAN_COLUMNS} == {k: ct_row[k] for k in PLAN_COLUMNS} and mr_row['rtplan_label'] == 'Plan A'
     assert np.allclose(apply(mr_row['reg_matrix'], MR_POINT), CT_POINT, rtol=0, atol=1e-6)
 
-    [stray_row] = csv_at(out / PID / 'images')
+    [stray_row] = csv_at(study(out, 1))
     assert (stray_row['file'], stray_row['kind'], stray_row['series_instance_uid'], stray_row['reg_matrix']) == (
         'series_MR_1.nii.gz', 'series', stray['series_uid'], '')
     assert {k: stray_row[k] for k in PLAN_COLUMNS} == EMPTY_PLAN
+    [twin_row] = csv_at(study(out, 2))  # the registered MR is in its study as well: no matrix, no plan columns
+    assert (twin_row['series_instance_uid'], twin_row['reg_matrix'], twin_row['study_instance_uid']) == (mr['series_uid'], '', mr['study_uid'])
+    assert {k: twin_row[k] for k in PLAN_COLUMNS} == EMPTY_PLAN
+    twin = nii(study(out, 2) / 'series_MR_1.nii.gz')  # the very image of the plan folder copy
+    assert np.array_equal(sitk.GetArrayFromImage(twin), sitk.GetArrayFromImage(image))
+    assert (twin.GetSize(), twin.GetSpacing(), twin.GetOrigin(), twin.GetDirection()) == (
+        image.GetSize(), image.GetSpacing(), image.GetOrigin(), image.GetDirection())
+    assert not (out / PID / 'images').exists() and listing(out / PID) == ['plan_1', 'study_1', 'study_2']
 
 
-def test_a2_4b_the_other_ct_of_the_study_goes_to_images(tree):
+def test_a2_4b_the_other_ct_of_the_study_goes_to_a_study_folder(tree):
     org, out = tree
     folder = org / PID / 'plan_1'
     plan = make_plan(folder)
     other = put(folder, prefix='ctb', modality='CT', study_uid=plan['ct']['study_uid'])
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.files) for r in rows] == [
-        ('plan_1', 'converted', ['planning_ct.nii.gz', 'series.csv']), ('images', 'converted', ['series_CT_1.nii.gz', 'series.csv'])]
+        ('plan_1', 'converted', ['planning_ct.nii.gz', 'series.csv']), ('studies', 'converted', []),
+        ('study_1/series_CT_1', 'converted', ['series_CT_1.nii.gz', 'series.csv'])]
     assert np.array_equal(sitk.GetArrayFromImage(nii(out / PID / 'plan_1' / 'planning_ct.nii.gz')), plan['values'].astype(np.float32))
-    assert np.array_equal(sitk.GetArrayFromImage(nii(out / PID / 'images' / 'series_CT_1.nii.gz')), VALUES.astype(np.float32))
-    assert csv_at(out / PID / 'images')[0]['series_instance_uid'] == other['series_uid']
+    assert np.array_equal(sitk.GetArrayFromImage(nii(study(out) / 'series_CT_1.nii.gz')), VALUES.astype(np.float32))
+    assert [r['series_instance_uid'] for r in csv_at(study(out))] == [other['series_uid']]  # the planning CT is in no study folder
+    assert not (out / PID / 'images').exists()
 
 
 def test_a2_4c_registered_to_two_plans_unregistered_and_refused_ct_and_misc_only(tree):
@@ -678,8 +717,9 @@ def test_a2_4c_registered_to_two_plans_unregistered_and_refused_ct_and_misc_only
     two = make_plan(org / PID / 'plan_2')
     refused = make_plan(org / PID / 'plan_3', doses=[dose_spec(1, 'BRACHY')])
     misc = org / PID / 'misc_files'
-    mr = put(misc)
-    free = put(misc, prefix='free')
+    mr = put(misc, study_date=STUDY_D3)
+    free = put(misc, prefix='free', study_date=STUDY_D2)
+    set_study_date(refused['ct'], STUDY_D1)  # the refused plan's CT is study_1
     sd.write_reg(misc / 'reg.dcm', one['ct']['study_uid'], mr['study_uid'], patient_id=PID, registrations=[
         dict(frame_uid=one['ct']['frame_uid'], matrices=rigid()),
         dict(frame_uid=two['ct']['frame_uid'], matrices=rigid(translation=(0, 5, 0))),
@@ -690,19 +730,19 @@ def test_a2_4c_registered_to_two_plans_unregistered_and_refused_ct_and_misc_only
     rows = conv.convert(org, out).rows
     assert [(r.patient, r.folder, r.outcome, r.reason) for r in rows] == [
         (PID, 'plan_1', 'converted', ''), (PID, 'plan_2', 'converted', ''), (PID, 'plan_3', 'refused', conv.REASON_DOSE_RULE),
-        (PID, 'images', 'converted', ''), (PID_B, 'images', 'converted', '')]
+        (PID, 'studies', 'converted', ''), (PID, 'study_1/series_CT_1', 'converted', ''), (PID, 'study_2/series_MR_1', 'converted', ''),
+        (PID, 'study_3/series_MR_1', 'converted', ''), (PID_B, 'studies', 'converted', ''), (PID_B, 'study_1/series_MR_1', 'converted', '')]
     assert files_of(rows, 'plan_1') == ['planning_ct.nii.gz', 'series_MR_1.nii.gz', 'series.csv']
-    assert sorted(p.name for p in (out / PID).iterdir()) == ['images', 'plan_1', 'plan_2']
+    assert sorted(p.name for p in (out / PID).iterdir()) == ['plan_1', 'plan_2', 'study_1', 'study_2', 'study_3']
     for name, shifted in (('plan_1', (10, 0, 0)), ('plan_2', (10, -5, 0))):
         assert sorted(p.name for p in (out / PID / name).iterdir()) == ['planning_ct.nii.gz', 'series.csv', 'series_MR_1.nii.gz']
         assert np.array_equal(sitk.GetArrayFromImage(nii(out / PID / name / 'series_MR_1.nii.gz')), VALUES.astype(np.float32))
         mr_row = csv_at(out / PID / name)[-1]
         assert mr_row['series_instance_uid'] == mr['series_uid']
         assert np.allclose(apply(mr_row['reg_matrix'], MR_POINT), MR_POINT + shifted, rtol=0, atol=1e-6)
-    assert sorted(p.name for p in (out / PID / 'images').iterdir()) == ['series.csv', 'series_CT_1.nii.gz', 'series_MR_1.nii.gz']
-    assert [(r['file'], r['series_instance_uid']) for r in csv_at(out / PID / 'images')] == [
-        ('series_CT_1.nii.gz', refused['ct']['series_uid']), ('series_MR_1.nii.gz', free['series_uid'])]
-    assert sorted(p.name for p in (out / PID_B).iterdir()) == ['images'] and csv_at(out / PID_B / 'images')[0]['series_instance_uid'] == lone['series_uid']
+    assert [(r['file'], r['series_instance_uid']) for n in (1, 2, 3) for r in csv_at(study(out, n))] == [
+        ('series_CT_1.nii.gz', refused['ct']['series_uid']), ('series_MR_1.nii.gz', free['series_uid']), ('series_MR_1.nii.gz', mr['series_uid'])]
+    assert sorted(p.name for p in (out / PID_B).iterdir()) == ['study_1'] and csv_at(study(out, 1, PID_B))[0]['series_instance_uid'] == lone['series_uid']
     assert listing(out) == [PID, PID_B, conv.REPORT_NAME]
 
 
@@ -710,7 +750,7 @@ def test_k_counts_per_folder_and_modality_in_date_time_uid_order_with_no_gap_for
     org, out = tree
     folder = org / PID / 'plan_1'
     plan = make_plan(folder)
-    frame = dict(frame_uid=plan['ct']['frame_uid'])  # same frame as the planning CT: registered by identity
+    frame = dict(frame_uid=plan['ct']['frame_uid'], study_uid=plan['ct']['study_uid'])  # the planning CT's frame: registered by identity
     late = put(folder, prefix='a', series_uid='1.9.9', series_date='20240103', **frame)
     tie_b = put(folder, prefix='b', series_uid='1.9.8', series_date='20240102', series_time='090000', **frame)
     tie_a = put(folder, prefix='c', series_uid='1.9.5', series_date='20240102', series_time='090000', **frame)
@@ -721,9 +761,9 @@ def test_k_counts_per_folder_and_modality_in_date_time_uid_order_with_no_gap_for
     victim.write_bytes(victim.read_bytes()[:-40])
     pet = put(folder, prefix='g', modality='PT', **frame)
     ct2 = put(folder, prefix='h', modality='CT', **frame)
-    unregistered = put(folder, prefix='i')
+    unregistered = put(folder, prefix='i', series_uid='1.9.7.5', study_uid=plan['ct']['study_uid'])
     rows = conv.convert(org, out).rows
-    assert [(r.folder, r.skipped_series) for r in rows] == [('plan_1', 0), ('images', 2)]
+    assert [(r.folder, r.skipped_series) for r in rows[:2]] == [('plan_1', 0), ('studies', 2)]
     assert files_of(rows, 'plan_1') == ['planning_ct.nii.gz', 'series_CT_1.nii.gz', *(f'series_MR_{k}.nii.gz' for k in range(1, 5)),
                                         'series_PT_1.nii.gz', 'series.csv']
     got = [(r['file'], r['series_instance_uid']) for r in csv_at(out / PID / 'plan_1')[1:]]
@@ -731,9 +771,15 @@ def test_k_counts_per_folder_and_modality_in_date_time_uid_order_with_no_gap_for
                    ('series_MR_2.nii.gz', tie_a['series_uid']), ('series_MR_3.nii.gz', tie_b['series_uid']),
                    ('series_MR_4.nii.gz', late['series_uid']), ('series_PT_1.nii.gz', pet['series_uid'])]
     assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == sorted(['planning_ct.nii.gz', 'series.csv', *(n for n, _ in got)])
-    [image_row] = csv_at(out / PID / 'images')  # k starts again at 1 in images/
-    assert (image_row['file'], image_row['series_instance_uid'], image_row['reg_matrix']) == ('series_MR_1.nii.gz', unregistered['series_uid'], '')
-    assert {k: image_row[k] for k in PLAN_COLUMNS} == EMPTY_PLAN
+    # one study holds all of them: k counts again from 1 in it, in the same order, plus the unregistered MR (after the undated one: uid order)
+    in_study = [(r['file'], r['series_instance_uid'], r['reg_matrix']) for r in csv_at(study(out))]
+    assert in_study == [('series_CT_1.nii.gz', ct2['series_uid'], ''), ('series_MR_1.nii.gz', undated['series_uid'], ''),
+                        ('series_MR_2.nii.gz', unregistered['series_uid'], ''), ('series_MR_3.nii.gz', tie_a['series_uid'], ''),
+                        ('series_MR_4.nii.gz', tie_b['series_uid'], ''), ('series_MR_5.nii.gz', late['series_uid'], ''),
+                        ('series_PT_1.nii.gz', pet['series_uid'], '')]
+    assert all({k: r[k] for k in PLAN_COLUMNS} == EMPTY_PLAN for r in csv_at(study(out)))
+    assert [name for name, _ in series_rows_of(rows)] == [f'study_1/{name[:-7]}' for name, _, _ in in_study]
+    assert listing(out / PID) == ['plan_1', 'study_1']
 
 
 def test_b4_excluded_model_studies_and_localizers_are_written_nowhere_and_not_counted(tree):
@@ -741,9 +787,9 @@ def test_b4_excluded_model_studies_and_localizers_are_written_nowhere_and_not_co
     folder = org / PID / 'plan_1'
     make_plan(folder)
     misc = org / PID / 'misc_files'
-    study = pydicom.uid.generate_uid()
-    put(misc, prefix='x', study_uid=study)
-    put(misc, prefix='y', study_uid=study, manufacturer_model_name='Acuity Sim')
+    shared = pydicom.uid.generate_uid()
+    put(misc, prefix='x', study_uid=shared)
+    put(misc, prefix='y', study_uid=shared, manufacturer_model_name='Acuity Sim')
     put(misc, prefix='loc', image_type=['ORIGINAL', 'PRIMARY', 'LOCALIZER'])
     kept = put(misc, prefix='kept')
     put(misc, prefix='scout', values=VALUES[:1], series_uid=kept['series_uid'], frame_uid=kept['frame_uid'], study_uid=kept['study_uid'],
@@ -753,10 +799,12 @@ def test_b4_excluded_model_studies_and_localizers_are_written_nowhere_and_not_co
         edit(path, lambda ds: delattr(ds, 'StudyInstanceUID'))
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.files, r.skipped_series) for r in rows] == [
-        ('plan_1', 'converted', ['planning_ct.nii.gz', 'series.csv'], 0), ('images', 'converted', ['series_MR_1.nii.gz', 'series.csv'], 0)]
-    assert [r['series_instance_uid'] for r in csv_at(out / PID / 'images')] == [kept['series_uid']]
-    assert sorted(p.name for p in (out / PID / 'images').iterdir()) == ['series.csv', 'series_MR_1.nii.gz']
-    assert np.array_equal(sitk.GetArrayFromImage(nii(out / PID / 'images' / 'series_MR_1.nii.gz')), VALUES.astype(np.float32))
+        ('plan_1', 'converted', ['planning_ct.nii.gz', 'series.csv'], 0), ('studies', 'converted', [], 0),
+        ('study_1/series_MR_1', 'converted', ['series_MR_1.nii.gz', 'series.csv'], 0)]
+    assert [r['series_instance_uid'] for r in csv_at(study(out))] == [kept['series_uid']]
+    assert sorted(p.name for p in study(out).iterdir()) == ['series.csv', 'series_MR_1.nii.gz']
+    assert listing(out / PID) == ['plan_1', 'study_1']
+    assert np.array_equal(sitk.GetArrayFromImage(nii(study(out) / 'series_MR_1.nii.gz')), VALUES.astype(np.float32))
 
 
 def copy_to(paths, folder):
@@ -782,16 +830,17 @@ def test_b6_a_series_in_two_plan_folders_and_misc_is_read_once_and_written_once_
     monkeypatch.setattr(conv, 'write_atomic', lambda image, path: writes.append(Path(path).parent.name + '/' + Path(path).name) or real_write(image, path))
     rows = conv.convert(org, out).rows
     assert reads == [4]
-    assert sorted(w for w in writes if '/series_' in w) == ['plan_1/series_MR_1.nii.gz', 'plan_2/series_MR_1.nii.gz']
+    assert sorted(w for w in writes if '/series_' in w) == [  # the study volume is written under its hidden index name, renamed later
+        '.study_0/series_MR_1.nii.gz', 'plan_1/series_MR_1.nii.gz', 'plan_2/series_MR_1.nii.gz']
     for name in ('plan_1', 'plan_2'):
         assert [r['series_instance_uid'] for r in csv_at(out / PID / name)[1:]] == [mr['series_uid']]
-    assert [(r.folder, r.outcome, r.reason, r.files, r.skipped_series) for r in rows if r.folder == 'images'] == [
-        ('images', 'skipped', conv.REASON_NO_IMAGES, [], 0)]
-    assert not (out / PID / 'images').exists()
+    assert [(r.folder, r.outcome, r.reason, r.files, r.skipped_series) for r in rows if r.folder != 'plan_1' and r.folder != 'plan_2'] == [
+        ('studies', 'converted', '', [], 0), ('study_1/series_MR_1', 'converted', '', ['series_MR_1.nii.gz', 'series.csv'], 0)]
+    assert [r['series_instance_uid'] for r in csv_at(study(out))] == [mr['series_uid']] and not (out / PID / 'images').exists()
 
 
-@pytest.mark.parametrize('model, destination, other', [(None, 'plan_1', 'images'), ('Acuity', 'images', 'plan_1')])
-def test_a_reg_in_an_excluded_study_registers_nothing(tmp_path, model, destination, other):  # the None case is the control
+@pytest.mark.parametrize('model, registered', [(None, True), ('Acuity', False)])
+def test_a_reg_in_an_excluded_study_registers_nothing(tmp_path, model, registered):  # the None case is the control
     org, out = tmp_path / 'org', tmp_path / 'out'
     plan = make_plan(org / PID / 'plan_1')
     misc = org / PID / 'misc_files'
@@ -799,7 +848,8 @@ def test_a_reg_in_an_excluded_study_registers_nothing(tmp_path, model, destinati
     sd.write_reg(misc / 'reg.dcm', pydicom.uid.generate_uid(), mr['study_uid'], patient_id=PID, manufacturer_model_name=model, registrations=[
         dict(frame_uid=plan['ct']['frame_uid'], matrices=rigid()), dict(frame_uid=mr['frame_uid'], matrices=rigid())])
     conv.convert(org, out)
-    assert (out / PID / destination / 'series_MR_1.nii.gz').is_file() and not (out / PID / other / 'series_MR_1.nii.gz').exists()
+    assert (out / PID / 'plan_1' / 'series_MR_1.nii.gz').is_file() is registered
+    assert (study(out) / 'series_MR_1.nii.gz').is_file()  # in its study either way
 
 
 def test_two_copies_of_one_reg_behave_as_the_first_in_folder_order(tree):
@@ -816,10 +866,10 @@ def test_two_copies_of_one_reg_behave_as_the_first_in_folder_order(tree):
         dict(frame_uid=plan_two['ct']['frame_uid'], matrices=rigid()), dict(frame_uid=mr['frame_uid'], matrices=rigid())])
     conv.convert(org, out)
     assert not list((out / PID / 'plan_1').glob('series_MR_*')) and not list((out / PID / 'plan_2').glob('series_MR_*'))
-    assert (out / PID / 'images' / 'series_MR_1.nii.gz').is_file()
+    assert (study(out) / 'series_MR_1.nii.gz').is_file()
 
 
-def test_b7_report_rows_in_order_with_skipped_series_counted_once_on_the_images_row(tree):
+def test_b7_report_rows_in_order_with_skipped_series_counted_once_on_the_studies_row(tree):
     org, out = tree
     for n in (10, 2):
         make_plan(org / PID / f'plan_{n}')
@@ -827,16 +877,17 @@ def test_b7_report_rows_in_order_with_skipped_series_counted_once_on_the_images_
     copy_to(bad['paths'], org / PID / 'plan_2')
     copy_to(bad['paths'], org / PID / 'misc_files')
     good = put(org / PID / 'misc_files')
-    make_plan(org / PID_B / 'plan_1', patient=PID_B)  # no other series at all: no images row
+    make_plan(org / PID_B / 'plan_1', patient=PID_B)  # no other series at all: no studies row
     conv.convert(org, out)
     with open(out / conv.REPORT_NAME, newline='') as handle:
         written = list(csv.DictReader(handle))
     assert [(r['patient'], r['folder'], r['outcome'], r['reason'], r['files'], r['skipped_series']) for r in written] == [
         (PID, 'plan_2', 'converted', '', 'planning_ct.nii.gz;series.csv', '0'),
         (PID, 'plan_10', 'converted', '', 'planning_ct.nii.gz;series.csv', '0'),
-        (PID, 'images', 'converted', '', 'series_MR_1.nii.gz;series.csv', '1'),
+        (PID, 'studies', 'converted', '', '', '1'),
+        (PID, 'study_1/series_MR_1', 'converted', '', 'series_MR_1.nii.gz;series.csv', '0'),
         (PID_B, 'plan_1', 'converted', '', 'planning_ct.nii.gz;series.csv', '0')]
-    assert [r['series_instance_uid'] for r in csv_at(out / PID / 'images')] == [good['series_uid']]
+    assert [r['series_instance_uid'] for r in csv_at(study(out))] == [good['series_uid']]
 
 
 def test_b7_a_patient_with_neither_plans_nor_candidates_keeps_the_no_plans_row_and_gets_no_folder(tree):
@@ -854,7 +905,7 @@ def test_b7_a_plan_less_patient_whose_candidates_all_fail_gets_an_empty_folder_a
     put(org / PID / 'misc_files', positions=[(0, 0, 0), (0, 0, 1), (0, 0, 2), (0, 0, 4)])
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.reason, r.files, r.skipped_series) for r in rows] == [
-        ('images', 'skipped', conv.REASON_NO_IMAGES, [], 1)]
+        ('studies', 'skipped', conv.REASON_NO_STUDIES, [], 1)]
     assert (out / PID).is_dir() and list((out / PID).iterdir()) == []
     assert [(r.folder, r.outcome, r.reason) for r in conv.convert(org, out).rows] == [('', 'skipped', conv.REASON_EXISTS)]
 
@@ -872,13 +923,13 @@ def test_b8_an_unreadable_series_in_misc_is_skipped_and_nothing_names_the_id_a_p
     capfd.readouterr()
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.reason, r.skipped_series) for r in rows] == [
-        ('plan_1', 'converted', '', 0), ('images', 'skipped', conv.REASON_NO_IMAGES, 1)]
+        ('plan_1', 'converted', '', 0), ('studies', 'skipped', conv.REASON_NO_STUDIES, 1)]
     captured = capfd.readouterr()
     texts = [captured.out, captured.err, caplog.text, *(r.getMessage() for r in caplog.records), *(str(w.message) for w in recwarn.list)]
     assert [s for s in secrets for t in texts if s in t] == []
 
 
-def test_the_closing_log_line_counts_images_rows_apart_from_plan_rows(tree, caplog):
+def test_the_closing_log_line_counts_imaging_rows_and_studies_rows_apart_from_plan_rows(tree, caplog):
     org, out = tree
     plan = make_plan(org / PID / 'plan_1')
     put(org / PID / 'plan_1', frame_uid=plan['ct']['frame_uid'])
@@ -887,8 +938,10 @@ def test_the_closing_log_line_counts_images_rows_apart_from_plan_rows(tree, capl
     caplog.set_level(logging.INFO)
     rows = conv.convert(org, out).rows
     assert [(r.patient, r.folder, r.outcome) for r in rows] == [
-        (PID, 'plan_1', 'converted'), (PID, 'images', 'skipped'), (PID_B, 'images', 'converted'), ('SYNTHETICPTC', '', 'skipped')]
-    assert 'convert: 1 plan rows (1 converted, 0 refused, 0 skipped), 2 images rows, 1 patient rows (0 refused, 1 skipped)' in caplog.messages
+        (PID, 'plan_1', 'converted'), (PID, 'studies', 'converted'), (PID, 'study_1/series_MR_1', 'converted'),
+        (PID_B, 'studies', 'converted'), (PID_B, 'study_1/series_MR_1', 'converted'), ('SYNTHETICPTC', '', 'skipped')]
+    assert ('convert: 1 plan rows (1 converted, 0 refused, 0 skipped), 2 imaging rows, 2 studies rows, 1 patient rows (0 refused, 1 skipped)'
+            in caplog.messages)
 
 
 def test_a2_11_the_organized_tree_keeps_its_hashes_with_series_and_a_rerun_skips_every_patient(tree):
@@ -950,10 +1003,10 @@ def test_an_oserror_writing_a_series_is_still_an_io_error_row(tree, monkeypatch)
     assert listing(out) == [conv.REPORT_NAME]
 
 
-# ---------------------------------------------------------------- review: a CT known to be short never reaches images/
+# ---------------------------------------------------------------- review: a CT known to be short never reaches a study folder
 
 @pytest.mark.parametrize('damage', ['end-slice-deleted', 'unreadable-slice'])
-def test_a_refused_plans_ct_that_may_be_short_is_skipped_not_written_to_images(tmp_path, damage):
+def test_a_refused_plans_ct_that_may_be_short_is_skipped_not_written_to_a_study_folder(tmp_path, damage):
     org, out = tmp_path / 'org', tmp_path / 'out'
     plan = make_plan(org / PID / 'plan_1')
     last = Path(plan['ct']['paths'][-1])
@@ -963,11 +1016,10 @@ def test_a_refused_plans_ct_that_may_be_short_is_skipped_not_written_to_images(t
         last.write_bytes(b'not a dicom file')  # refused with REASON_FILE_UNREADABLE; the rest is still one volume
     rows = conv.convert(org, out).rows
     plan_row = next(r for r in rows if r.folder == 'plan_1')
-    images_row = next(r for r in rows if r.folder == conv.IMAGES_NAME)
+    summary = studies_row(rows)
     assert plan_row.outcome == conv.OUTCOME_REFUSED
-    assert (images_row.outcome, images_row.reason, images_row.skipped_series) == (
-        conv.OUTCOME_SKIPPED, conv.REASON_NO_IMAGES, 1)
-    assert not (out / PID / conv.IMAGES_NAME).exists()
+    assert (summary.outcome, summary.reason, summary.skipped_series) == (conv.OUTCOME_SKIPPED, conv.REASON_NO_STUDIES, 1)
+    assert not (study(out)).exists() and not (out / PID / 'images').exists()
 
 
 # ---------------------------------------------------------------- hardening #37, #35
@@ -1005,7 +1057,7 @@ def test_a_series_shared_with_a_refused_unreadable_sibling_is_written_from_the_c
     assert [(r.folder, r.reason) for r in rows if r.folder.startswith('plan_')] == [
         ('plan_1', conv.REASON_FILE_UNREADABLE), ('plan_2', '')]
     assert [r['series_instance_uid'] for r in csv_at(out / PID / 'plan_2')[1:]] == [mr['series_uid']]
-    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1  # plan_1's own CT: short-only
+    assert studies_row(rows).skipped_series == 1  # plan_1's own CT: short-only
 
 
 def test_a_slice_missing_planning_ct_is_skipped_even_where_a_converted_sibling_holds_a_copy(tree):
@@ -1017,8 +1069,8 @@ def test_a_slice_missing_planning_ct_is_skipped_even_where_a_converted_sibling_h
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.reason) for r in rows if r.folder.startswith('plan_')] == [
         ('plan_1', conv.REASON_CT_SLICE_MISSING), ('plan_2', '')]
-    images_row = next(r for r in rows if r.folder == conv.IMAGES_NAME)
-    assert (images_row.outcome, images_row.skipped_series) == (conv.OUTCOME_SKIPPED, 1)
+    summary = studies_row(rows)
+    assert (summary.outcome, summary.skipped_series) == (conv.OUTCOME_SKIPPED, 1)
     assert len(csv_at(out / PID / 'plan_2')) == 1  # the planning CT row only
 
 
@@ -1111,12 +1163,12 @@ def test_an_rtstruct_study_that_also_holds_another_series_still_converts_and_the
     assert arr(out / PID / 'plan_1' / 'liver.nii.gz').sum() == 27
     if registered:
         assert files_of(rows, 'plan_1') == ['planning_ct.nii.gz', 'liver.nii.gz', 'series_MR_1.nii.gz', 'series.csv']
-        assert [(r.folder, r.outcome, r.reason) for r in rows[1:]] == [('images', 'skipped', conv.REASON_NO_IMAGES)]
         assert csv_at(out / PID / 'plan_1')[-1]['reg_matrix'] == '1 0 0 10 0 1 0 0 0 0 1 0 0 0 0 1'
     else:
         assert files_of(rows, 'plan_1') == ['planning_ct.nii.gz', 'liver.nii.gz', 'series.csv']
-        assert [(r.folder, r.outcome, r.files) for r in rows[1:]] == [('images', 'converted', ['series_MR_1.nii.gz', 'series.csv'])]
-        assert csv_at(out / PID / 'images')[0]['reg_matrix'] == ''
+    assert [(r.folder, r.outcome, r.files) for r in rows[1:]] == [  # in its study either way
+        ('studies', 'converted', []), ('study_1/series_MR_1', 'converted', ['series_MR_1.nii.gz', 'series.csv'])]
+    assert csv_at(study(out))[0]['reg_matrix'] == ''
 
 
 # ---------------------------------------------------------------- hardening B6 (#42, subset): tolerance boundaries
@@ -1186,11 +1238,7 @@ def test_a_blank_patient_id_series_in_misc_files_is_never_placed(tree):
         ds.save_as(path)
     conv.convert(org, out)
     assert len(csv_at(out / PID / 'plan_1')) == 1  # the planning CT row only
-    assert not (out / PID / conv.IMAGES_NAME).exists()
-
-
-def images_uids(out):
-    return {r['series_instance_uid'] for r in csv_at(out / PID / conv.IMAGES_NAME)} if (out / PID / conv.IMAGES_NAME).exists() else set()
+    assert not study(out).exists() and not (out / PID / 'images').exists()
 
 
 def test_an_unreadable_misc_file_whose_study_can_be_salvaged_skips_that_study_only(tree):
@@ -1200,8 +1248,8 @@ def test_an_unreadable_misc_file_whose_study_can_be_salvaged_skips_that_study_on
     at_risk, other = put(misc, prefix='a'), put(misc, prefix='b')
     (misc / 'stray.dcm').write_bytes(Path(at_risk['paths'][0]).read_bytes()[132:])  # no preamble: unreadable, its tags intact
     rows = conv.convert(org, out).rows
-    assert images_uids(out) == {other['series_uid']}
-    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1
+    assert study_uids(out) == {other['series_uid']}
+    assert studies_row(rows).skipped_series == 1
 
 
 def test_an_unreadable_misc_file_with_no_study_skips_every_misc_only_series(tree):
@@ -1213,9 +1261,9 @@ def test_an_unreadable_misc_file_with_no_study_skips_every_misc_only_series(tree
     kept = put(org / PID / 'plan_1', prefix='c', frame_uid=plan['ct']['frame_uid'])  # in the plan folder, not misc-only
     (misc / 'stray.dcm').write_bytes(b'SYNTHETIC not dicom at all')
     rows = conv.convert(org, out).rows
-    assert images_uids(out) == set()
+    assert study_uids(out) == {kept['series_uid']}  # the plan-folder series, also in its study; both misc-only series skipped
     assert [r['series_instance_uid'] for r in csv_at(out / PID / 'plan_1') if r['kind'] == 'series'] == [kept['series_uid']]
-    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 2
+    assert studies_row(rows).skipped_series == 2
 
 
 def test_a_file_dropped_for_a_bad_tag_skips_every_series_of_its_study(tree, monkeypatch):
@@ -1234,9 +1282,9 @@ def test_a_file_dropped_for_a_bad_tag_skips_every_series_of_its_study(tree, monk
         return real(ds)
     monkeypatch.setattr(ser, '_file_keys', keys)
     rows = conv.convert(org, out).rows
-    assert images_uids(out) == {other['series_uid']}
-    assert sibling['series_uid'] not in images_uids(out)
-    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1  # the sibling; the first was dropped whole
+    assert study_uids(out) == {other['series_uid']}
+    assert sibling['series_uid'] not in study_uids(out)
+    assert studies_row(rows).skipped_series == 1  # the sibling; the first was dropped whole
 
 
 def test_a_slice_dropped_by_candidate_series_skips_every_series_of_its_study(tree, monkeypatch):
@@ -1255,9 +1303,9 @@ def test_a_slice_dropped_by_candidate_series_skips_every_series_of_its_study(tre
         return real(ds)
     monkeypatch.setattr(ser, '_candidate_series', series_uid)
     rows = conv.convert(org, out).rows
-    assert images_uids(out) == {other['series_uid']}  # not first, one slice short, nor its sibling
-    assert sibling['series_uid'] not in images_uids(out)
-    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 2
+    assert study_uids(out) == {other['series_uid']}  # not first, one slice short, nor its sibling
+    assert sibling['series_uid'] not in study_uids(out)
+    assert studies_row(rows).skipped_series == 2
 
 
 def test_a_bad_tag_file_with_no_readable_study_skips_every_misc_only_series(tree, monkeypatch):
@@ -1279,7 +1327,7 @@ def test_a_bad_tag_file_with_no_readable_study_skips_every_misc_only_series(tree
         return real(ds)
     monkeypatch.setattr(ser, '_file_keys', keys)
     conv.convert(org, out)
-    assert images_uids(out) == set()
+    assert study_uids(out) == {kept['series_uid']}
     assert [r['series_instance_uid'] for r in csv_at(out / PID / 'plan_1') if r['kind'] == 'series'] == [kept['series_uid']]
 
 
@@ -1302,8 +1350,8 @@ def test_a_series_whose_slices_disagree_on_study_is_skipped(tree):
     ds.StudyInstanceUID = pydicom.uid.generate_uid()
     ds.save_as(mixed['paths'][1])
     rows = conv.convert(org, out).rows
-    assert images_uids(out) == set()
-    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1
+    assert study_uids(out) == set()
+    assert studies_row(rows).skipped_series == 1
 
 
 def test_salvaging_a_study_tag_prints_and_logs_nothing_of_its_value(tree, capfd, caplog, recwarn):
@@ -1333,8 +1381,8 @@ def test_a_misc_series_with_a_blank_patient_id_slice_is_skipped_not_written_shor
     ds.PatientID = ''
     ds.save_as(mr['paths'][-1])
     rows = conv.convert(org, out).rows
-    assert images_uids(out) == set()
-    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1
+    assert study_uids(out) == set()
+    assert studies_row(rows).skipped_series == 1
 
 
 def test_a_blank_id_duplicate_of_a_present_slice_does_not_skip_its_series(tree):
@@ -1345,7 +1393,7 @@ def test_a_blank_id_duplicate_of_a_present_slice_does_not_skip_its_series(tree):
     ds.PatientID = ''  # same SOPInstanceUID as the real-id slice: a copy, the series is whole
     ds.save_as(Path(mr['paths'][-1]).with_name('copy.dcm'))
     conv.convert(org, out)
-    assert images_uids(out) == {mr['series_uid']}
+    assert study_uids(out) == {mr['series_uid']}
 
 
 def test_a_blank_id_file_whose_sop_collides_with_another_series_still_skips_its_series(tree):
@@ -1356,7 +1404,7 @@ def test_a_blank_id_file_whose_sop_collides_with_another_series_still_skips_its_
     ds.PatientID, ds.SeriesInstanceUID = '', mr['series_uid']
     ds.save_as(org / PID / 'misc_files' / 'collide.dcm')
     conv.convert(org, out)
-    assert images_uids(out) == set()
+    assert study_uids(out) == set()
 
 
 def test_a_plan_whose_planning_ct_end_slice_sits_in_misc_with_a_blank_id_is_refused(tree):
@@ -1383,36 +1431,42 @@ def test_a_plan_whose_planning_ct_end_slice_sits_in_misc_with_a_blank_id_is_refu
 
 # ---------------------------------------------------------------- hardening B8 (#42): series scenarios
 
-def images_rows(out):
-    return [(r['modality'], r['series_instance_uid'], r['reg_matrix'], r['rtplan_uid']) for r in csv_at(out / PID / 'images')]
+def study_rows(out):
+    """(modality, series uid, reg matrix, plan uid) of every study series of PID, study_1 first."""
+    return [(r['modality'], r['series_instance_uid'], r['reg_matrix'], r['rtplan_uid'])
+            for d in sorted((out / PID).glob('study_*'), key=lambda d: int(d.name.split('_')[1])) for r in csv_at(d)]
 
 
-def test_a_series_registered_only_to_a_refused_plan_goes_to_images_with_no_matrix_and_no_plan(tree):
+def test_a_series_registered_only_to_a_refused_plan_goes_to_a_study_with_no_matrix_and_no_plan(tree):
     org, out = tree
     refused = make_plan(org / PID / 'plan_1', doses=[dose_spec(1, 'BRACHY')])
+    set_study_date(refused['ct'], STUDY_D1)
     misc = org / PID / 'misc_files'
-    mr = put(misc)
+    mr = put(misc, study_date=STUDY_D2)
     reg_for(misc / 'reg.dcm', refused['ct'], mr)
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.reason) for r in rows] == [
-        ('plan_1', 'refused', conv.REASON_DOSE_RULE), ('images', 'converted', '')]
-    # only converted plans are targets: the MR is not written for plan_1, it goes to images/ without a matrix
-    assert images_rows(out) == [('CT', refused['ct']['series_uid'], '', ''), ('MR', mr['series_uid'], '', '')]
+        ('plan_1', 'refused', conv.REASON_DOSE_RULE), ('studies', 'converted', ''),
+        ('study_1/series_CT_1', 'converted', ''), ('study_2/series_MR_1', 'converted', '')]
+    # only converted plans are targets: the MR is not written for plan_1, it goes to its study without a matrix
+    assert study_rows(out) == [('CT', refused['ct']['series_uid'], '', ''), ('MR', mr['series_uid'], '', '')]
     assert not (out / PID / 'plan_1').exists()
 
 
 @pytest.mark.parametrize('plan', ['refused', 'absent'])
-def test_a_pt_on_the_planning_ct_frame_of_a_patient_without_a_converted_plan_lands_in_images(tree, plan):
+def test_a_pt_on_the_planning_ct_frame_of_a_patient_without_a_converted_plan_lands_in_a_study(tree, plan):
     org, out = tree
     misc = org / PID / 'misc_files'
     if plan == 'refused':
         ct = make_plan(org / PID / 'plan_1', doses=[dose_spec(1, 'BRACHY')])['ct']
+        set_study_date(ct, STUDY_D1)
     else:
-        ct = put(misc, prefix='ct', modality='CT')
-    pt = put(misc, prefix='pt', modality='PT', frame_uid=ct['frame_uid'])
+        ct = put(misc, prefix='ct', modality='CT', study_date=STUDY_D1)
+    pt = put(misc, prefix='pt', modality='PT', frame_uid=ct['frame_uid'], study_date=STUDY_D2)
     rows = conv.convert(org, out).rows
-    assert [(r.folder, r.outcome) for r in rows if r.folder != 'plan_1'] == [('images', 'converted')]
-    assert images_rows(out) == [('CT', ct['series_uid'], '', ''), ('PT', pt['series_uid'], '', '')]  # the same frame, but no plan to be identity to
+    assert [(r.folder, r.outcome) for r in rows if r.folder != 'plan_1'] == [
+        ('studies', 'converted'), ('study_1/series_CT_1', 'converted'), ('study_2/series_PT_1', 'converted')]
+    assert study_rows(out) == [('CT', ct['series_uid'], '', ''), ('PT', pt['series_uid'], '', '')]  # the same frame, but no plan to be identity to
 
 
 @pytest.mark.parametrize('anchor', ['excluded study', 'localizer'])
@@ -1427,10 +1481,10 @@ def test_a_reg_item_resolved_through_an_excluded_study_or_localizer_header_still
         dict(frame_uid=plan['ct']['frame_uid'], matrices=rigid()), dict(images=ref['sop_uids'], matrices=rigid(translation=(10, 0, 0)))])
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.skipped_series) for r in rows] == [
-        ('plan_1', 'converted', 0), ('images', 'skipped', 0)]  # the MR went to the plan: nothing for images/
+        ('plan_1', 'converted', 0), ('studies', 'converted', 0), ('study_1/series_MR_1', 'converted', 0)]  # the MR is in both
     assert [(r['modality'], r['series_instance_uid'], r['reg_matrix']) for r in csv_at(out / PID / 'plan_1')[1:]] == [
         ('MR', mr['series_uid'], '1 0 0 10 0 1 0 0 0 0 1 0 0 0 0 1')]
-    assert not (out / PID / 'images').exists()
+    assert study_rows(out) == [('MR', mr['series_uid'], '', '')] and not (out / PID / 'images').exists()
 
 
 @pytest.mark.parametrize('kwargs', [
@@ -1446,6 +1500,184 @@ def test_each_series_skip_kind_adds_one_to_the_skipped_count_of_the_report(tree,
     good = put(misc, prefix='good')
     put(misc, prefix='bad', **kwargs)
     rows = conv.convert(org, out).rows
-    assert [(r.folder, r.outcome, r.skipped_series) for r in rows] == [('plan_1', 'converted', 0), ('images', 'converted', 1)]
-    assert [(r['folder'], r['skipped_series']) for r in report(out)] == [('plan_1', '0'), ('images', '1')]
-    assert [r['series_instance_uid'] for r in csv_at(out / PID / 'images')] == [good['series_uid']]
+    assert [(r.folder, r.outcome, r.skipped_series) for r in rows] == [
+        ('plan_1', 'converted', 0), ('studies', 'converted', 1), ('study_1/series_MR_1', 'converted', 0)]
+    assert [(r['folder'], r['skipped_series']) for r in report(out)] == [('plan_1', '0'), ('studies', '1'), ('study_1/series_MR_1', '0')]
+    assert [r['series_instance_uid'] for r in csv_at(study(out))] == [good['series_uid']]
+
+
+# ---------------------------------------------------------------- task-02 (#17): study_<n>/ folders replace images/
+
+def hidden_names(root):
+    return sorted(p.name for p in root.rglob('.*') if p.name != '.')
+
+
+def test_a_plan_less_patient_with_two_studies_converts_to_two_study_folders(tree):
+    org, out = tree
+    misc = org / PID / 'misc_files'
+    ct = put(misc, prefix='ct', modality='CT', study_date=STUDY_D1)
+    mr_b = put(misc, prefix='mrb', series_uid='1.9.2', study_uid='1.9.7', study_date=STUDY_D2)
+    mr_a = put(misc, prefix='mra', series_uid='1.9.1', study_uid='1.9.7', study_date=STUDY_D2)
+    rows = conv.convert(org, out).rows
+    assert listing(out / PID) == ['study_1', 'study_2'] and hidden_names(out) == []
+    assert sorted(p.name for p in study(out, 1).iterdir()) == ['series.csv', 'series_CT_1.nii.gz']
+    assert sorted(p.name for p in study(out, 2).iterdir()) == ['series.csv', 'series_MR_1.nii.gz', 'series_MR_2.nii.gz']
+    assert [(r['file'], r['series_instance_uid']) for r in csv_at(study(out, 1))] == [('series_CT_1.nii.gz', ct['series_uid'])]
+    assert [(r['file'], r['series_instance_uid'], r['kind'], r['reg_matrix']) for r in csv_at(study(out, 2))] == [
+        ('series_MR_1.nii.gz', mr_a['series_uid'], 'series', ''), ('series_MR_2.nii.gz', mr_b['series_uid'], 'series', '')]
+    assert [(r.folder, r.outcome) for r in rows] == [
+        ('studies', 'converted'), ('study_1/series_CT_1', 'converted'), ('study_2/series_MR_1', 'converted'), ('study_2/series_MR_2', 'converted')]
+
+
+def make_studies(misc, specs, reverse=False):
+    """One CT series per (name, study_uid, study_date, study_time) of `specs`, written in the given or the reverse order; {name: series}."""
+    found = {}
+    for name, uid, date, time in (reversed(specs) if reverse else specs):
+        found[name] = put(misc, prefix=name, modality='CT', study_uid=uid, study_date=date, study_time=time)
+    return found
+
+
+def numbered(out):
+    """Study names in n order, as the series UIDs of their series.csv."""
+    return [[r['series_instance_uid'] for r in csv_at(study(out, n))] for n in range(1, len(list((out / PID).glob('study_*'))) + 1)]
+
+
+@pytest.mark.parametrize('reverse', [False, True], ids=['folder-order', 'reversed-folder-order'])
+def test_studies_are_numbered_by_date_then_time_then_study_uid_with_the_undated_ones_last(tree, reverse):
+    org, out = tree
+    specs = [('a', '1.9.5', None, None),  # undated: last, whatever its uid
+             ('b', '1.9.6', STUDY_D2, STUDY_T2), ('c', '1.9.7', STUDY_D2, STUDY_T1), ('d', '1.9.8', STUDY_D1, STUDY_T2),
+             ('e', '1.9.4', STUDY_D2, STUDY_T1),  # same date and time as c: the smaller StudyInstanceUID first
+             ('f', '1.9.3', None, STUDY_T1)]  # undated too (a time alone dates nothing); the key's time then puts it after a
+    found = make_studies(org / PID / 'misc_files', specs, reverse)
+    conv.convert(org, out)
+    assert numbered(out) == [[found[n]['series_uid']] for n in ('d', 'e', 'c', 'b', 'a', 'f')]
+
+
+def test_two_series_of_one_study_with_different_study_dates_rank_it_by_the_earlier_date(tree):
+    org, out = tree
+    misc = org / PID / 'misc_files'
+    x1 = put(misc, prefix='x1', study_uid='1.9.9', study_date=STUDY_D3)
+    x2 = put(misc, prefix='x2', study_uid='1.9.9', study_date=STUDY_D1)
+    y = put(misc, prefix='y', study_uid='1.9.1', study_date=STUDY_D2)
+    conv.convert(org, out)
+    assert sorted(numbered(out)[0]) == sorted([x1['series_uid'], x2['series_uid']]) and numbered(out)[1] == [y['series_uid']]
+    assert not (study(out, 3)).exists()
+
+
+def test_an_invalid_study_date_sorts_as_text_and_never_raises(tree):
+    org, out = tree
+    misc = org / PID / 'misc_files'
+    bad = put(misc, prefix='bad', study_uid='1.9.1', study_date=sd.INVALID_DA)
+    good = put(misc, prefix='good', study_uid='1.9.2', study_date=STUDY_D3)
+    undated = put(misc, prefix='none', study_uid='1.9.0')
+    conv.convert(org, out)
+    assert numbered(out) == [[good['series_uid']], [bad['series_uid']], [undated['series_uid']]]
+
+
+def test_a_plan_only_patient_gets_no_studies_row_and_no_study_folder(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome) for r in rows] == [('plan_1', 'converted')]
+    assert listing(out / PID) == ['plan_1']
+
+
+def test_a_failed_pixel_read_leaves_the_numbering_contiguous_and_no_hidden_folder(tree):
+    org, out = tree
+    misc = org / PID / 'misc_files'
+    broken = put(misc, prefix='broken', study_uid='1.9.1', study_date=STUDY_D1)  # the earliest study, no readable series
+    victim = Path(broken['paths'][1])
+    victim.write_bytes(victim.read_bytes()[:-40])
+    second = put(misc, prefix='second', study_uid='1.9.2', study_date=STUDY_D2)
+    mixed_ok = put(misc, prefix='ok', study_uid='1.9.3', study_date=STUDY_D3)
+    mixed_bad = put(misc, prefix='bad', study_uid='1.9.3', study_date=STUDY_D3)  # one series of study 3 fails, its sibling is written
+    victim = Path(mixed_bad['paths'][2])
+    victim.write_bytes(victim.read_bytes()[:-40])
+    rows = conv.convert(org, out).rows
+    assert listing(out / PID) == ['study_1', 'study_2'] and hidden_names(out) == []
+    assert numbered(out) == [[second['series_uid']], [mixed_ok['series_uid']]]
+    assert studies_row(rows).skipped_series == 2 and [f for f, _ in series_rows_of(rows)] == ['study_1/series_MR_1', 'study_2/series_MR_1']
+
+
+def test_every_candidate_skipped_leaves_the_skipped_summary_row_and_no_folder(tree):
+    org, out = tree
+    broken = put(org / PID / 'misc_files')
+    victim = Path(broken['paths'][1])
+    victim.write_bytes(victim.read_bytes()[:-40])
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.reason, r.files, r.skipped_series) for r in rows] == [
+        ('studies', 'skipped', conv.REASON_NO_STUDIES, [], 1)]
+    assert listing(out / PID) == [] and hidden_names(out) == []
+
+
+def test_study_volumes_are_written_under_hidden_index_names_never_a_uid(tree, monkeypatch):
+    org, out = tree
+    misc = org / PID / 'misc_files'
+    made = [put(misc, prefix='a', study_date=STUDY_D2), put(misc, prefix='b', study_date=STUDY_D1)]
+    parents = []
+    real = conv.write_atomic
+    monkeypatch.setattr(conv, 'write_atomic', lambda image, path: parents.append(Path(path).parent.name) or real(image, path))
+    conv.convert(org, out)
+    assert sorted(parents) == ['.study_0', '.study_1']
+    assert not [uid for series in made for uid in (series['study_uid'], series['series_uid']) if any(uid in n for n in parents)]
+    assert listing(out / PID) == ['study_1', 'study_2'] and hidden_names(out) == []
+
+
+def test_a_study_volume_is_the_image_read_series_returned_and_is_not_read_again(tree, monkeypatch):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    put(org / PID / 'plan_1', frame_uid=plan['ct']['frame_uid'])  # registered: a plan folder write and a study write
+    returned, written = [], []
+    real_read, real_write = ser.read_series, conv.write_atomic
+    monkeypatch.setattr(ser, 'read_series', lambda slices: returned.append(real_read(slices)) or returned[-1])
+    monkeypatch.setattr(conv, 'write_atomic', lambda image, path: (written.append(image), real_write(image, path))[1]
+                        if Path(path).name.startswith('series_') else real_write(image, path))
+    conv.convert(org, out)
+    assert len(returned) == 1 and len(written) == 2 and all(image is returned[0] for image in written)
+
+
+def test_report_rows_are_the_plans_then_the_summary_then_the_series_by_study_modality_and_k(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    misc = org / PID / 'misc_files'
+    late = dict(study_uid='1.9.2', study_date=STUDY_D2)
+    early = dict(study_uid='1.9.1', study_date=STUDY_D1)
+    pt = put(misc, prefix='pt', modality='PT', **late)
+    mr2 = put(misc, prefix='m2', series_uid='1.9.6', series_date=STUDY_D2, **late)
+    mr1 = put(misc, prefix='m1', series_uid='1.9.5', series_date=STUDY_D1, **late)
+    ct = put(misc, prefix='ct', modality='CT', **late)
+    solo = put(misc, prefix='solo', modality='PT', **early)
+    rows = conv.convert(org, out).rows
+    assert [r.folder for r in rows] == [
+        'plan_1', 'studies', 'study_1/series_PT_1', 'study_2/series_CT_1', 'study_2/series_MR_1', 'study_2/series_MR_2', 'study_2/series_PT_1']
+    assert [r.files for r in rows[1:]] == [[], ['series_PT_1.nii.gz', 'series.csv'], ['series_CT_1.nii.gz', 'series.csv'], ['series_MR_1.nii.gz'],
+                                           ['series_MR_2.nii.gz'], ['series_PT_1.nii.gz']]  # series.csv in the study's first row only
+    assert [(r.outcome, r.reason, r.skipped_series) for r in rows[1:]] == [('converted', '', 0)] * 6
+    assert [r['series_instance_uid'] for r in csv_at(study(out, 2))] == [ct['series_uid'], mr1['series_uid'], mr2['series_uid'], pt['series_uid']]
+    assert [r['series_instance_uid'] for r in csv_at(study(out, 1))] == [solo['series_uid']]
+    assert [(r['folder'], r['files']) for r in report(out)][1] == ('studies', '')  # and in the csv
+
+
+def test_the_new_path_logs_and_raises_nothing_that_names_the_id_a_path_a_uid_a_date_or_a_folder(tree, tmp_path, capfd, caplog, recwarn):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    mr = put(org / PID / 'plan_1', frame_uid=plan['ct']['frame_uid'], study_date=STUDY_D2)
+    describe_series(mr, 'SYNTHETIC_DESCRIPTION', STUDY_D3)
+    misc = org / PID / 'misc_files'
+    other = put(misc, study_date=STUDY_D1)
+    secrets = [PID, str(tmp_path), STUDY_D1, STUDY_D2, STUDY_D3, 'SYNTHETIC_DESCRIPTION', 'study_1', *every_uid(plan['folder']), *every_uid(misc)]
+    assert mr['study_uid'] != other['study_uid'] and len(secrets) > 10
+    caplog.set_level(logging.DEBUG)
+    capfd.readouterr()
+    conv.convert(org, out)
+    captured = capfd.readouterr()
+    texts = [captured.out, captured.err, caplog.text, *(r.getMessage() for r in caplog.records), *(str(w.message) for w in recwarn.list)]
+    assert [s for s in secrets for t in texts if s in t] == []
+
+
+def test_images_name_and_no_images_reason_are_gone_from_src():
+    root = Path(inspect.getsourcefile(conv)).parent
+    text = ''.join(p.read_text() for p in root.rglob('*.py'))
+    assert 'IMAGES_NAME' not in text and 'REASON_NO_IMAGES' not in text
+    assert not hasattr(conv, 'IMAGES_NAME') and not hasattr(conv, 'REASON_NO_IMAGES')

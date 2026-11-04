@@ -1,10 +1,10 @@
 """
-Turn an organized tree (<patient>/plan_<n>/) into NIfTI on the native CT grid, one folder per plan (spec: f2a-convert, F2a).
+Turn an organized tree (<patient>/plan_<n>/) into NIfTI on the native CT grid, one folder per plan and one per study (spec: f2a-convert, F2a).
 
 Per plan: RTPLAN -> RTSTRUCT -> the one CT series it references -> planning_ct.nii.gz (float32 HU), and the plan's RTDOSE
 as dose.nii.gz (Gy, linearly resampled onto the CT grid). Masks and applicators (masks.py) are written into the same
-folder. Every other CT/MR/PT series of the patient (series.py) is written, each read once, into the plan folders it is registered
-to, else into <patient>/images/. series.csv is written last, one row per file. The organized tree is only read. Log lines and exception messages
+folder. Every other CT/MR/PT series of the patient (series.py) is read once and written into the plan folders it is registered
+to and into its study folder <patient>/study_<n>/ (numbered by StudyDate, StudyTime, StudyInstanceUID). series.csv is written last, one row per file. The organized tree is only read. Log lines and exception messages
 carry counts and the fixed REASON_ constants only, never a PatientID, folder name, date, path or UID. convert_report.csv in
 the output root is the one place the folder names appear; the series.csv files hold the UIDs, dates and descriptions. Every third-party read runs inside dicom_io's quiet wrapper.
 """
@@ -47,7 +47,7 @@ PLAN_COLUMNS = ('rtplan_uid', 'rtplan_label', 'rtplan_date', 'fractions_planned'
 REASON_OUTSIDE_ORG = 'output root is the organized root or inside it'
 REASON_EXISTS = 'output folder already exists'
 REASON_NO_PLANS = 'patient folder holds no plan folder'
-REASON_NO_IMAGES = 'every other series went into a plan folder or was skipped; images/ was not written'
+REASON_NO_STUDIES = 'every other series was skipped; no study folder was written'
 REASON_IO_ERROR = 'file system error while reading or writing; nothing kept for this patient'
 REASON_WRITE = 'an output file could not be written'
 REASON_FILE_UNREADABLE = 'a DICOM file in the plan folder is unreadable'
@@ -66,7 +66,8 @@ REASON_DOSE_GRID = 'the RTDOSE frame offsets are not uniform or differ from Numb
 REASON_DOSE_FRAME = 'the RTDOSE FrameOfReferenceUID differs from the planning CT'
 REASON_DOSE_UNREADABLE = 'an RTDOSE is unreadable or lacks a required tag'
 REASON_INTERNAL = 'an unexpected error stopped the conversion; the report lists what was finished'
-IMAGES_NAME = 'images'
+STUDIES_NAME = 'studies'  # folder of the patient's summary row for the study folders
+STUDY_SERIES = r'study_\d+/series_(CT|MR|PT)_\d+'  # folder of a per-series row
 PACKAGE_DIR = Path(__file__).parent
 
 
@@ -130,11 +131,11 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1):
     finally:  # Ctrl-C too: the report lists what was done
         write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'],
                      ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows))
-    plan_rows = [r for r in rows if r.folder not in ('', IMAGES_NAME)]
+    plan_rows = [r for r in rows if re.fullmatch(PLAN_FOLDER, r.folder)]
     patient_rows = [r for r in rows if r.folder == '']
-    log.info('convert: %d plan rows (%d converted, %d refused, %d skipped), %d images rows, %d patient rows (%d refused, %d skipped)',
+    log.info('convert: %d plan rows (%d converted, %d refused, %d skipped), %d imaging rows, %d studies rows, %d patient rows (%d refused, %d skipped)',
              len(plan_rows), *(sum(r.outcome == o for r in plan_rows) for o in (OUTCOME_CONVERTED, OUTCOME_REFUSED, OUTCOME_SKIPPED)),
-             sum(r.folder == IMAGES_NAME for r in rows), len(patient_rows),
+             sum(bool(re.fullmatch(STUDY_SERIES, r.folder)) for r in rows), sum(r.folder == STUDIES_NAME for r in rows), len(patient_rows),
              *(sum(r.outcome == o for r in patient_rows) for o in (OUTCOME_REFUSED, OUTCOME_SKIPPED)))
     total = time.monotonic() - started
     log.info('convert: %.1f s total, %.1f s reading, %.1f s converting, %d files, workers %d', total, reading, total - reading, files, workers)
@@ -210,8 +211,7 @@ def _convert_patient(folder, out_root, exclude_models, workers):
         # Organize copies a study whole into every folder that holds it, so a converted folder's copy is complete: the
         # SOP dedup keeps it over a short folder's copy (#35). Only a SOP found nowhere else stays in a short folder.
         ordered = sorted(headers, key=lambda item: item[0].parent in short)
-        images_row = _place_series(folder.name, ordered, exclude_models, outcomes, partial, short, lost, misc_taint, misc_dir)
-        rows += [images_row] if images_row else []
+        rows += _place_series(folder.name, ordered, exclude_models, outcomes, partial, short, lost, misc_taint, misc_dir)
         for row, result in outcomes:  # series.csv of each converted plan folder goes in last
             if result is not None:
                 write_series_csv(result.series_rows, partial / row.folder / SERIES_NAME)
@@ -247,10 +247,11 @@ def _refuse_on_lost_ct(row, result, partial, lost):
 def _place_series(patient, headers, exclude_models, outcomes, partial, short=frozenset(), lost=frozenset(), misc_taint=(frozenset(), False),
                   misc_dir=None):
     """
-    Write every other series of the patient into the converted plan folders it is registered to, else into images/, each
-    series read once. Adds the series files and rows to the plan rows and results; writes images/series.csv. Returns the
-    images ConvertRow, None when the patient has no candidate series. Nothing here catches: a bad header is a None from
-    series.py, anything else is the patient's REASON_INTERNAL. A series with a kept file in a folder of `short` (refused
+    Write every other series of the patient into the converted plan folders it is registered to and into its study folder,
+    each series read once (the study volume is the image already read). Adds the series files and rows to the plan rows and
+    results; writes each study_<n>/series.csv. Returns the ConvertRows to append after the plan rows: the `studies` summary row
+    and one row per written series; [] when the patient has no candidate series. Nothing here catches: a bad header is a None
+    from series.py, anything else is the patient's REASON_INTERNAL. A series with a kept file in a folder of `short` (refused
     plan folders that may have lost a slice) or whose SeriesInstanceUID is in `lost` (known short) is skipped and counted,
     and so is a series of a tainted study (`misc_taint` and series.tainted_studies) or, when a taint has no study, a series
     held only in `misc_dir` (the patient's misc_files), or whose slices disagree on study.
@@ -262,7 +263,7 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
     planning = {result.ct_series_uid for _, result, _ in converted}
     found = [(uid, slices) for uid, slices in found if uid not in planning]
     if not found:
-        return None
+        return []
     dropped, dropped_blind = ser.tainted_studies(headers)
     tainted, blind = misc_taint[0] | dropped, misc_taint[1] or dropped_blind
 
@@ -274,6 +275,7 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
     skipped = checked.count(None)
     order = lambda ordered: tuple(_tag(ordered[0][1], tag) for tag in ('SeriesDate', 'SeriesTime', 'SeriesInstanceUID'))  # noqa: E731
     counts, written = {}, {}  # (folder, modality) -> last k; folder -> [(modality, k, series.csv row)]
+    study_folders, study_dates = {}, {}  # StudyInstanceUID -> hidden folder name; -> (StudyDate, StudyTime) of each series written to it
     for ordered in sorted((o for o in checked if o is not None), key=order):
         first = ordered[0][1]
         modality, frame = str(first.Modality), str(first.FrameOfReferenceUID)
@@ -286,7 +288,10 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
         if image is None:
             skipped += 1
             continue
-        for folder_name, text, plan_columns in targets or [(IMAGES_NAME, '', dict.fromkeys(PLAN_COLUMNS, ''))]:
+        study_uid = _tag(first, 'StudyInstanceUID')  # one study per series: at_risk skipped the rest
+        hidden = study_folders.setdefault(study_uid, f'.study_{len(study_folders)}')  # an index, never the UID
+        study_dates.setdefault(study_uid, []).append(tuple(_tag(first, tag).strip() for tag in ('StudyDate', 'StudyTime')))
+        for folder_name, text, plan_columns in [*targets, (hidden, '', dict.fromkeys(PLAN_COLUMNS, ''))]:
             k = counts[folder_name, modality] = counts.get((folder_name, modality), 0) + 1
             name = f'series_{modality}_{k}.nii.gz'
             (partial / folder_name).mkdir(exist_ok=True)
@@ -303,11 +308,19 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
         rows = [item[2] for item in written.get(row.folder, [])]
         result.series_rows.extend(rows)
         row.files = [*result.files, *(r['file'] for r in rows), SERIES_NAME]
-    if IMAGES_NAME not in written:
-        return ConvertRow(patient, IMAGES_NAME, OUTCOME_SKIPPED, REASON_NO_IMAGES, skipped_series=skipped)
-    rows = [item[2] for item in written[IMAGES_NAME]]
-    write_series_csv(rows, partial / IMAGES_NAME / SERIES_NAME)
-    return ConvertRow(patient, IMAGES_NAME, OUTCOME_CONVERTED, files=[*(r['file'] for r in rows), SERIES_NAME], skipped_series=skipped)
+    if not study_folders:
+        return [ConvertRow(patient, STUDIES_NAME, OUTCOME_SKIPPED, REASON_NO_STUDIES, skipped_series=skipped)]
+    rows = [ConvertRow(patient, STUDIES_NAME, OUTCOME_CONVERTED, skipped_series=skipped)]
+    # study_<n> by the earliest (undated last) StudyDate and StudyTime over the series written to it, then the UID. The text is
+    # compared as stored, stripped: an invalid DA sorts and never raises.
+    rank = lambda uid: (min((date == '', date, time) for date, time in study_dates[uid]), uid)  # noqa: E731
+    for n, uid in enumerate(sorted(study_folders, key=rank), 1):
+        (partial / study_folders[uid]).rename(partial / f'study_{n}')
+        series_rows = [item[2] for item in written[study_folders[uid]]]
+        write_series_csv(series_rows, partial / f'study_{n}' / SERIES_NAME)
+        rows += [ConvertRow(patient, f'study_{n}/{r["file"].removesuffix(".nii.gz")}', OUTCOME_CONVERTED,
+                            files=[r['file'], *([SERIES_NAME] if i == 0 else [])]) for i, r in enumerate(series_rows)]
+    return rows
 
 
 def _convert_one(plan_dir, headers, unreadable, partial):
