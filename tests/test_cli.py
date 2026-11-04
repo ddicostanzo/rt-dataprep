@@ -282,7 +282,19 @@ def test_a_different_existing_splits_file_is_refused(tree, capfd):
     with pytest.raises(SystemExit) as exc:
         cli.main(split_args(tree, seed='1'))
     assert exc.value.code == 1
-    refusal(capfd.readouterr(), sp.REASON_EXISTS)
+    result = capfd.readouterr()
+    refusal(result, sp.REASON_EXISTS)
+    assert 'SYNTHETIC_' not in result.out + result.err
+
+
+def test_a_manifest_without_the_patient_column_prints_the_refusal(tree, capfd):
+    (tree / 'manifest.csv').write_text('case_dir\nSYNTHETIC_P0/plan_1\n')
+    with pytest.raises(SystemExit) as exc:
+        cli.main(split_args(tree, seed='-1'))
+    assert exc.value.code == 1
+    result = capfd.readouterr()
+    refusal(result, sp.REASON_COLUMNS)
+    assert 'SYNTHETIC_' not in result.out + result.err
 
 
 def test_split_without_a_manifest_exits_1_with_the_path_free_message(tree, capfd):

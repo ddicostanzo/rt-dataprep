@@ -1,5 +1,6 @@
 """manifest: one row per plan folder of a converted or preprocessed tree (task-01); patient folder names are SYNTHETIC-prefixed."""
 import csv
+import json
 import logging
 import re
 
@@ -43,10 +44,10 @@ def test_rows_columns_and_values_on_a_converted_tree(tmp_path):
     rows = read(root)
     assert [r['case_dir'] for r in rows] == [f'{PATIENT_B}/fx_1', f'{PATIENT_A}/plan_1', f'{PATIENT_A}/plan_2']  # '_' sorts after 'P'
     assert rows[1] == dict(case_dir=f'{PATIENT_A}/plan_1', patient=PATIENT_A, fx='plan_1', ct_size='12;12;12', ct_spacing='1.0;1.0;1.0',
-                           dose='1', masks='bladder;ptv', rtplan_uid='SYNTHETICRTPLANA1', ct_series_uid='SYNTHETICCTA1',
+                           dose='1', masks='["bladder", "ptv"]', rtplan_uid='SYNTHETICRTPLANA1', ct_series_uid='SYNTHETICCTA1',
                            study_uid='SYNTHETICSTUDYA1')
-    assert (rows[2]['dose'], rows[2]['masks'], rows[2]['rtplan_uid']) == ('0', 'ptv', 'SYNTHETICRTPLANA2')
-    assert (rows[0]['patient'], rows[0]['fx'], rows[0]['ct_size'], rows[0]['masks']) == (PATIENT_B, 'fx_1', '14;14;14', '')
+    assert (rows[2]['dose'], rows[2]['masks'], rows[2]['rtplan_uid']) == ('0', '["ptv"]', 'SYNTHETICRTPLANA2')
+    assert (rows[0]['patient'], rows[0]['fx'], rows[0]['ct_size'], rows[0]['masks']) == (PATIENT_B, 'fx_1', '14;14;14', '[]')
 
 
 def test_patient_is_the_folder_name_not_parsed_from_the_case_dir(tmp_path):
@@ -105,3 +106,24 @@ def test_only_manifest_csv_and_its_dated_copy_are_written(tmp_path):
     assert len(new) == 2
     assert all(after[p] == data for p, data in before.items())
 
+
+
+def test_a_semicolon_roi_name_and_float32_spacing_read_back_exactly(tmp_path):
+    root = tmp_path / 'converted'
+    plan(root, PATIENT_A, 'plan_1', 'A1', spacing=0.8, masks={'ptv;boost': box((4, 4, 4), (8, 8, 8))})
+    man.manifest(root)
+    row = read(root)[0]
+    assert (json.loads(row['masks']), row['ct_spacing']) == (['ptv;boost'], '0.8;0.8;0.8')
+
+
+def test_an_unreadable_series_csv_is_one_refused_plan_not_the_end_of_the_run(tmp_path, monkeypatch):
+    root = tree(tmp_path / 'converted')
+    check = man.check_rows
+
+    def flaky(plan_dir):
+        if plan_dir.name == 'plan_2':
+            raise OSError('SYNTHETIC_PATH')
+        return check(plan_dir)
+
+    monkeypatch.setattr(man, 'check_rows', flaky)
+    assert man.manifest(root) == (2, 1)

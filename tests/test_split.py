@@ -1,6 +1,8 @@
 """split: splits.json from a hand-written manifest.csv, whole patients per split (task-02); patient names are SYNTHETIC-prefixed except the bare '00123'."""
+import ast
 import csv
 import hashlib
+import inspect
 import json
 import os
 
@@ -8,9 +10,10 @@ import pytest
 
 from rt_dataprep import convert as conv
 from rt_dataprep import split as sp
+from rt_dataprep import manifest as man
 from rt_dataprep.manifest import COLUMNS
 
-SEED_A, SEED_B = 0, 1  # checked once: with TEN below, seed 0 puts SYNTHETIC_P03 in test and seed 1 puts SYNTHETIC_P07 there
+SEED_A, SEED_B = 0, 1
 TEN = [f'SYNTHETIC_P{i:02d}' for i in range(9)] + ['00123']
 
 
@@ -165,6 +168,7 @@ def test_the_write_is_atomic_a_failed_replace_leaves_no_splits_json_and_no_temp_
     def fail(*args):
         raise OSError('SYNTHETIC_PATH')
 
+    monkeypatch.setattr(os, 'link', fail)  # no hard links, so the rename fallback runs, and fails too
     monkeypatch.setattr(os, 'replace', fail)
     with pytest.raises(OSError, match=conv.REASON_WRITE):
         sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
@@ -172,3 +176,59 @@ def test_the_write_is_atomic_a_failed_replace_leaves_no_splits_json_and_no_temp_
     monkeypatch.undo()
     run(path)
     assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv', 'splits.json']
+
+
+def test_a_concurrent_run_that_writes_first_wins_and_this_one_is_refused(tmp_path, monkeypatch):
+    path = write_manifest(tmp_path, TEN)
+    other = '{"SYNTHETIC_OTHER_RUN": 1}\n'
+    link = os.link
+
+    def race(source, target):
+        (tmp_path / 'splits.json').write_text(other)  # the other run lands between the existence check and the link
+        link(source, target)
+
+    monkeypatch.setattr(os, 'link', race)
+    with pytest.raises(ValueError, match=sp.REASON_EXISTS):
+        sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
+    assert (tmp_path / 'splits.json').read_text() == other
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv', 'splits.json']
+
+
+def test_without_hard_links_the_write_falls_back_to_a_rename(tmp_path, monkeypatch):
+    path = write_manifest(tmp_path, TEN)
+
+    def unsupported(*args):
+        raise PermissionError('SYNTHETIC_PATH')
+
+    monkeypatch.setattr(os, 'link', unsupported)
+    obj = run(path)
+    assert sum(map(len, (obj[name] for name in ('train', 'val', 'test')))) == len(TEN)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv', 'splits.json']
+
+
+def test_the_order_is_the_documented_hash_so_no_library_version_moves_it(tmp_path):
+    obj = run(write_manifest(tmp_path, TEN), seed=-7)  # any int is a seed, negative included
+    order = sorted(TEN, key=lambda patient: hashlib.sha256(f'-7\n{patient}'.encode()).hexdigest())
+    assert (set(obj['test']), set(obj['val'])) == (set(order[:2]), set(order[2:4]))  # splits.json sorts its keys
+
+
+@pytest.mark.parametrize('dropped', ['patient', 'case_dir'])
+def test_a_manifest_without_patient_or_case_dir_is_refused(tmp_path, dropped):
+    columns = [c for c in COLUMNS if c != dropped]
+    bad = tmp_path / 'bad'
+    bad.mkdir()
+    (bad / 'manifest.csv').write_text(','.join(columns) + '\n' + ','.join('SYNTHETIC_X' for _ in columns) + '\n')
+    with pytest.raises(ValueError, match=sp.REASON_COLUMNS):
+        sp.split(bad / 'manifest.csv', test_size=0.2, val_size=0.2, seed=SEED_A)
+    with pytest.raises(ValueError, match=sp.REASON_COLUMNS):
+        sp.split(write_manifest(tmp_path, TEN), test_size=0.2, val_size=0.2, seed=SEED_A, external=bad / 'manifest.csv')
+    assert not (bad / 'splits.json').exists() and not (tmp_path / 'splits.json').exists()
+
+
+@pytest.mark.parametrize('module', [sp, man])
+def test_split_and_manifest_import_no_pandas_sklearn_and_split_no_numpy(module):
+    tree = ast.parse(inspect.getsource(module))
+    imported = {alias.name.split('.')[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+    imported |= {node.module.split('.')[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
+    banned = {'pandas', 'sklearn'} | ({'numpy'} if module is sp else set())
+    assert not imported & banned
