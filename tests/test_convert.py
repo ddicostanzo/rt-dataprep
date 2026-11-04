@@ -771,3 +771,41 @@ def test_a_missing_organized_root_writes_no_output_root(tmp_path):
     with pytest.raises(OSError):
         conv.convert(tmp_path / 'missing', tmp_path / 'out')
     assert not (tmp_path / 'out').exists()
+
+
+# ---------------------------------------------------------------- hardening B6 (#57)
+
+def test_a_refused_plan_whose_folder_cannot_be_removed_is_the_patients_io_error_and_leaves_no_patient_folder(tree, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    real = conv.shutil.rmtree
+
+    def rmtree(path, ignore_errors=False, **kwargs):
+        if Path(path).name == 'plan_1':  # the plan folder only: the patient's partial folder is removed for real
+            if ignore_errors:  # as the real one: errors are swallowed and the folder stays
+                return
+            raise OSError(f'cannot remove {path} of {PID}')
+        real(path, ignore_errors=ignore_errors, **kwargs)
+
+    def refuse_after_the_plan_folder_exists(*args):
+        raise KeyError  # _series_rows runs after the plan folder is written: a refusal (REASON_MISSING_TAG) from here
+    monkeypatch.setattr(conv.shutil, 'rmtree', rmtree)
+    monkeypatch.setattr(conv, '_series_rows', refuse_after_the_plan_folder_exists)
+    rows = conv.convert(org, out).rows
+    assert [(r.patient, r.folder, r.outcome, r.reason, r.files) for r in rows] == [(PID, '', 'refused', conv.REASON_IO_ERROR, [])]
+    assert sorted(p.name for p in out.iterdir()) == [conv.REPORT_NAME]  # no patient folder, no partial
+
+
+def test_another_series_on_an_empty_frame_is_not_registered_to_a_planning_ct_on_an_empty_frame(tree):
+    org, out = tree
+    folder = org / PID / 'plan_1'
+    plan = make_plan(folder)
+    other = sd.write_ct_series(folder, np.full((3, 5, 6), 7), spacing=SPACING, origin=ORIGIN, patient_id=PID, prefix='other',
+                               modality='MR')
+    for path in [*plan['ct']['paths'], *other['paths']]:
+        edit(path, lambda ds: setattr(ds, 'FrameOfReferenceUID', ''))
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('plan_1', 'converted', ''), ('images', 'converted', '')]
+    assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == ['planning_ct.nii.gz', 'series.csv']
+    assert sorted(p.name for p in (out / PID / 'images').iterdir()) == ['series.csv', 'series_MR_1.nii.gz']
+    assert series_rows(out, 'images')[0]['reg_matrix'] == ''
