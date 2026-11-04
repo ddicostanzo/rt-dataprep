@@ -1,6 +1,7 @@
 """CLI (task-06, task-03 of F2b): `python -m rt_dataprep convert` and `preprocess`, always run as a subprocess. Every tree is synthetic and built in tmp_path."""
 import csv
 import dataclasses
+import json
 import re
 import subprocess
 import sys
@@ -12,6 +13,9 @@ from test_preprocess import SMALL, report_rows, write_plan
 
 from rt_dataprep import convert as conv
 from rt_dataprep import preprocess as pre
+from rt_dataprep import __main__ as cli
+from rt_dataprep import split as sp
+from rt_dataprep.manifest import MANIFEST_NAME
 
 
 @pytest.fixture
@@ -182,3 +186,109 @@ def test_an_unexpected_exception_prints_its_type_and_site_never_its_message(tmp_
     assert result.returncode == 1 and result.stdout == ''
     assert re.fullmatch(r'rt_dataprep: unexpected error \(' + kind + r' at [\w.]+:\d+\)\n', result.stderr)
     assert 'SYNTHETIC_ID' not in result.stderr and str(tmp_path) not in result.stderr
+
+
+# F3: the manifest and split subcommands, called as cli.main([...]); capfd reads the file descriptors.
+NAMES = [f'SYNTHETIC_P{i}' for i in range(5)]
+
+
+@pytest.fixture
+def tree(tmp_path):
+    root = tmp_path / 'converted'
+    for name in NAMES:
+        write_plan(root, patient=name)
+    return root
+
+
+def split_args(root, *extra, test_size='0.2', val_size='0.2', seed='0'):
+    return ['split', str(root), '--test-size', test_size, '--val-size', val_size, '--seed', seed, *extra]
+
+
+def refusal(capsys_result, reason):
+    assert capsys_result.out == '' and capsys_result.err.splitlines()[-1] == f'rt_dataprep: {reason}'
+
+
+def test_manifest_then_split_run_end_to_end_and_print_counts_only(tree, capfd):
+    cli.main(['manifest', str(tree)])
+    first = capfd.readouterr()
+    assert first.out == 'manifest: 5 written, 0 refused\n'
+    cli.main(split_args(tree))
+    second = capfd.readouterr()
+    assert second.out == 'train: 3 patients, 3 cases\nval: 1 patients, 1 cases\ntest: 1 patients, 1 cases\n'
+    with open(tree / MANIFEST_NAME, newline='') as handle:
+        assert sorted(r['patient'] for r in csv.DictReader(handle)) == NAMES
+    splits = json.loads((tree / sp.SPLITS_NAME).read_text())
+    assert sorted(p for name in sp.SPLIT_NAMES for p in splits[name]) == NAMES
+    for out in (first, second):
+        assert 'SYNTHETIC' not in out.out + out.err and str(tree) not in out.out + out.err and '/plan_' not in out.out + out.err
+
+
+def test_seed_test_size_and_val_size_are_required(tree, capfd):
+    for missing in ('--seed', '--test-size', '--val-size'):
+        argv = split_args(tree)
+        del argv[argv.index(missing):argv.index(missing) + 2]
+        with pytest.raises(SystemExit) as exc:
+            cli.main(argv)
+        assert exc.value.code == 2
+        capfd.readouterr()
+    assert not (tree / sp.SPLITS_NAME).exists()
+
+
+def test_overlapping_external_exits_1_with_the_fixed_overlap_text(tree, tmp_path, capfd):
+    cli.main(['manifest', str(tree)])
+    other = tmp_path / 'other'
+    for name in NAMES:
+        write_plan(other, patient=name)
+    cli.main(['manifest', str(other)])
+    capfd.readouterr()
+    with pytest.raises(SystemExit) as exc:
+        cli.main(split_args(tree, '--external', str(other / MANIFEST_NAME)))
+    assert exc.value.code == 1
+    out = capfd.readouterr()
+    refusal(out, sp.REASON_OVERLAP)
+    assert 'SYNTHETIC' not in out.out + out.err and not (tree / sp.SPLITS_NAME).exists()
+
+
+def test_a_disjoint_external_manifest_splits(tree, tmp_path, capfd):
+    other = tmp_path / 'other'
+    write_plan(other, patient='SYNTHETIC_OTHER')
+    cli.main(['manifest', str(tree)])
+    cli.main(['manifest', str(other)])
+    capfd.readouterr()
+    cli.main(split_args(tree, '--external', str(other / MANIFEST_NAME)))
+    assert (tree / sp.SPLITS_NAME).exists()
+
+
+@pytest.mark.parametrize(('kwargs', 'reason'), [
+    ({'test_size': '1'}, sp.REASON_SIZE), ({'val_size': '-0.1'}, sp.REASON_SIZE),
+    ({'test_size': '0.5', 'val_size': '0.5'}, sp.REASON_NO_TRAIN)])
+def test_split_refusals_exit_1_with_their_fixed_text(tree, capfd, kwargs, reason):
+    cli.main(['manifest', str(tree)])
+    capfd.readouterr()
+    with pytest.raises(SystemExit) as exc:
+        cli.main(split_args(tree, **kwargs))
+    assert exc.value.code == 1
+    out = capfd.readouterr()
+    refusal(out, reason)
+    assert 'SYNTHETIC' not in out.out + out.err and not (tree / sp.SPLITS_NAME).exists()
+
+
+def test_a_different_existing_splits_file_is_refused(tree, capfd):
+    cli.main(['manifest', str(tree)])
+    cli.main(split_args(tree))
+    capfd.readouterr()
+    cli.main(split_args(tree))  # the same arguments rewrite the same bytes: fine
+    capfd.readouterr()
+    with pytest.raises(SystemExit) as exc:
+        cli.main(split_args(tree, seed='1'))
+    assert exc.value.code == 1
+    refusal(capfd.readouterr(), sp.REASON_EXISTS)
+
+
+def test_split_without_a_manifest_exits_1_with_the_path_free_message(tree, capfd):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(split_args(tree))
+    assert exc.value.code == 1
+    out = capfd.readouterr()
+    assert out.out == '' and out.err.splitlines()[-1] == 'rt_dataprep: file system error on the source or output root'
+    assert str(tree) not in out.err

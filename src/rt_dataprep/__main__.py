@@ -2,8 +2,10 @@ import argparse
 import dataclasses
 import logging
 import sys
+from pathlib import Path
 
 from rt_dataprep.convert import REASON_INTERNAL, REASON_OUTSIDE_ORG, ConvertAborted, convert, crash_site
+from rt_dataprep.manifest import MANIFEST_NAME, manifest
 from rt_dataprep.organize import REASON_OUTSIDE_SRC, organize
 from rt_dataprep.preprocess import (
     LEGACY_RNT,
@@ -14,6 +16,7 @@ from rt_dataprep.preprocess import (
     preprocess,
 )
 from rt_dataprep.preprocess import REASON_INTERNAL as PREPROCESS_REASON_INTERNAL
+from rt_dataprep.split import REASON_EXISTS, REASON_NO_TRAIN, REASON_OVERLAP, REASON_SIZE, SPLIT_NAMES, split
 
 
 PREPROCESS_HELP = 'resample, rescale and crop/pad a converted tree into a separate output tree; --legacy-rnt is required for any output'
@@ -33,6 +36,14 @@ def main(argv=None):
     sub.add_argument('out', help='output root, outside the converted root')
     sub.add_argument('--legacy-rnt', action='store_true', help='the legacy RNT steps; required for any output')
     sub.add_argument('--legacy-linear-masks', action='store_true', help='resample masks linearly to float32, not nearest to uint8')
+    sub = commands.add_parser('manifest', help='write manifest.csv in a converted or preprocessed root, one row per plan folder')
+    sub.add_argument('root', help='converted or preprocessed root; manifest.csv is written here')
+    sub = commands.add_parser('split', help='write splits.json next to manifest.csv, whole patients per split')
+    sub.add_argument('root', help='root holding manifest.csv; splits.json is written here')
+    sub.add_argument('--test-size', type=float, required=True, help='fraction of patients in test, at least 0 and below 1')
+    sub.add_argument('--val-size', type=float, required=True, help='fraction of patients in val, at least 0 and below 1')
+    sub.add_argument('--seed', type=int, required=True, help='integer seed; the same seed gives the same split')
+    sub.add_argument('--external', help='manifest.csv of another dataset; refused if it shares a patient with a split')
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format='%(message)s')
     try:
@@ -41,10 +52,18 @@ def main(argv=None):
         elif args.command == 'preprocess':
             steps = LEGACY_RNT if args.legacy_rnt else PreprocessSteps()
             preprocess(args.converted, args.out, dataclasses.replace(steps, legacy_linear_masks=args.legacy_linear_masks))
+        elif args.command == 'manifest':
+            written, refused = manifest(args.root)
+            print(f'manifest: {written} written, {refused} refused')
+        elif args.command == 'split':
+            splits = split(Path(args.root) / MANIFEST_NAME, test_size=args.test_size, val_size=args.val_size, seed=args.seed, external=args.external)
+            for name in SPLIT_NAMES:  # counts only, never the ids
+                print(f'{name}: {len(splits[name])} patients, {sum(map(len, splits[name].values()))} cases')
         else:
             organize(args.src, args.out)
     except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug, reported as below
-        if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_OUTSIDE_SRC):
+        if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_OUTSIDE_SRC,
+                            REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS):
             parser.exit(1, unexpected(exc))
         parser.exit(1, f'rt_dataprep: {exc}\n')
     except ConvertAborted:  # the report is written; the text is fixed, nothing of the original reaches the terminal
