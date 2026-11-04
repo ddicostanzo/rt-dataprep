@@ -5,6 +5,7 @@ import dataclasses
 import inspect
 import re
 import traceback
+import weakref
 
 import numpy as np
 import pytest
@@ -685,6 +686,43 @@ def test_check_crop_refuses_exactly_outside_half_a_voxel_on_both_sides(axis, ind
         pre.check_crop(native, final)
 
 
+@pytest.mark.parametrize('axis', range(3))
+@pytest.mark.parametrize(('index', 'refused'), [(-0.5, False), (9.5, True)])  # the continuous index range is [-0.5, n-0.5)
+def test_check_crop_on_the_exact_half_voxel_boundary_keeps_the_low_edge_and_refuses_the_high_edge(axis, index, refused):
+    final = blank((10, 10, 10))
+    origin = [4.0, 4.0, 4.0]
+    origin[axis] = index
+    native = make_image(np.ones((1, 1, 1)), origin=tuple(origin))
+    if refused:
+        with pytest.raises(CaseRefused, match=pre.REASON_CROP):
+            pre.check_crop(native, final)
+    else:
+        pre.check_crop(native, final)
+
+
+def test_each_dose_or_mask_image_is_released_before_the_next_file_is_read(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)  # CT, dose, two masks, applicator
+    tracked, alive_at_read = [], []
+    read_image, process_dose, process_mask = pre.read_image, pre.process_dose, pre.process_mask
+
+    def track(image):
+        tracked.append(weakref.ref(image))
+        return image
+
+    def read(path):
+        alive_at_read.append(sum(ref() is not None for ref in tracked))  # what earlier steps still hold when this read starts
+        image = read_image(path)
+        return image if len(alive_at_read) == 1 else track(image)  # the CT is the reference grid: it stays
+
+    monkeypatch.setattr(pre, 'read_image', read)
+    monkeypatch.setattr(pre, 'process_dose', lambda *args: track(process_dose(*args)))
+    monkeypatch.setattr(pre, 'process_mask', lambda *args: track(process_mask(*args)))
+    report = pre.preprocess(converted, out, SMALL)
+    assert plan_row(report).outcome == 'preprocessed'
+    assert alive_at_read == [0, 0, 0, 0]  # CT, dose, ptv, bladder: the previous native and processed images are gone
+
+
 def test_an_oserror_while_writing_refuses_the_patient_and_removes_the_partial(tmp_path, monkeypatch):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     write_plan(converted)
@@ -787,16 +825,29 @@ def test_convert_exposes_crash_site():
     assert callable(conv.crash_site) and not hasattr(conv, '_crash_site')
 
 
-def test_matches_torchio(tmp_path):
+def rotation(z_degrees, x_degrees):
+    """A direction (row-major, columns the axes) rotated about z, then about x; orthonormal."""
+    z, x = np.radians(z_degrees), np.radians(x_degrees)
+    about_z = np.array([[np.cos(z), -np.sin(z), 0], [np.sin(z), np.cos(z), 0], [0, 0, 1]])
+    about_x = np.array([[1, 0, 0], [0, np.cos(x), -np.sin(x)], [0, np.sin(x), np.cos(x)]])
+    return tuple((about_x @ about_z).ravel())
+
+
+@pytest.mark.parametrize('direction', [
+    (1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0), (-1.0, 0, 0, 0, -1.0, 0, 0, 0, 1.0), (1.0, 0, 0, 0, 1.0, 0, 0, 0, -1.0), rotation(20, 10)],
+    ids=['axial', 'flipped-xy', 'flipped-z', 'oblique'])
+def test_matches_torchio(tmp_path, direction):
     """A2.6: the SimpleITK chain equals torchio 1.2.1 Resample -> rescale -> Resample -> CropOrPad on a synthetic CT (rescale on)."""
     tio = pytest.importorskip('torchio')
     # native 11x9x7, anisotropic: 1.5 mm gives 8x6x9, 1.25 mm gives 9x7x10; new_shape (14, 4, 13) pads x by 3+2, crops y by 2+1, pads z by 2+1
+    # y spacing 1.1, not 1.0: torchio takes the spacing from the affine (0.9999999999999999 on an oblique grid), so an exact
+    # integer ratio (9 * 1.0 / 1.5) floors one voxel lower there than on sitk's 1.0. The sizes above are the same for 1.1.
     rng = np.random.default_rng(7)
-    ct = make_image(rng.uniform(-1000, 1000, (7, 9, 11)), spacing=(1.2, 1.0, 2.0), origin=(-5.0, 3.0, 40.0))
+    ct = make_image(rng.uniform(-1000, 1000, (7, 9, 11)), spacing=(1.2, 1.1, 2.0), origin=(-5.0, 3.0, 40.0), direction=direction)
     mask_array = np.zeros((7, 9, 11), np.uint8)
     mask_array[2:5, 3:7, 4:9] = 1
     mask_array[3, 4, 5] = 2
-    mask = sitk.Cast(make_image(mask_array, spacing=ct.GetSpacing(), origin=ct.GetOrigin()), sitk.sitkUInt8)
+    mask = sitk.Cast(make_image(mask_array, spacing=ct.GetSpacing(), origin=ct.GetOrigin(), direction=direction), sitk.sitkUInt8)
     sitk.WriteImage(ct, str(tmp_path / 'ct.nii.gz'))
     sitk.WriteImage(mask, str(tmp_path / 'mask.nii.gz'))
     steps = dataclasses.replace(LEGACY_RNT, new_spacing=(1.5, 1.5, 1.5), new_shape=(14, 4, 13))
@@ -822,6 +873,7 @@ def test_matches_torchio(tmp_path):
     assert mine.GetSize() == theirs.GetSize() == (14, 4, 13)
     assert mine.GetSpacing() == pytest.approx(theirs.GetSpacing(), abs=1e-6)
     assert mine.GetOrigin() == pytest.approx(theirs.GetOrigin(), abs=1e-4)
+    assert mine.GetDirection() == pytest.approx(theirs.GetDirection(), abs=1e-5)
     assert np.abs(sitk.GetArrayFromImage(mine) - sitk.GetArrayFromImage(theirs)).max() < 1e-4
     mine_labels, tio_labels = (sitk.ReadImage(str(tmp_path / name)) for name in ('mine_mask.nii.gz', 'tio_mask.nii.gz'))
     assert mine_labels.GetSize() == tio_labels.GetSize() == mine.GetSize()
