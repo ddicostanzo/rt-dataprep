@@ -63,8 +63,9 @@ def quiet_call(fn, reason):
     Silenced and discarded, all restored afterwards: pydicom validation and log, Python warnings, every logger
     (logging.disable, global, so DicomRTTool's worker threads too), ITK warning display, fd 1 and 2, sys.stdout/stderr.
     Any Exception becomes CaseRefused(reason), raised after the except block so nothing of the original is chained.
+    Running out of memory is the machine's, not the case's: it becomes a bare MemoryError() instead (#47).
     """
-    failed = False
+    failed = out_of_memory = False
     result = None
     prior_disable = logging.root.manager.disable
     shown = sitk.ProcessObject.GetGlobalWarningDisplay()
@@ -77,11 +78,14 @@ def quiet_call(fn, reason):
                 warnings.simplefilter('always')
                 try:
                     result = fn()
-                except Exception:  # no message, no traceback kept
+                except Exception as exc:  # no message, no traceback kept
                     failed = True
+                    out_of_memory = isinstance(exc, MemoryError) or 'Failed to allocate memory' in str(exc)  # ITK's is a RuntimeError
         finally:
             sitk.ProcessObject.SetGlobalWarningDisplay(shown)
             logging.disable(prior_disable)
+    if out_of_memory:
+        raise MemoryError()
     if failed:
         raise CaseRefused(reason)
     return result
