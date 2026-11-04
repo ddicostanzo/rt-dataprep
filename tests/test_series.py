@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 import synthetic_dicom as sd
-from test_convert import PID, dose_spec, edit, make_plan
+from test_convert import PID, dose_spec, edit, make_plan, run_plan
 
 from rt_dataprep import convert as conv
 from rt_dataprep import masks
@@ -64,7 +64,7 @@ def test_a_missing_header_tag_still_refuses_the_plan_with_missing_tag(tree, what
     else:
         edit(plan['folder'] / 'dose_0.dcm', lambda ds: delattr(ds, 'DoseUnits'))
     with pytest.raises(CaseRefused) as caught:
-        conv.convert_plan(plan['folder'], out / 'case')
+        run_plan(plan['folder'], out / 'case')
     assert str(caught.value) == conv.REASON_MISSING_TAG and not (out / 'case').exists()
     assert getattr(caught.value, '__cause__') is None and getattr(caught.value, '__context__') is None  # noqa: B009
 
@@ -74,7 +74,7 @@ def test_a_tag_error_while_building_the_series_rows_refuses_the_plan_and_removes
     plan = make_plan(org / PID / 'plan_1')
     raise_in(monkeypatch, '_series_rows', KeyError(SECRET))
     with pytest.raises(CaseRefused) as caught:
-        conv.convert_plan(plan['folder'], out / 'case')
+        run_plan(plan['folder'], out / 'case')
     assert str(caught.value) == conv.REASON_MISSING_TAG and not (out / 'case').exists()
 
 
@@ -84,7 +84,7 @@ def test_calls_outside_the_tag_catch_do_not_turn_a_type_error_into_a_refusal(tre
     plan = make_plan(org / PID / 'plan_1')
     raise_in(monkeypatch, name, TypeError(SECRET))
     with pytest.raises(TypeError):
-        conv.convert_plan(plan['folder'], out / 'case')
+        run_plan(plan['folder'], out / 'case')
 
 
 # ---------------------------------------------------------------- the crash path

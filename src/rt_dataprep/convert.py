@@ -85,6 +85,7 @@ class ConvertReport:
 class PlanResult:
     files: list  # the data files written into the case folder, in write order; series.csv, written last, is not in it
     ct_series_uid: str
+    series_rows: list  # dicts of SERIES_COLUMNS for the plan's series.csv, which the patient level writes last
 
 
 def convert(org_root, out_root, *, exclude_models=('Acuity',)):
@@ -143,10 +144,22 @@ def _convert_patient(folder, out_root):
     # skip as done. The flag, not an except block, decides the cleanup, so any failure (and Ctrl-C) removes the partial.
     partial = out_root / f'.{folder.name}.partial'
     shutil.rmtree(partial, ignore_errors=True)
+    # Headers are read once per patient. misc_files/ is read for the other-series placement; an unreadable file there
+    # is not a series and is ignored: only its count reaches the log.
+    plan_headers = [read_folder_headers(plan_dir) for plan_dir in plans]
+    misc_dir = folder / 'misc_files'
+    misc_headers, misc_unreadable = read_folder_headers(misc_dir) if misc_dir.is_dir() else ([], False)  # kept for the next task
+    if misc_unreadable:
+        log.info('convert: %d unreadable files in misc_files', sum(p.is_file() for p in misc_dir.iterdir()) - len(misc_headers))
     rows, done = [], False
     try:
         partial.mkdir()
-        rows = [_convert_one(plan_dir, partial) for plan_dir in plans]
+        outcomes = [_convert_one(plan_dir, headers, unreadable, partial)
+                    for plan_dir, (headers, unreadable) in zip(plans, plan_headers, strict=True)]
+        rows = [row for row, _ in outcomes]
+        for row, result in outcomes:  # series.csv of each converted plan folder goes in last
+            if result is not None:
+                write_series_csv(result.series_rows, partial / row.folder / SERIES_NAME)
         partial.rename(target)  # an empty partial (every plan refused) is renamed too: the patient has its outcome
         done = True
     finally:
@@ -155,31 +168,34 @@ def _convert_patient(folder, out_root):
     return rows
 
 
-def _convert_one(plan_dir, partial):
+def _convert_one(plan_dir, headers, unreadable, partial):
+    """(ConvertRow, PlanResult) of a converted plan, (ConvertRow, None) of a refused one."""
     reason = None
     try:
-        result = convert_plan(plan_dir, partial / plan_dir.name)
+        result = convert_plan(headers, unreadable, partial / plan_dir.name)
     except CaseRefused as exc:
         reason = str(exc)
     if reason is not None:
         log.warning('convert: plan refused: %s', reason)
-        return ConvertRow(plan_dir.parent.name, plan_dir.name, OUTCOME_REFUSED, reason)
-    return ConvertRow(plan_dir.parent.name, plan_dir.name, OUTCOME_CONVERTED, files=[*result.files, SERIES_NAME])
+        return ConvertRow(plan_dir.parent.name, plan_dir.name, OUTCOME_REFUSED, reason), None
+    return ConvertRow(plan_dir.parent.name, plan_dir.name, OUTCOME_CONVERTED, files=[*result.files, SERIES_NAME]), result
 
 
-def convert_plan(plan_dir, case_dir):
+def convert_plan(headers, unreadable, case_dir):
     """
     Convert one plan folder into `case_dir`, which must not exist; returns a PlanResult.
 
-    A refusal raises CaseRefused(fixed reason) and leaves no `case_dir` behind. A header that lacks a tag the path reads
+    `headers` is the plan folder's own [(path, Dataset)] list (not deduplicated by SOP) and `unreadable` says whether any
+    file in it could not be read (see read_folder_headers); this function reads no headers and writes no series.csv: the
+    rows are in the PlanResult. An unreadable file refuses the plan (it may be a CT slice). A refusal raises CaseRefused(fixed reason) and leaves no `case_dir` behind. A header that lacks a tag the path reads
     refuses with REASON_MISSING_TAG (_header_call). Any other error, an OSError on the output side included, propagates:
     it is the patient's, not the plan's.
     """
-    plan_dir, case_dir = Path(plan_dir), Path(case_dir)
+    case_dir = Path(case_dir)
     existed = case_dir.exists()
     reason = None
     try:
-        result = _convert_plan(plan_dir, case_dir)
+        result = _convert_plan(headers, unreadable, case_dir)
     except CaseRefused as exc:
         reason = str(exc)
     if reason is not None:  # raised here, after the except blocks: nothing of the original is chained
@@ -201,8 +217,9 @@ def _header_call(fn, *args, **kwargs):
     return result
 
 
-def _convert_plan(plan_dir, case_dir):
-    headers = _read_headers(plan_dir)
+def _convert_plan(headers, unreadable, case_dir):
+    if unreadable:
+        raise CaseRefused(REASON_FILE_UNREADABLE)
     plan, struct, ct_slices, series_uid = _header_call(_assemble, headers)
     _header_call(_check_volume, ct_slices)
     _header_call(_check_contour_images, struct, series_uid, ct_slices)
@@ -229,21 +246,19 @@ def _convert_plan(plan_dir, case_dir):
     for name, points, _ in rois.applicators:
         masks.write_applicator(points, case_dir / name)
         files.append(name)
-    write_series_csv(_header_call(_series_rows, plan, struct, ct_slices[0][1], dose_heads, rois, files), case_dir / SERIES_NAME)
-    return PlanResult(files, series_uid)
+    series_rows = _header_call(_series_rows, plan, struct, ct_slices[0][1], dose_heads, rois, files)
+    return PlanResult(files, series_uid, series_rows)
 
 
-def _read_headers(plan_dir):
-    """[(path, Dataset)] of every file in the plan folder; any unreadable file refuses the plan (it may be a CT slice)."""
+def read_folder_headers(folder):
+    """([(path, Dataset)] of every readable file in `folder`, sorted by path; whether any file was unreadable)."""
     headers, unreadable = [], False
-    for path in sorted(p for p in plan_dir.iterdir() if p.is_file()):
+    for path in sorted(p for p in Path(folder).iterdir() if p.is_file()):
         try:
             headers.append((path, read_header(path)))
         except OSError:
             unreadable = True
-    if unreadable:
-        raise CaseRefused(REASON_FILE_UNREADABLE)
-    return headers
+    return headers, unreadable
 
 
 def _of(headers, modality):

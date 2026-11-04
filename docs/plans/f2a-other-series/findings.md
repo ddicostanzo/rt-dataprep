@@ -82,3 +82,18 @@ report-write OSError replaces ConvertAborted (CLI message still path-free). Defe
     values; it spies on `sitk.Image.SetOrigin/SetSpacing/SetDirection` and quiet_call instead.
   - pydicom refuses to assign a non-numeric string to NumberOfFrames (IS); a malformed-tag test uses None.
   - A truncated pixel buffer makes `ImageSeriesReader.Execute` raise (no silent zero fill).
+## task-05
+- Signature: `convert_plan(headers, unreadable, case_dir)`; `headers` is the plan folder's own `[(path, Dataset)]` (not deduplicated),
+  `unreadable` refuses with REASON_FILE_UNREADABLE before anything is read. `read_folder_headers(folder) -> (headers, unreadable)`
+  (public; sorted by path, `read_header`, so quiet) is the one reader; tests wrap it as `run_plan(folder, case)` in tests/test_convert.py.
+- Headers are read in `_convert_patient`, after the target-exists and no-plans checks and before the partial folder is made: every
+  `plan_<n>/` into `plan_headers`, `misc_files/` into the local `misc_headers` (read and kept, nothing consumes it yet: task-06).
+  An unreadable misc file only produces `convert: N unreadable files in misc_files` (info). A patient without plans is returned
+  before any read; task-06 decides what plan-less patients read.
+- `PlanResult(files, ct_series_uid, series_rows)`; `series_rows` are the dicts `_series_rows` built (CT, dose, masks, applicators; no
+  series.csv row). `_convert_plan` no longer writes series.csv.
+- `_convert_one(plan_dir, headers, unreadable, partial)` returns `(ConvertRow, PlanResult | None)`. `_convert_patient` writes each converted
+  plan's series.csv through `write_series_csv` after all plans ran, before the partial is renamed: this is where task-06 inserts
+  placement (its extra files and rows go before this loop; a row's `files` already ends with series.csv).
+- Gotchas: convert_plan's case folder now holds no series.csv after a direct call. tests/test_series.py (task-01) also called
+  convert_plan, so it was restated too (3 calls, same assertions). A failed series.csv write is still the patient-level REASON_IO_ERROR.

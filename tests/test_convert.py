@@ -62,6 +62,12 @@ def tree(tmp_path):
     return org, out
 
 
+def run_plan(folder, case):
+    """convert_plan on the plan folder `folder`: its headers read the way the patient level reads them."""
+    headers, unreadable = conv.read_folder_headers(folder)
+    return conv.convert_plan(headers, unreadable, case)
+
+
 def one_plan(tree, **kwargs):
     org, out = tree
     plan = make_plan(org / PID / 'plan_1', **kwargs)
@@ -453,9 +459,35 @@ def test_convert_plan_writes_into_case_dir_and_returns_the_files(tree):
     org, _ = tree
     make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
     case = org.parent / 'case'
-    result = conv.convert_plan(org / PID / 'plan_1', case)
+    result = run_plan(org / PID / 'plan_1', case)
     assert result.files == ['planning_ct.nii.gz', 'dose.nii.gz']  # series.csv is the report's to add
-    assert sorted(p.name for p in case.iterdir()) == ['dose.nii.gz', 'planning_ct.nii.gz', 'series.csv']
+    assert sorted(p.name for p in case.iterdir()) == ['dose.nii.gz', 'planning_ct.nii.gz']  # series.csv is the patient level's, last
+    assert [r['file'] for r in result.series_rows] == result.files  # one series.csv row per data file, in write order
+    assert result.series_rows[0]['kind'] == 'ct' and result.series_rows[1]['kind'] == 'dose'
+
+
+def test_convert_plan_with_an_unreadable_flag_refuses_the_plan_and_leaves_no_case_dir(tree):
+    org, _ = tree
+    make_plan(org / PID / 'plan_1')
+    headers, _ = conv.read_folder_headers(org / PID / 'plan_1')
+    case = org.parent / 'case'
+    with pytest.raises(CaseRefused) as caught:
+        conv.convert_plan(headers, True, case)
+    assert str(caught.value) == conv.REASON_FILE_UNREADABLE and not case.exists()
+
+
+def test_an_unreadable_file_in_misc_files_is_ignored_and_only_its_count_is_logged(tree, caplog):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    misc = org / PID / 'misc_files'
+    misc.mkdir()
+    (misc / 'SYNTHETIC_junk.dcm').write_bytes(b'not a dicom file')
+    caplog.set_level(logging.DEBUG)
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.files, r.skipped_series) for r in rows] == [
+        ('plan_1', conv.OUTCOME_CONVERTED, ['planning_ct.nii.gz', 'series.csv'], 0)]
+    assert 'convert: 1 unreadable files in misc_files' in caplog.messages
+    assert all(secret not in text for text in caplog.messages for secret in (PID, 'SYNTHETIC_junk', str(org)))
 
 
 def test_convert_plan_refusal_raises_the_reason_and_leaves_no_case_dir(tree):
@@ -463,7 +495,7 @@ def test_convert_plan_refusal_raises_the_reason_and_leaves_no_case_dir(tree):
     make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'BRACHY')])
     case = org.parent / 'case'
     with pytest.raises(CaseRefused) as caught:
-        conv.convert_plan(org / PID / 'plan_1', case)
+        run_plan(org / PID / 'plan_1', case)
     assert str(caught.value) == conv.REASON_DOSE_RULE
     assert not case.exists()
 
@@ -641,7 +673,7 @@ def test_a2_10_no_output_channel_or_exception_carries_the_patient_id_the_path_or
     capfd.readouterr()
     rows = conv.convert(org, out).rows
     with pytest.raises(CaseRefused) as caught:
-        conv.convert_plan(plan['folder'], tmp_path / 'case')
+        run_plan(plan['folder'], tmp_path / 'case')
     assert [(r.outcome, r.reason) for r in rows] == [(conv.OUTCOME_REFUSED, reason)] and str(caught.value) == reason
     assert chain(caught.value) == [caught.value]
     captured = capfd.readouterr()
