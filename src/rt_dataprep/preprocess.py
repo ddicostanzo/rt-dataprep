@@ -211,7 +211,7 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps()):  # noqa: B008
             log.error('preprocess: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
             aborted = True
             break
-    with open(out_root / REPORT_NAME, 'w', newline='') as handle:
+    with open(out_root / REPORT_NAME, 'w', newline='', encoding='utf-8') as handle:
         writer = csv.writer(handle)
         writer.writerow(['patient', 'folder', 'outcome', 'reason', 'files'])
         writer.writerows([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files)] for r in rows)
@@ -275,7 +275,7 @@ def same_grid(a, b):
 def check_rows(plan_dir):
     """(kept series.csv rows, ct first; the CT's read_info). Every row is checked here, headers only, before the plan's first write."""
     malformed = False
-    with open(plan_dir / conv.SERIES_NAME, newline='') as handle:
+    with open(plan_dir / conv.SERIES_NAME, newline='', encoding='utf-8') as handle:
         try:
             reader = csv.DictReader(handle)
             rows = list(reader)

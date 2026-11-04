@@ -102,9 +102,10 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',)):
     org_root, out_root = Path(org_root), Path(out_root)
     if out_root.resolve().is_relative_to(org_root.resolve()):  # before any mkdir: nothing is written into the input
         raise ValueError(REASON_OUTSIDE_ORG)
+    folders = sorted(p for p in org_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
     rows, aborted = [], False
-    for folder in sorted(p for p in org_root.iterdir() if p.is_dir() and not p.name.startswith('.')):
+    for folder in folders:
         try:
             rows += _convert_patient(folder, out_root, exclude_models)
         except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
@@ -116,7 +117,7 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',)):
             log.error('convert: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
             aborted = True
             break
-    with open(out_root / REPORT_NAME, 'w', newline='') as handle:
+    with open(out_root / REPORT_NAME, 'w', newline='', encoding='utf-8') as handle:
         writer = csv.writer(handle)
         writer.writerow(['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'])
         writer.writerows([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows)
@@ -539,7 +540,7 @@ def _series_rows(plan, struct, ct_head, dose_heads, rois, files):
 def write_series_csv(rows, path):
     """`rows` (dicts of SERIES_COLUMNS) at `path`, written atomically; a failure raises OSError(REASON_WRITE)."""
     def write(temp):
-        with open(temp, 'w', newline='') as handle:
+        with open(temp, 'w', newline='', encoding='utf-8') as handle:  # a description the locale cannot encode
             writer = csv.DictWriter(handle, SERIES_COLUMNS)
             writer.writeheader()
             writer.writerows(rows)

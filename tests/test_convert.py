@@ -5,6 +5,8 @@ import hashlib
 import inspect
 import logging
 import operator
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -748,9 +750,24 @@ def test_crash_site_is_the_caller_of_quiet_call(monkeypatch):
     def boom(image, spacing):
         raise RuntimeError('SYNTHETICPTA')
     monkeypatch.setattr(pre, 'resample_to', boom)
-    try:
+    with pytest.raises(CaseRefused) as err:
         pre.process_ct(sitk.Image(2, 2, 2, sitk.sitkFloat32), pre.LEGACY_RNT)
-    except CaseRefused:
-        module, line = conv.crash_site(sys.exc_info()[2])
+    module, line = conv.crash_site(err.tb)
     assert module == 'rt_dataprep.preprocess'
     assert 'quiet_call(run' in inspect.getsource(pre).splitlines()[line - 1]
+
+
+def test_series_csv_is_utf8_whatever_the_locale(tmp_path):
+    script = ("import sys; from rt_dataprep import convert as conv; "
+              "row = dict.fromkeys(conv.SERIES_COLUMNS, '') | dict(file='SYNTHETIC.nii.gz', kind='ct', series_description='Thorax \\u00e9'); "
+              "conv.write_series_csv([row], sys.argv[1])")
+    env = {**os.environ, 'LC_ALL': 'C', 'PYTHONCOERCECLOCALE': '0', 'PYTHONUTF8': '0'}  # an ASCII locale
+    result = subprocess.run([sys.executable, '-c', script, str(tmp_path / 'series.csv')], env=env, capture_output=True)
+    assert result.returncode == 0
+    assert 'Thorax \u00e9' in (tmp_path / 'series.csv').read_bytes().decode('utf-8')
+
+
+def test_a_missing_organized_root_writes_no_output_root(tmp_path):
+    with pytest.raises(OSError):
+        conv.convert(tmp_path / 'missing', tmp_path / 'out')
+    assert not (tmp_path / 'out').exists()
