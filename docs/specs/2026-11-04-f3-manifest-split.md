@@ -27,7 +27,7 @@ records `{split: {mrn: [sorted fraction ids]}}` in its run's `splits.json`, with
   (`0.07 * 100 = 7.000000000000001`) does not add one (user, stress-test F6).
 - D7 Two CLI subcommands: `rt_dataprep manifest <root>` and
   `rt_dataprep split <root> --test-size --val-size --seed [--external <manifest.csv>]`. `--seed` is a required int
-  (`default_rng(None)` would draw a random split). The disjoint check runs
+  (a missing seed would not be reproducible); any int, negative included (#75). The disjoint check runs
   inside `split` when `--external` is given, before anything is written.
 
 ## Design
@@ -47,9 +47,9 @@ Writes `<root>/manifest.csv` with `dicom_io.write_report` (dated copy plus lates
 | `case_dir` | `f'{patient}/{plan folder}'`, always `/` (the case id, D3) |
 | `patient` | the patient folder name, taken from the path component, never parsed from a string (vault `patient-group-key-parsed-from-relative-path-defeats-split-and-overlap-guards`) |
 | `fx` | the plan folder name |
-| `ct_size`, `ct_spacing` | the CT header's size and spacing, `x;y;z` |
+| `ct_size`, `ct_spacing` | the CT header's size and spacing, `x;y;z`; spacing as its float32 value (`0.8`, #74) |
 | `dose` | `1` if `series.csv` lists a dose file, else `0` |
-| `masks` | the mask rows' `roi_name`s, sorted, `;`-joined |
+| `masks` | the mask rows' `roi_name`s, sorted, as a JSON list (`["bladder", "ptv"]`; a name may hold `;`, #74) |
 | `rtplan_uid`, `ct_series_uid`, `study_uid` | from the ct row of `series.csv` |
 
 Returns the number of cases written and refused.
@@ -59,12 +59,14 @@ Returns the number of cases written and refused.
 1. Reads `manifest.csv` with `csv.DictReader`, every value a string (pandas would turn `00123` into `123` and
    break patient matching); patients = sorted unique `patient` values. `external` is read the same way.
 2. Refuses (fixed `REASON_`) when a size is outside `[0, 1)` or the test and val counts (D6) leave train empty. `seed` is required.
-3. `numpy.random.default_rng(seed).permutation(patients)`: the first `ceil(n*test_size)` go to test, the next
+3. Patients ordered by `sha256(f'{seed}\n{patient}')`, the same on every numpy and Python version (#75): the first `ceil(n*test_size)` go to test, the next
    `ceil(n*val_size)` to val, the rest to train. No scikit-learn.
 4. With `external`, runs `check_disjoint` first.
 5. Writes `<manifest dir>/splits.json` (D2). If a `splits.json` with different content is already there, refuses
    instead of overwriting: a split already used for training is never replaced silently. Identical content is
-   rewritten without complaint. The write is atomic (temp file in the same folder, then rename).
+   left as it is. The write is atomic and exclusive (temp file in the same folder, then `os.link`, which refuses an
+   existing target, so of two concurrent runs only the first writes, #73; a plain rename where hard links are
+   unsupported). A manifest without a `patient` or `case_dir` column is refused (#72).
 
 ### `check_disjoint(splits, external_manifest)`
 
@@ -105,8 +107,4 @@ it prints as a refusal, not as an unexpected error.
 
 - Stratified splits (by site, plan type or fraction count).
 - K-fold.
-- The split is reproducible only on the same numpy version (NEP 19 does not fix the `Generator` stream); a drift
-  is refused by A3.5, not applied silently. `hardening` issue.
-- An `OSError` reading one plan's `series.csv` stops the whole `manifest()` run (the CLI prints the path-free
-  file-system text) instead of counting that plan. `hardening` issue.
 - Reading `case_id_hash` back to verify a split in a later run.

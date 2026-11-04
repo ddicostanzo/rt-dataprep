@@ -2,18 +2,18 @@
 splits.json from manifest.csv (spec: f3-manifest-split): whole patients per split, in rnt's {split: {patient: [case ids]}} shape.
 
 Only manifest.csv is read, with csv.DictReader so every value stays a string (a patient '00123' stays '00123'). The patients
-are shuffled with numpy default_rng(seed); the first ceil(round(n*test_size, 9)) go to test, the next ceil(round(n*val_size, 9))
-to val, the rest to train. Every refusal is a ValueError with a fixed text, raised before anything is written; nothing here
+are ordered by sha256(f'{seed}\\n{patient}'), the same on every numpy and Python version (#75); the first
+ceil(round(n*test_size, 9)) go to test, the next ceil(round(n*val_size, 9)) to val, the rest to train. Every refusal is a ValueError with a fixed text, raised before anything is written; nothing here
 logs or raises a patient name, case id or path.
 """
+import contextlib
 import csv
 import hashlib
 import json
 import logging
 import math
+import os
 from pathlib import Path
-
-import numpy as np
 
 from rt_dataprep import convert as conv
 
@@ -25,11 +25,38 @@ REASON_SIZE = 'test_size and val_size must each be at least 0 and below 1'
 REASON_NO_TRAIN = 'the test and val sizes leave no patient for train'
 REASON_OVERLAP = 'a patient of the external manifest is in a split'
 REASON_EXISTS = 'splits.json already exists with different content; nothing written'
+REASON_COLUMNS = 'a manifest has no patient or case_dir column'
 
 
 def _read(manifest_path):
     with open(manifest_path, newline='', encoding='utf-8') as handle:
-        return list(csv.DictReader(handle))
+        reader = csv.DictReader(handle)
+        if not {'patient', 'case_dir'} <= set(reader.fieldnames or ()):
+            raise ValueError(REASON_COLUMNS)
+        return list(reader)
+
+
+def _write_new(path, text):
+    """Create `path` holding `text` atomically, keeping a `path` that appeared meanwhile: os.link, unlike os.replace, refuses
+    an existing target, so of two concurrent runs only the first writes (#73)."""
+    temp = path.with_name(f'.{os.getpid()}.tmp.{path.name}')
+    failed = False
+    try:
+        try:
+            temp.write_text(text, encoding='utf-8')
+            try:
+                os.link(temp, path)
+            except FileExistsError:
+                pass  # the caller compares it
+            except OSError:  # no hard links on this file system: a plain rename, without the concurrency guard
+                os.replace(temp, path)
+        except OSError:  # names the path
+            failed = True
+    finally:
+        with contextlib.suppress(OSError):
+            temp.unlink()
+    if failed:
+        raise OSError(conv.REASON_WRITE)
 
 
 def check_disjoint(splits, external_manifest):
@@ -47,11 +74,11 @@ def split(manifest_path, *, test_size, val_size, seed, external=None):
     cases = {}
     for row in _read(manifest_path):
         cases.setdefault(row['patient'], []).append(row['case_dir'])
-    patients = sorted(cases)
+    patients = list(cases)
     n_test, n_val = (math.ceil(round(len(patients) * size, 9)) for size in (test_size, val_size))
     if n_test + n_val >= len(patients):
         raise ValueError(REASON_NO_TRAIN)
-    order = [str(patient) for patient in np.random.default_rng(seed).permutation(patients)]
+    order = sorted(patients, key=lambda patient: hashlib.sha256(f'{seed}\n{patient}'.encode()).hexdigest())
     chosen = {'test': order[:n_test], 'val': order[n_test:n_test + n_val], 'train': order[n_test + n_val:]}
     obj = {name: {patient: sorted(cases[patient]) for patient in chosen[name]} for name in SPLIT_NAMES}
     obj['case_id_hash'] = {name: hashlib.sha256('\n'.join(sorted(c for p in obj[name].values() for c in p)).encode()).hexdigest()
@@ -59,9 +86,10 @@ def split(manifest_path, *, test_size, val_size, seed, external=None):
     if external is not None:
         check_disjoint(obj, external)
     path, text = manifest_path.with_name(SPLITS_NAME), json.dumps(obj, indent=1, sort_keys=True) + '\n'
-    if path.exists() and path.read_text(encoding='utf-8') != text:
+    if not path.exists():
+        _write_new(path, text)
+    if path.read_text(encoding='utf-8') != text:
         raise ValueError(REASON_EXISTS)
-    conv._atomic(lambda temp: temp.write_text(text, encoding='utf-8'), path)
     log.info('split: %s patients, %s cases', '/'.join(str(len(obj[name])) for name in SPLIT_NAMES),
              '/'.join(str(sum(map(len, obj[name].values()))) for name in SPLIT_NAMES))
     return obj
