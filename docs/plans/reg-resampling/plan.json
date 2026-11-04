@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "series: one rigidity test and a reg_matrix text parser",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/series.py",
+        "tests/test_series.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/series.py": "modify",
+        "tests/test_series.py": "modify"
+      },
+      "test_approach": "Unit tests of the parser on synthetic matrix texts; the existing REG rigidity tests stay green unchanged.",
+      "criteria": [
+        "The rigidity test of _rigid_matrix (finite, last row 0 0 0 1 within LAST_ROW_ATOL, R^T R = I within RIGID_ATOL, det > 0) lives in one helper that _rigid_matrix calls; every existing test_series.py test passes unchanged",
+        "A public parser takes reg_matrix text and returns the 4x4 numpy matrix: the identity matrix for 'identity', the parsed matrix for 16 '%.10g' values that pass the rigidity helper, and None for '', a count other than 16, a non-number, a non-finite value or a non-rigid matrix (each case a test)",
+        "The parser round-trips the text series.registration writes for a rotation-plus-translation REG (test via the existing synthetic REG helpers)"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "check_rows: return and validate the series rows (D12)",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "src/rt_dataprep/manifest.py",
+        "tests/test_preprocess.py",
+        "tests/test_manifest.py",
+        "docs/plans/reg-resampling/findings.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "src/rt_dataprep/manifest.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "tests/test_manifest.py": "modify",
+        "docs/plans/reg-resampling/findings.md": "modify"
+      },
+      "test_approach": "Red-first tests on synthetic converted plan folders with kind=series rows; callers updated to the new return shape with no other behaviour change.",
+      "criteria": [
+        "check_rows returns (kept, ct, series), where series holds the kind=series rows in input order; preprocess_plan and manifest are updated to the new return shape; no other output changes in this task",
+        "A plan whose series row names a missing file is refused with REASON_FILE_MISSING by preprocess and is counted refused by manifest",
+        "A plan whose series row has a modality other than CT, MR or PT is refused with REASON_STUDY_MODALITY; one whose file name series_id rejects is refused with REASON_STUDY_NAME; one whose name carries a different MOD than its modality column is refused with REASON_STUDY_MODALITY",
+        "A series file named with step prefixes (e.g. reshape_resample_initialresample_series_MR_1.nii.gz) with modality MR passes check_rows",
+        "REASON_STUDY_MODALITY and REASON_STUDY_NAME are reworded to refer to a series.csv series row, so the text fits a plan as well as a study; the constant names are unchanged",
+        "check_rows reads no series header: a plan whose kind=series file is present but not a valid NIfTI passes check_rows (test)",
+        "Every change to an existing test is listed in findings.md under task-02, including test_series_csv_keeps_every_column_renames_files_and_drops_series_rows (tests/test_preprocess.py), which relied on a missing series file"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "preprocess: align registered series onto the final CT grid (D1-D9, D13)",
+      "depends_on": [
+        "task-01",
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py",
+        "docs/plans/reg-resampling/findings.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "docs/plans/reg-resampling/findings.md": "modify"
+      },
+      "test_approach": "Synthetic converted plan folders (CT, dose, mask plus series_MR/series_CT NIfTI written with SimpleITK, series.csv rows with reg_matrix text); landmark tests per spec D11; red first for each criterion.",
+      "criteria": [
+        "AC1: a plan with one registered MR (reg_matrix a translation) under LEGACY_RNT writes the MR with the geometric prefixes on exactly the final CT's size, origin, spacing and direction, float32; the output series.csv lists it after the existing rows with reg_matrix 'identity' and the CT row's frame_of_reference_uid; the plan row's files includes it before series.csv",
+        "AC2: landmark tests (a) identity on a different grid, (b) pure translation by a whole number of final-grid voxels, (c) rotation about one axis (not 180 degrees) plus translation. The implementer picks CT and MR geometry so the landmark lies inside the final LEGACY_RNT grid by construction. Expected index: the landmark's physical point in the MR mapped through reg_matrix, converted with TransformPhysicalPointToContinuousIndex on the written output image; the output argmax is within 0.5 + 1e-6 of it per axis. For (b) and (c), the point mapped through the inverse of reg_matrix differs from the expected index by more than one voxel on some axis, and the argmax is more than half a voxel from it on that axis",
+        "AC3: final-grid voxels outside the series FOV are 0; a constant-valued MR keeps its value at interior voxels at least one voxel from the series boundary",
+        "AC4: a registered CT series under LEGACY_RNT is rescaled before the resample: a constant HU value v lands as (v + 1024) / 4096 at interior voxels, 0 outside, and its output name carries the rescale_ prefix (output_name with ct=True)",
+        "AC5: a series with reg_matrix '' and one with a non-rigid matrix are each left out (no output file, no output series.csv row); the plan row is preprocessed with skipped_series 1",
+        "AC6: a series translated entirely outside the CT is left out and counted as in AC5; one partly outside is kept",
+        "AC7 (preprocess half): an unreadable series file is left out and counted as in AC5; REASON_INTERNAL from the resample still stops the run",
+        "AC9: with rescale as the only step, a registered MR series is resampled onto the native CT grid (not copied, not refused) and keeps its input file name",
+        "AC10: preprocess_report.csv has a skipped_series column after files; patient, study, study-series and refused plan rows hold 0; the closing log line includes the total",
+        "Series skip check_crop and the dose/mask same_grid check; dose, mask and CT outputs of every existing test are unchanged",
+        "One series is held at a time: read, resampled, written and released before the next (code review checks the loop shape, as for dose)",
+        "Two registered series are written in series.csv input order, after the existing rows, in both the plan row's files and the output series.csv",
+        "The no-log-line-carries-a-path test also runs a plan with a registered series, including a skipped one; skip logs carry a fixed REASON_ constant or a count only",
+        "Every change to an existing test is listed in findings.md under task-03, including the preprocess_report.csv header pin"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "manifest: series column of aligned series (D10)",
+      "depends_on": [
+        "task-02",
+        "task-03"
+      ],
+      "files": [
+        "src/rt_dataprep/manifest.py",
+        "tests/test_manifest.py",
+        "README.md",
+        "docs/plans/reg-resampling/findings.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/manifest.py": "modify",
+        "tests/test_manifest.py": "modify",
+        "README.md": "modify",
+        "docs/plans/reg-resampling/findings.md": "modify"
+      },
+      "test_approach": "Manifest over a converted tree and over the tree preprocess writes from it, with synthetic MR series; red first.",
+      "criteria": [
+        "COLUMNS gains a last column series: a JSON list of {\"file\": ..., \"modality\": ...} for the plan's kind=series rows whose reg_matrix is 'identity' and whose header is on the plan CT's grid (same_grid), in series.csv order",
+        "AC11: on a preprocessed tree the aligned MR is listed as [{\"file\": <output name>, \"modality\": \"MR\"}]; on the converted tree a translated MR on its own grid lists [], a translated MR written with the CT's exact geometry plus a translation REG lists [], and an identity MR on the CT grid is listed; imaging rows hold []",
+        "A series whose header cannot be read is not listed and does not refuse the plan",
+        "AC12: the manifest column tests in test_manifest.py are updated for the new column and every change to an existing test is listed in findings.md; tests/test_plan_regression.py is unchanged; the full suite and ruff pass",
+        "README names the series manifest column (JSON list of file and modality, aligned series only) and the skipped_series report column, and no longer says three columns come after the first ten"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01",
+      "task-02"
+    ],
+    [
+      "task-03"
+    ],
+    [
+      "task-04"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-04",
+    "spec": "docs/specs/2026-11-04-reg-resampling.md",
+    "profile": "project-profile.yml",
+    "issue": 1,
+    "guardrails": [
+      "docs/handoffs/hardening-b11-continuation.md and the guardrails it chains to: at most 5 staged files per commit, no dotted private names in added lines (getattr(module, '_name')  # noqa: B009), no raise inside an except block, SYNTHETIC_ test data, no PHI in messages",
+      "tests/test_plan_regression.py is never re-pinned",
+      "follow [[sitk-resample-transform-scale-shrinks-targets-by-1-over-s]]: sitk.Resample maps output points to input points, so the transform is the inverse of reg_matrix (spec D2)",
+      "follow [[pydicom-validates-lazily-on-first-tag-access]]: any new pydicom read is quieted for the whole access",
+      "task-02 and task-03 both change preprocess.py, so they never run in parallel worktrees (max_parallel_worktrees is 1)"
+    ]
+  }
+}
