@@ -4,6 +4,7 @@ import csv
 import hashlib
 import inspect
 import logging
+import re
 import operator
 import os
 import subprocess
@@ -26,6 +27,11 @@ SHAPE = (4, 5, 6)  # (z, y, x)
 SPACING = (1.0, 1.5, 2.0)  # (x, y, z): anisotropic, so an axis swap cannot pass
 ORIGIN = (-3.0, 5.0, 7.0)
 SCALING = 0.5
+
+def listing(root):
+    """Sorted names under root, without the dated per-run copies of the report."""
+    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv', p.name))
+
 
 
 def edit(path, change):
@@ -300,7 +306,7 @@ def test_a2_8_missing_rtstruct_refuses_and_leaves_nothing(tree):
     row = row_of(rows)
     assert (row.outcome, row.reason) == (conv.OUTCOME_REFUSED, conv.REASON_NO_STRUCT)
     assert not (out / PID / 'plan_1').exists()
-    assert sorted(p.name for p in out.iterdir()) == [PID, conv.REPORT_NAME]  # no partial, no temp
+    assert listing(out) == [PID, conv.REPORT_NAME]  # no partial, no temp
     assert [p.name for p in (out / PID).iterdir()] == ['images']  # the refused plan's CT
     with open(out / conv.REPORT_NAME, newline='') as handle:
         assert next(r for r in csv.DictReader(handle) if r['folder'] == 'plan_1')['reason'] == conv.REASON_NO_STRUCT
@@ -393,7 +399,7 @@ def test_dot_folders_and_misc_files_are_never_converted(tree):
     (org / PID / 'misc_files').mkdir()
     rows = conv.convert(org, out).rows
     assert [(r.patient, r.folder) for r in rows] == [(PID, 'plan_1')]
-    assert sorted(p.name for p in out.iterdir()) == [PID, conv.REPORT_NAME]
+    assert listing(out) == [PID, conv.REPORT_NAME]
 
 
 def test_stale_partial_is_removed_first(tree):
@@ -403,7 +409,7 @@ def test_stale_partial_is_removed_first(tree):
     stale.mkdir(parents=True)
     (stale / 'leftover').write_text('x')
     conv.convert(org, out)
-    assert sorted(p.name for p in out.iterdir()) == [PID, conv.REPORT_NAME]
+    assert listing(out) == [PID, conv.REPORT_NAME]
     assert sorted(p.name for p in (out / PID).iterdir()) == ['plan_1']
 
 
@@ -425,7 +431,7 @@ def test_oserror_while_writing_gives_a_patient_row_and_removes_the_partial(tree,
     monkeypatch.setattr(conv.sitk, 'WriteImage', fail)
     rows = conv.convert(org, out).rows
     assert [(r.patient, r.folder, r.outcome, r.reason, r.files) for r in rows] == [(PID, '', 'refused', conv.REASON_IO_ERROR, [])]
-    assert sorted(p.name for p in out.iterdir()) == [conv.REPORT_NAME]
+    assert listing(out) == [conv.REPORT_NAME]
 
 
 def test_report_columns_and_joined_files(tree):
@@ -607,7 +613,7 @@ def test_a_failed_series_csv_write_is_a_patient_level_io_error_and_leaves_nothin
     monkeypatch.setattr(conv.os, 'replace', fail)
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'refused', conv.REASON_IO_ERROR)]
-    assert sorted(p.name for p in out.iterdir()) == [conv.REPORT_NAME]
+    assert listing(out) == [conv.REPORT_NAME]
 
 
 # ---------------------------------------------------------------- A2.9: organize -> convert
@@ -716,8 +722,8 @@ def test_a2_11_the_organized_tree_keeps_its_hashes_and_a_rerun_skips_every_patie
     assert sorted((r.patient, r.folder, r.outcome, r.reason) for r in rows) == [
         (PID, '', 'skipped', conv.REASON_EXISTS), ('SYNTHETICPTB', '', 'skipped', conv.REASON_EXISTS)]
     assert tree_hashes(org) == before
-    assert {k: v for k, v in tree_hashes(out).items() if k != conv.REPORT_NAME} == {
-        k: v for k, v in after_first.items() if k != conv.REPORT_NAME}
+    assert {k: v for k, v in tree_hashes(out).items() if not str(k).startswith('convert_report')} == {
+        k: v for k, v in after_first.items() if not str(k).startswith('convert_report')}
 
 
 # ---------------------------------------------------------------- guardrails on the source
