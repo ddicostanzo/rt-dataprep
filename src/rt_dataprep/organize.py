@@ -67,7 +67,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',)):
 
 def _organize_patient(folder, out_root, claimed, exclude_models):
     headers, unreadable = [], 0
-    for path in sorted(folder.rglob('*.dcm')):
+    for path in sorted(p for p in folder.rglob('*') if _has_preamble(p)):
         try:
             headers.append((path, read_header(path)))
         except OSError:
@@ -106,6 +106,14 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
         shutil.rmtree(partial, ignore_errors=True)
         raise
     return PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED)
+
+
+def _has_preamble(path):
+    """A regular file whose bytes 128-131 are DICM, whatever its name (#10)."""
+    if not path.is_file():
+        return False
+    with open(path, 'rb') as handle:
+        return handle.read(132)[128:] == b'DICM'
 
 
 def _uids(ds, sequence, tag):
