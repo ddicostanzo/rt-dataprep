@@ -22,7 +22,7 @@ import numpy as np
 import SimpleITK as sitk
 
 from rt_dataprep import convert as conv
-from rt_dataprep.dicom_io import CaseRefused, quiet_call
+from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
 from rt_dataprep.series import DIRECTION_ATOL
 
 log = logging.getLogger(__name__)
@@ -199,22 +199,22 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps()):  # noqa: B008
     folders = sorted(p for p in converted_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
     rows, aborted = [], False
-    for folder in folders:
-        try:
-            rows += preprocess_patient(folder, out_root, steps)
-        except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
-            rows.append(PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_IO_ERROR))
-            log.warning('preprocess: %s', REASON_IO_ERROR)
-        except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
-            module, line = conv.crash_site(sys.exc_info()[2])
-            rows.append(PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_INTERNAL))
-            log.error('preprocess: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
-            aborted = True
-            break
-    with open(out_root / REPORT_NAME, 'w', newline='', encoding='utf-8') as handle:
-        writer = csv.writer(handle)
-        writer.writerow(['patient', 'folder', 'outcome', 'reason', 'files'])
-        writer.writerows([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files)] for r in rows)
+    try:
+        for folder in folders:
+            try:
+                rows += preprocess_patient(folder, out_root, steps)
+            except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
+                rows.append(PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_IO_ERROR))
+                log.warning('preprocess: %s', REASON_IO_ERROR)
+            except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
+                module, line = conv.crash_site(sys.exc_info()[2])
+                rows.append(PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_INTERNAL))
+                log.error('preprocess: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
+                aborted = True
+                break
+    finally:  # Ctrl-C too: the report lists what was done
+        write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files'],
+                     ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files)] for r in rows))
     plan_rows = [r for r in rows if r.folder != '']
     patient_rows = [r for r in rows if r.folder == '']
     log.info('preprocess: %d plan rows (%d preprocessed, %d refused), %d patient rows (%d refused, %d skipped)',
@@ -229,8 +229,8 @@ def preprocess_patient(folder, out_root, steps):
     target = out_root / folder.name
     if target.exists():
         return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_EXISTS)]
-    plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(r'plan_\d+', p.name) and (p / conv.SERIES_NAME).is_file()),
-                   key=lambda p: int(p.name[len('plan_'):]))
+    plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(conv.PLAN_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()),
+                   key=lambda p: int(p.name.split('_')[1]))
     if not plans:
         return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_NO_PLANS)]
     # Built under a hidden name and renamed at the end, as convert does: a run that dies part-way leaves no folder that a

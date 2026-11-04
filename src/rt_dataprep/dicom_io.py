@@ -1,11 +1,15 @@
 """DICOM header reading and path sanitising. Nothing here puts a path, tag value or UID in a message, warning or log."""
 import contextlib
+import csv
 import logging
 import os
 import re
+import shutil
 import sys
 import tempfile
+import time
 import warnings
+from pathlib import Path
 
 import pydicom
 import SimpleITK as sitk
@@ -133,3 +137,18 @@ def sanitize_path_component(value, fallback='UNKNOWN'):
     if text.upper() in _WINDOWS_RESERVED_NAMES or text.split('.')[0].upper() in _WINDOWS_RESERVED_NAMES:
         text = f'_{text}'
     return text[:64]
+
+
+def write_report(out_root, name, header, rows):
+    """
+    `rows` under `header` at out_root/<stem>_<UTC time>.csv, one file per run so a rerun loses nothing (#50), then copied
+    to out_root/`name`, the latest run's report.
+    """
+    out_root = Path(out_root)
+    stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())  # shortcut: two runs in one second share a file; add a counter if that happens
+    dated = out_root / f'{Path(name).stem}_{stamp}.csv'
+    with open(dated, 'w', newline='', encoding='utf-8') as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        writer.writerows(rows)
+    shutil.copyfile(dated, out_root / name)

@@ -18,7 +18,7 @@ dist/
 manifest.csv
 splits.json
 !tests/fixtures/SYNTHETIC_*
-organize_report.csv
-convert_report.csv
-preprocess_report.csv
+organize_report*.csv
+convert_report*.csv
+preprocess_report*.csv
 series.csv
