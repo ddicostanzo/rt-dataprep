@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "manifest.py: manifest(root) writes manifest.csv, one row per case, from series.csv and the CT header",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/manifest.py",
+        "tests/test_manifest.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/manifest.py": "create",
+        "tests/test_manifest.py": "create"
+      },
+      "test_approach": "Red first in tests/test_manifest.py. Build plan folders with write_plan / save_rows from tests/test_preprocess.py (NIfTI + series.csv, no DICOM); for the preprocessed tree run preprocess.preprocess(converted, out, SMALL) on that tree as test_preprocess.py does. Patient folder names are SYNTHETIC_-prefixed. Run `uv run --group dev pytest -q --tb=short tests/test_manifest.py`, then the full suite (410 passed, 1 skipped at f336f0b). write_plan leaves rtplan_uid and study_instance_uid blank: set them on the returned ct row and call save_rows before preprocessing, so A3.3 checks real UIDs.",
+      "criteria": [
+        "manifest(root) walks <root>/<patient>/<plan folder>/: non-hidden patient folders, plan folders matching convert.PLAN_FOLDER that hold series.csv; images/, misc_files/ and .partial folders give no row",
+        "Each plan is validated with preprocess.check_rows (reused, not copied); a plan it refuses (CaseRefused) gives no row and is counted; the log line holds the count and fixed text only",
+        "manifest.csv is written to <root> with dicom_io.write_report (dated copy plus latest), rows sorted by case_dir, rows as lists in column order (write_report uses csv.writer), columns in this order: case_dir, patient, fx, ct_size, ct_spacing, dose, masks, rtplan_uid, ct_series_uid, study_uid",
+        "case_dir is f'{patient}/{plan folder}' (always '/'); patient is the patient folder's own name taken from the path component, never parsed from a string (vault patient-group-key-parsed-from-relative-path-defeats-split-and-overlap-guards); fx is the plan folder name",
+        "ct_size and ct_spacing are the CT header's size and spacing joined 'x;y;z'; dose is '1' when series.csv lists a dose row else '0'; masks is the mask rows' roi_name values sorted and ';'-joined; rtplan_uid, ct_series_uid and study_uid come from the ct row (rtplan_uid, series_instance_uid, study_instance_uid)",
+        "A3.3: manifest on a synthetic converted tree (two patients, one with two plans, one plan without dose) and on its preprocessed tree lists the same case_dir values, one row per plan, each with that tree's CT size and spacing, the dose flag, masks and UIDs; a plan with a malformed series.csv is left out and counted",
+        "manifest() returns (written, refused) counts; it reads the tree only and writes nothing but manifest.csv and its dated copy, checked with state(root) from tests/test_preprocess.py before and after: the only new files are manifest.csv and manifest_<stamp>.csv",
+        "No patient name, path or UID appears in a log line or exception text (caplog checked with a distinctive SYNTHETIC_ name)"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "split.py: split() and check_disjoint() write splits.json from manifest.csv, whole patients per split",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/split.py",
+        "tests/test_split.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/split.py": "create",
+        "tests/test_split.py": "create"
+      },
+      "test_approach": "Red first in tests/test_split.py. split() reads only manifest.csv, so tests write manifest rows by hand with csv (manifest.py's column list), no NIfTI or DICOM: 10+ SYNTHETIC_-prefixed patients, at least one with two or more plans, plus one patient named '00123' (bare digits, to catch a numeric read). Run `uv run --group dev pytest -q --tb=short tests/test_split.py`, then the full suite.",
+      "criteria": [
+        "split(manifest_path, *, test_size, val_size, seed, external=None) reads manifest.csv (and external) with csv.DictReader, every value kept a string, never pandas; patients are the sorted unique patient values",
+        "seed is a required keyword argument with no default; numpy.random.default_rng(seed).permutation(patients) orders them; the first ceil(round(n*test_size, 9)) go to test, the next ceil(round(n*val_size, 9)) to val, the rest to train; no scikit-learn import",
+        "A size outside [0, 1), or test and val counts that leave train empty, refuse with a fixed REASON_ ValueError before anything is written",
+        "A3.4: n=10, test=0.1, val=0.1 gives 1 test, 1 val, 8 train patients; n=10, test=0.15 gives 2 test; n=100, test=0.07 gives 7 test; an empty train is refused",
+        "splits.json is written next to manifest.csv as json.dumps(obj, indent=1, sort_keys=True) plus a trailing newline: {'train'|'val'|'test': {patient: [sorted case_dir values]}, 'case_id_hash': {'train'|'val'|'test': sha256('\\n'.join(sorted(case ids)).encode()).hexdigest()}}",
+        "A3.1: every plan of the multi-plan patient lands in the same split and no patient is in more than one split; the same seed and manifest give a byte-identical splits.json; two fixed seeds give a different patient-to-split assignment (compared as assignments, not hashes; vault seed-everything-masks-missing-random-state-in-determinism-test)",
+        "check_disjoint(splits, external_manifest), where splits is the split dict and external_manifest a path to a manifest.csv read with csv.DictReader and compared on the patient column, raises a fixed REASON_OVERLAP ValueError when any external patient is in any split; split() runs it before writing",
+        "A3.2: an external manifest sharing one patient is refused and no splits.json is written; the distinctive SYNTHETIC_ name is absent from str(exc), caplog and capfd output",
+        "A3.5: an existing splits.json with different content is refused with a fixed REASON_ and its bytes are unchanged; an identical existing file is rewritten without error",
+        "splits.json is written atomically by reusing convert._atomic (temp file in the same folder, then os.replace); no second helper",
+        "A manifest whose patient is the bare numeric string '00123' keeps '00123' unchanged as its key in splits.json"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "CLI manifest and split subcommands; profile phi rule names manifest.csv and splits.json",
+      "depends_on": [
+        "task-01",
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/__main__.py",
+        "tests/test_cli.py",
+        "project-profile.yml"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_cli.py": "modify",
+        "project-profile.yml": "modify"
+      },
+      "test_approach": "Red first in tests/test_cli.py, calling main([...]) as the existing CLI tests do. Build the tree with write_plan from tests/test_preprocess.py (no DICOM), then run manifest then split. Refusal tests use a hand-written manifest. capfd checks stdout/stderr at the file-descriptor level. Full suite after.",
+      "criteria": [
+        "`rt_dataprep manifest <root>` runs manifest(); `rt_dataprep split <root> --test-size F --val-size F --seed N [--external PATH]` runs split() on <root>/manifest.csv; --seed is a required int; after manifest it prints the written and refused counts only, after split the patient and case count per split only, never a patient name, case id or the splits dict",
+        "Every new REASON_ constant from split.py and manifest.py is in the CLI's fixed-refusal tuple, so each refusal exits 1 with 'rt_dataprep: <reason>' and not 'unexpected error'",
+        "A3.6: manifest then split run end to end on a synthetic tree and write manifest.csv and splits.json; an overlapping --external exits 1 with the fixed overlap text; no SYNTHETIC_ patient name appears in capfd output for any of these runs",
+        "The project-profile.yml phi rule lists manifest.csv (and its dated copies) and splits.json as files holding the sanitized id, written under the data root and never committed"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ],
+    [
+      "task-03"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-04",
+    "spec": "docs/specs/2026-11-04-f3-manifest-split.md",
+    "profile": "project-profile.yml",
+    "parent_plan": "docs/plans/2026-11-03-rt-dataprep/phase1.md"
+  }
+}

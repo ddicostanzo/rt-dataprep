@@ -56,7 +56,7 @@ Steps:
    path is asserted to sit inside `out_root`.
 6. A patient whose output folder already exists is skipped and counted in the report. The run does not merge into it.
 7. `organize_report.csv` is written in `out_root` with one row per patient: the sanitized ID, plan count,
-   misc_files count and unreadable count. The hook blocks this file from commits.
+   misc_files count and unreadable count. `.gitignore` and the global pre-commit filename check keep it out of commits.
 
 Acceptance tests (synthetic):
 - **A1.1** One patient with two planning studies on different dates. Each study has a CT, RTSTRUCT, RTPLAN and
@@ -155,7 +155,7 @@ Acceptance tests (synthetic):
 Steps:
 1. `manifest(out_root)` writes `manifest.csv`, with one row per converted case. Columns: `case_dir`, `patient`,
    `fx`, CT size and spacing, dose present, and the list of masks. It also records `rtplan_uid`, `ct_series_uid`
-   and `study_uid` for cross-run matching. The hook blocks this file from commits.
+   and `study_uid` for cross-run matching. `.gitignore` and the global pre-commit filename check keep it out of commits.
 2. `split(manifest, *, test_size, val_size, seed)` shuffles the sorted unique patients with
    `numpy.random.default_rng(seed)` and assigns whole patients to test, then val, then train. No scikit-learn. It writes `splits.json` with `{train, val, test}` case lists and a
    `case_id_hash = sha256('\n'.join(sorted(ids)))` for each split, the same hash convention as rnt
