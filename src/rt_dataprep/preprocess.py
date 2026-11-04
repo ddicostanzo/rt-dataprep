@@ -34,6 +34,7 @@ KINDS = ('ct', 'dose', 'mask', 'applicator')
 
 REASON_OUTSIDE_INPUT = 'output root is the converted root or inside it'
 REASON_NO_STEPS = 'no preprocessing step is on'
+REASON_NO_SERIES_STEPS = 'no preprocessing step that is on applies to an MR or PT series'
 REASON_EXISTS = 'output folder already exists'
 REASON_NO_CASES = 'patient folder holds no plan or study folder with a series.csv'
 STUDY_FOLDER = r'study_[0-9]+'
@@ -343,7 +344,7 @@ def preprocess_series(study_dir, out_dir, row, steps):
     is_ct = row['modality'] == 'CT'
     steps = steps if is_ct else replace(steps, rescale=False)  # the HU rescale is for CT only
     if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape):
-        raise CaseRefused(REASON_NO_STEPS)  # a rescale-only run has nothing to do to an MR or PT: no read, no copy under another name
+        raise CaseRefused(REASON_NO_SERIES_STEPS)  # a rescale-only run has nothing to do to an MR or PT: no read, no copy under another name
     source = study_dir / row['file']
     if too_small(read_info(source), steps):
         raise CaseRefused(REASON_TOO_SMALL)
@@ -414,14 +415,15 @@ def read_series_csv(folder):
     return rows, malformed
 
 
-def study_refusal_count(study_dir):
-    """What a refused study counts in the manifest: its data rows, or 1 when series.csv cannot be parsed or holds no row."""
-    return max(1, len(read_series_csv(study_dir)[0]))
+def study_refusal_count(rows):
+    """What a refused study counts in the manifest: its series.csv data rows (read_series_csv), or 1 when it cannot be parsed or holds no row."""
+    return max(1, len(rows))
 
 
-def check_study_rows(study_dir):
-    """The series.csv rows of a study folder, every one checked here and no NIfTI header read. A failure refuses the whole study."""
-    rows, malformed = read_series_csv(study_dir)
+def check_study_rows(study_dir, parsed=None):
+    """The series.csv rows of a study folder, every one checked here and no NIfTI header read. A failure refuses the whole study.
+    `parsed` is read_series_csv's result when the caller has already read it."""
+    rows, malformed = parsed or read_series_csv(study_dir)
     if malformed or not rows or len({row['file'] for row in rows}) != len(rows):
         raise CaseRefused(REASON_SERIES_CSV)
     if any(row['kind'] != 'series' for row in rows):

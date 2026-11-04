@@ -295,10 +295,10 @@ def series_row(file, kind, **extra):
     return dict.fromkeys(conv.SERIES_COLUMNS, '') | dict(file=file, kind=kind, **extra)
 
 
-def write_plan(root, patient='SYNTHETICPTA', plan='plan_1', n=12, spacing=1.0, dose=DEFAULT_DOSE, masks=None, applicator=True):
+def write_plan(root, patient='SYNTHETICPTA', plan='plan_1', n=12, spacing=1.0, dose=DEFAULT_DOSE, masks=None, applicator=True, direction=(1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0)):
     """<root>/<patient>/<plan>/ as F2a writes it. Returns (folder, series.csv rows)."""
     masks = DEFAULT_MASKS if masks is None else masks
-    geometry = grid(n, spacing)
+    geometry = dict(grid(n, spacing), direction=direction)
     folder = root / patient / plan
     folder.mkdir(parents=True)
     ct = make_image(np.linspace(-1000, 200, n ** 3).reshape(n, n, n), **geometry)
@@ -1059,17 +1059,17 @@ def test_study_reasons_are_distinct_fixed_strings():
 ])
 def test_study_refusal_count(tmp_path, text, expected):
     (tmp_path / conv.SERIES_NAME).write_text(text, encoding='utf-8')
-    assert pre.study_refusal_count(tmp_path) == expected
+    assert pre.study_refusal_count(pre.read_series_csv(tmp_path)[0]) == expected
 
 
 def test_study_refusal_count_of_an_unparseable_file_is_one(tmp_path):
     (tmp_path / conv.SERIES_NAME).write_bytes(b'file,kind\n\xff\xfe,series\nseries_MR_2.nii.gz,series\n')
-    assert pre.study_refusal_count(tmp_path) == 1
+    assert pre.study_refusal_count(pre.read_series_csv(tmp_path)[0]) == 1
 
 
 def test_study_refusal_count_of_a_valid_study(tmp_path):
     rows = [study_row(f'series_MR_{k}.nii.gz') for k in (1, 2, 3, 4)]
-    assert pre.study_refusal_count(write_study(tmp_path / 'study_1', rows)) == 4
+    assert pre.study_refusal_count(pre.read_series_csv(write_study(tmp_path / 'study_1', rows))[0]) == 4
 
 
 def test_check_study_rows_logs_nothing_with_identifiers(tmp_path, caplog):
@@ -1150,7 +1150,7 @@ def test_rescale_alone_refuses_an_mr_and_still_preprocesses_a_ct(tmp_path):
     write_study_tree(converted)
     report = pre.preprocess(converted, out, PreprocessSteps(rescale=True))
     assert imaging_rows(report) == [('study_1/series_CT_1', 'preprocessed', '', ['rescale_series_CT_1.nii.gz', 'series.csv']),
-                                    ('study_1/series_MR_1', 'refused', pre.REASON_NO_STEPS, [])]
+                                    ('study_1/series_MR_1', 'refused', pre.REASON_NO_SERIES_STEPS, [])]
     study = out / 'SYNTHETICPTA' / 'study_1'
     assert sorted(p.name for p in study.iterdir()) == ['rescale_series_CT_1.nii.gz', 'series.csv']  # no MR file, whatever its name
     assert [r['file'] for r in conv_rows(study)] == ['rescale_series_CT_1.nii.gz']
@@ -1363,17 +1363,24 @@ def rigid(rotation_degrees=0.0, translation=(0, 0, 0)):
     return matrix
 
 
+def axis_rotation(axis, degrees):
+    """The 3x3 rotation by `degrees` about `axis` (Rodrigues)."""
+    k = np.asarray(axis, float) / np.linalg.norm(axis)
+    cross = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(np.radians(degrees)) * cross + (1 - np.cos(np.radians(degrees))) * cross @ cross
+
+
 def landmark(size, index, value=100.0):
     array = np.zeros(size[::-1])
     array[index[2], index[1], index[0]] = value
     return array
 
 
-def run_plan(tmp_path, specs, steps=SMALL):
-    """write_plan plus the series of `specs` ((file, modality, array or raw bytes or None, reg_matrix text, geometry), in series.csv order); preprocessed.
-    Returns (report, output plan folder, converted plan folder)."""
+def run_plan(tmp_path, specs, steps=SMALL, **plan):
+    """write_plan (with `plan`) plus the series of `specs` ((file, modality, array or raw bytes or None, reg_matrix text, geometry), in series.csv order);
+    preprocessed. Returns (report, output plan folder, converted plan folder)."""
     converted, out = tmp_path / 'converted', tmp_path / 'out'
-    folder, rows = write_plan(converted)
+    folder, rows = write_plan(converted, **plan)
     rows[0]['frame_of_reference_uid'] = CT_FRAME
     for file, modality, array, text, geometry in specs:
         if isinstance(array, bytes):
@@ -1460,6 +1467,25 @@ def test_ac2c_a_rotation_about_z_plus_translation_lands_the_landmark_at_the_mapp
     check_direction(image, expected, inverse_mapped)
 
 
+def test_ac2d_an_oblique_rotation_with_oblique_ct_and_mr_directions_lands_the_landmark_at_the_mapped_index_and_not_at_the_inverse_one(tmp_path):
+    ct_direction = tuple(axis_rotation((0, 1, 1), 20).ravel())
+    geometry = dict(spacing=(1.0, 1.5, 2.0), origin=(-7.0, -9.0, -6.0), direction=tuple(axis_rotation((1, 0, 1), 15).ravel()))
+    size, index = (16, 12, 10), (6, 5, 3)
+    final = pre.process_ct(make_image(np.zeros((12, 12, 12)), **grid(12), direction=ct_direction), SMALL)
+    p = np.array(make_image(np.zeros(size[::-1]), **geometry).TransformIndexToPhysicalPoint(index))
+    q = np.array(final.TransformIndexToPhysicalPoint((5, 4, 5)))  # the landmark is built to land on this final voxel centre
+    matrix = np.eye(4)
+    matrix[:3, :3] = axis_rotation((1, 2, -1), 34)
+    matrix[:3, 3] = q - matrix[:3, :3] @ p
+    _, done, _ = run_plan(tmp_path, [mr_spec(landmark(size, index), matrix, geometry)], direction=ct_direction)
+    image = read_out(done)
+    assert np.allclose(image.GetDirection(), ct_direction)
+    expected, inverse_mapped = landmark_indices(image, geometry, size, index, matrix)
+    assert np.abs(expected - (5, 4, 5)).max() < 1e-6
+    check_landmark(image, expected)
+    check_direction(image, expected, inverse_mapped)
+
+
 def coverage(out_image, series_geometry, size, matrix):
     """(interior, outside) boolean (z, y, x) arrays: final voxels whose source continuous index is at least one voxel from the series boundary, and outside its buffer."""
     series = make_image(np.zeros(size[::-1]), **series_geometry)
@@ -1503,11 +1529,12 @@ def test_ac5_an_unusable_matrix_leaves_the_series_out_and_counts_it(tmp_path, te
 
 def test_ac6_a_series_entirely_outside_the_ct_is_left_out_and_one_partly_outside_is_kept(tmp_path):
     ones = np.ones((8, 8, 8))
-    report, done, _ = run_plan(tmp_path, [mr_spec(ones, rigid(0, (500, 0, 0))), mr_spec(ones, rigid(0, (8, 0, 0)), file='series_MR_2.nii.gz')])
+    report, done, _ = run_plan(tmp_path, [mr_spec(ones, rigid(0, (500, 0, 0))), mr_spec(ones, rigid(0, (4, 0, 0)), file='series_MR_2.nii.gz')])
     kept = pre.output_name('series_MR_2.nii.gz', SMALL)
     assert plan_row(report).skipped_series == 1 and plan_row(report).files == [*BASE_FILES, kept, 'series.csv']
     values = sitk.GetArrayFromImage(read_out(done, kept))
-    assert (values > 0).any() and (values == 0).any() and [r['file'] for r in conv_rows(done)][-1] == kept
+    interior, outside = coverage(read_out(done, kept), MR_GRID, (8, 8, 8), rigid(0, (4, 0, 0)))  # asserts both are nonempty: partial coverage
+    assert np.abs(values[interior] - 1.0).max() < 1e-4 and (values[outside] == 0).all() and [r['file'] for r in conv_rows(done)][-1] == kept
 
 
 def test_ac7_an_unreadable_series_file_is_left_out_and_counted(tmp_path):
