@@ -25,6 +25,7 @@ REASON_OUTSIDE_ROOT = 'output folder resolves outside the output root'
 REASON_IO_ERROR = 'file system error while reading or copying; nothing kept for this patient'
 REASON_OUTSIDE_SRC = 'output root is the source root or inside it'
 REASON_NO_SOP_UID = 'a DICOM file has no SOPInstanceUID'
+_CT_DATES = ('SeriesDate', 'StudyDate', 'AcquisitionDate', 'ContentDate')  # fx order: first non-blank wins
 
 
 @dataclass
@@ -66,12 +67,13 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',)):
 
 
 def _organize_patient(folder, out_root, claimed, exclude_models):
-    headers, unreadable = [], 0
-    for path in sorted(folder.rglob('*.dcm')):
+    headers, bad = [], []  # bad: has the preamble but read_header fails; copied to misc_files (#13)
+    for path in sorted(p for p in folder.rglob('*') if _has_preamble(p)):
         try:
             headers.append((path, read_header(path)))
         except OSError:
-            unreadable += 1
+            bad.append(path)
+    unreadable = len(bad)
     # A file with a blank PatientID is the folder's but never placed in a plan: it is copied to misc_files (#12).
     blank = [path for path, ds in headers if not str(ds.get('PatientID', '')).strip()]
     headers = [(path, ds) for path, ds in headers if str(ds.get('PatientID', '')).strip()]
@@ -91,7 +93,7 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
     if target.exists():
         return PatientRow(name, 0, 0, unreadable, OUTCOME_SKIPPED, REASON_EXISTS)
     cases, misc = _group(headers, exclude_models)
-    misc += blank
+    misc += blank + bad
     # Build under a hidden name and rename at the end: a run that dies part-way leaves no folder that a later run
     # would skip as already done.
     partial = out_root / f'.{name}.partial'
@@ -106,6 +108,14 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
         shutil.rmtree(partial, ignore_errors=True)
         raise
     return PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED)
+
+
+def _has_preamble(path):
+    """A regular file whose bytes 128-131 are DICM, whatever its name (#10)."""
+    if not path.is_file():
+        return False
+    with open(path, 'rb') as handle:
+        return handle.read(132)[128:] == b'DICM'
 
 
 def _uids(ds, sequence, tag):
@@ -157,8 +167,9 @@ def _group(headers, exclude_models):
         if series is None:
             continue
         ct = min((ds for _, ds in ct_series[series]), key=lambda ds: ds.SOPInstanceUID)
-        key = tuple(str(v) for v in (ct.get('SeriesDate', ''), ct.get('SeriesTime', ''), plan.get('RTPlanDate', ''),
-                                     plan.get('RTPlanTime', ''), plan.SOPInstanceUID))
+        date = next((d for d in (str(ct.get(t, '')).strip() for t in _CT_DATES) if d), '')
+        key = (date == '', date) + tuple(str(v) for v in (ct.get('SeriesTime', ''), plan.get('RTPlanDate', ''),
+                                                          plan.get('RTPlanTime', ''), plan.SOPInstanceUID))  # undated last (#9)
         ct_study = study_of(ct)
         # The resolved RTSTRUCT always comes along, even when it was exported in a study other than the CT's.
         files = [plan_path, struct_paths[_uids(plan, 'ReferencedStructureSetSequence', 'ReferencedSOPInstanceUID')[0]]]

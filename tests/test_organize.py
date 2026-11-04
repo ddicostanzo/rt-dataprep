@@ -17,6 +17,9 @@ from rt_dataprep.organize import organize
 
 PID = 'SYNTHETIC_P1'
 EARLY, LATE = '20240105', '20240301'
+# Has the preamble but pydicom cannot parse it: a sequence of undefined length whose item ends mid-element.
+TRUNCATED = (bytes(128) + b'DICM' + b'\x08\x11\x40\x11SQ\x00\x00\xff\xff\xff\xff' + b'\xfe\xff\x00\xe0\xff\xff\xff\xff'
+             + b'\x08\x00\x16\x00UI\x40\x00ab')
 
 def listing(root):
     """Sorted names under root, without the dated per-run copies of the report."""
@@ -225,7 +228,7 @@ def test_colliding_sanitized_names_refuse_the_later_patient(tree, caplog):
 def test_refusal_exceptions_and_logs_carry_no_identifiers(tree, caplog):
     src, out = tree
     planning_study(src / 'p', pid='SYNTHETIC_a')
-    (src / 'p' / 'x.dcm').write_bytes(b'junk')
+    (src / 'p' / 'x.dcm').write_bytes(TRUNCATED)
     mixed = src / 'q'
     planning_study(mixed / '1', pid='SYNTHETIC_m1')
     planning_study(mixed / '2', pid='SYNTHETIC_m2')
@@ -243,7 +246,7 @@ def test_refusal_exceptions_and_logs_carry_no_identifiers(tree, caplog):
 def test_folder_without_readable_dicom_is_refused_not_fatal(tree):
     src, out = tree
     (src / 'empty').mkdir()
-    (src / 'empty' / 'bad.dcm').write_bytes(b'junk')
+    (src / 'empty' / 'bad.dcm').write_bytes(TRUNCATED)
     report = organize(src, out)
     assert [(r.outcome, r.reason, r.unreadable) for r in report.rows] == [(org.OUTCOME_REFUSED, org.REASON_NO_DICOM, 1)]
     assert listing(out) == ['organize_report.csv']
@@ -394,3 +397,66 @@ def test_out_root_equal_to_the_source_or_a_symlink_into_it_is_refused_before_any
     with pytest.raises(ValueError, match=org.REASON_OUTSIDE_SRC):
         organize(src, src if where == 'same' else link)
     assert snapshot(src) == before and sorted(p.name for p in src.iterdir()) == ['inside', 'p']
+
+
+def test_files_are_found_by_preamble_not_extension(tree, tmp_path):
+    plain, mixed = tmp_path / 'plain', tmp_path / 'mixed'
+    planning_study(plain / 'src' / PID / 'a')
+    planning_study(mixed / 'src' / PID / 'a')
+    for i, path in enumerate(sorted((mixed / 'src' / PID / 'a').iterdir())):
+        if i % 3 == 0:
+            path.rename(path.with_suffix(''))
+        elif i % 3 == 1:
+            path.rename(path.with_suffix('.DCM'))
+    (mixed / 'src' / PID / 'a' / 'notes.txt').write_text('free text, no preamble')
+    (mixed / 'src' / PID / 'a' / 'tiny').write_bytes(b'0123456789')
+    reports = [organize(root / 'src', root / 'out') for root in (plain, mixed)]
+    assert [(r.plans, r.misc, r.unreadable) for r in reports[1].rows] == [(r.plans, r.misc, r.unreadable) for r in reports[0].rows]
+    assert modalities(mixed / 'out' / PID / 'plan_1') == modalities(plain / 'out' / PID / 'plan_1')
+    assert not (mixed / 'out' / PID / 'misc_files').exists()
+    assert not list((mixed / 'out' / PID).rglob('notes.txt')) and not list((mixed / 'out' / PID).rglob('tiny'))
+
+
+def redate_ct(study, **dates):
+    """Set (or, for None, delete) date elements on every slice of a planning_study's CT."""
+    for path in study['ct']['paths']:
+        ds = pydicom.dcmread(path)
+        for name, value in dates.items():
+            if value is None:
+                del ds[name]
+            else:
+                setattr(ds, name, value)
+        ds.save_as(path)
+
+
+def plan_ct_series(out):
+    return [ct_series_uids(out / PID / f'plan_{n}') for n in (1, 2)]
+
+
+def test_ct_without_series_date_sorts_by_study_date(tree):
+    src, out = tree
+    dated = planning_study(src / PID / 'a', date=EARLY)
+    fallback = planning_study(src / PID / 'b', date=EARLY)  # same plan date: only the CT date can order them
+    redate_ct(fallback, SeriesDate=None, StudyDate=LATE)
+    organize(src, out)
+    assert plan_ct_series(out) == [{dated['ct']['series_uid']}, {fallback['ct']['series_uid']}]
+
+
+def test_ct_without_any_date_is_the_last_plan(tree):
+    src, out = tree
+    undated = planning_study(src / PID / 'a', date=EARLY)  # the earliest plan date and first by name: still last
+    dated = planning_study(src / PID / 'b', date=LATE)
+    redate_ct(undated, SeriesDate=None)
+    organize(src, out)
+    assert plan_ct_series(out) == [{dated['ct']['series_uid']}, {undated['ct']['series_uid']}]
+
+
+def test_unreadable_dicom_is_copied_to_misc_files(tree):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    (src / PID / 'a' / 'cut.dcm').write_bytes(TRUNCATED)
+    report = organize(src, out)
+    assert (out / PID / 'misc_files' / 'cut.dcm').read_bytes() == TRUNCATED
+    assert [f.name for f in (out / PID / 'misc_files').iterdir()] == ['cut.dcm']
+    assert [(r.plans, r.misc, r.unreadable) for r in report.rows] == [(1, 1, 1)]
+    assert rows(out)[0]['misc_count'] == rows(out)[0]['unreadable_count'] == '1'
