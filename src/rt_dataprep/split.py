@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -111,7 +112,13 @@ def split(manifest_path, *, test_size, val_size, seed, external=None):
     path, text = manifest_path.with_name(SPLITS_NAME), json.dumps(obj, indent=1, sort_keys=True) + '\n'
     if not path.exists():
         _write_new(path, text)
-    if path.read_text(encoding='utf-8') != text:
+    found = path.read_text(encoding='utf-8')
+    for _ in range(20):  # empty only while another run's O_EXCL reservation is not yet renamed over: a valid splits.json never is
+        if found:
+            break
+        time.sleep(0.05)  # shortcut: still empty after 1 s (a run killed holding the reservation) is refused as before; upgrade with a stale-reservation sweep
+        found = path.read_text(encoding='utf-8')
+    if found != text:
         raise ValueError(REASON_EXISTS)
     log.info('split: %s patients, %s cases', '/'.join(str(len(obj[name])) for name in SPLIT_NAMES),
              '/'.join(str(sum(map(len, obj[name].values()))) for name in SPLIT_NAMES))

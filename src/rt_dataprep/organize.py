@@ -126,6 +126,7 @@ def _organize_patient(folder, out_root, claimed, exclude_models, workers):
         partial.mkdir(exist_ok=True)
         partial.rename(target)
     except BaseException:  # Ctrl-C too: no hidden half-copied folder left behind
+        # A second Ctrl-C during this rmtree leaves a partly deleted .partial: the source scan skips it and the next run removes it before copying.
         shutil.rmtree(partial, ignore_errors=True)
         raise
     return done(PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED), time.monotonic() - copy_started)
