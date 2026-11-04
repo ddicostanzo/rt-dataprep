@@ -233,6 +233,21 @@ class _NeedsArg(BaseException):
         super().__init__(value)
 
 
+class _NoisyInit(BaseException):
+    def __init__(self, *args):
+        super().__init__(*args)
+        os.write(2, b'SYNTHETIC_x')
+
+
+def test_quiet_call_never_runs_a_third_party_constructor_outside_the_quiet_block(capfd):
+    error = _NoisyInit()
+    capfd.readouterr()  # the instance's own construction is not under test
+    with pytest.raises(BaseException) as err:  # noqa: PT011
+        quiet_call(_raiser(error), REASON)
+    assert type(err.value) is KeyboardInterrupt
+    assert capfd.readouterr().err == ''
+
+
 def _raiser(exc):
     def fail():
         raise exc

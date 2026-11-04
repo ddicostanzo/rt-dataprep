@@ -77,7 +77,8 @@ def quiet_call(fn, reason):
     Every Exception from fn becomes CaseRefused(reason), raised after the except block so nothing of the original is chained.
     Running out of memory is the machine's, not the case's: it becomes a bare MemoryError() instead (#47).
     Any other BaseException keeps its kind and loses its message, raised bare after the except block: SystemExit keeps an
-    int or None code (else 1); one whose constructor needs arguments becomes KeyboardInterrupt().
+    int or None code (else 1); a builtin kind whose constructor needs arguments, and any kind from another module (its
+    constructor would run outside the quiet block), becomes KeyboardInterrupt().
 
     Not thread-safe: it swaps process-wide state (fd 1 and 2, logging.disable, warning filters), so parallel callers (#2)
     must be process-based or serialize it.
@@ -113,7 +114,7 @@ def quiet_call(fn, reason):
                 raise SystemExit()
             raise SystemExit(code if isinstance(code, int) else 1)
         try:
-            bare = kind()
+            bare = kind() if getattr(kind, '__module__') == 'builtins' else KeyboardInterrupt()  # noqa: B009 (a third-party __init__ may write)
         except Exception:  # BaseExceptionGroup, a class with required arguments
             bare = KeyboardInterrupt()
         raise bare
