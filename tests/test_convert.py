@@ -703,6 +703,34 @@ def test_a2_10_the_broken_rtstruct_really_makes_dicomrttool_log_the_path(tree, c
     assert str(plan['folder']) in caplog.text
 
 
+def test_a2_10_a_slice_lost_after_the_header_read_refuses_without_the_path_ITK_names(tree, tmp_path, capfd, caplog, recwarn,
+                                                                                         monkeypatch):
+    """ITK's own read error says 'Could not open file: <path>'; none of that may reach a row, a log record or fd 1/2."""
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', rois=[BOX])
+    lost = Path(plan['ct']['paths'][1])
+    secrets = [PID, str(tmp_path), lost.name, *every_uid(plan['folder'])]
+    assert len(secrets) > 10
+    real = conv.read_folder_headers
+
+    def read_then_lose_a_slice(folder):
+        found = real(folder)
+        if Path(folder).name == 'plan_1':
+            lost.unlink()  # setup only: a slice lost between the header read and ITK's read; the code under test deletes nothing
+        return found
+    monkeypatch.setattr(conv, 'read_folder_headers', read_then_lose_a_slice)
+    caplog.set_level(logging.DEBUG)
+    capfd.readouterr()
+    rows = conv.convert(org, out).rows
+    assert not lost.exists()
+    assert [(r.outcome, r.reason) for r in rows if r.folder == 'plan_1'] == [(conv.OUTCOME_REFUSED, conv.REASON_CT_UNREADABLE)]
+    captured = capfd.readouterr()
+    texts = [captured.out, captured.err, caplog.text, *(r.getMessage() for r in caplog.records),
+             *(str(w.message) for w in recwarn.list),
+             *(repr((r.folder, r.outcome, r.reason, r.files)) for r in rows)]  # the patient column is the folder name by design
+    assert [s for s in secrets for t in texts if s in t] == []
+
+
 # ---------------------------------------------------------------- A2.11: rerun safety
 
 def tree_hashes(root):

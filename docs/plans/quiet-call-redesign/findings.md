@@ -31,3 +31,11 @@ Baseline at 5977e72: 483 passed, 1 skipped.
   - Dict reads in our code are guarded (the contours lookup by `in`, the roi_names lookup by the file filter).
   - Verdict: no attribute or method access on a possibly-None pydicom value found in the wrapped functions. Accepted behaviour stands for any future one: it raises AttributeError from our frame and aborts the run.
 - Result: 506 passed, 1 skipped (500 + 6 new); ruff and compileall clean.
+
+## task-04
+
+- Scratch run (SimpleITK reading a 4-slice synthetic CT series with slice 2 deleted, outside the repo): the raw ITK message is `ITK ERROR: GDCMImageIO(...): Could not open file: <tmp dir>/ct_001.dcm for reading. Reason: No such file or directory`, so it names the full path. Deleting the slice is therefore the right setup; replacing or truncating it names no path.
+- Test: test_a2_10_a_slice_lost_after_the_header_read_refuses_without_the_path_ITK_names (tests/test_convert.py, after the A2.10 broken-RTSTRUCT guard). It wraps read_folder_headers on the convert module so that, after the real call for plan_1, one planning-CT slice is deleted (setup only; the code under test deletes nothing). It asserts REASON_CT_UNREADABLE for plan_1 and scans rows, log records (DEBUG), warnings and fds 1/2 for the tmp path, the slice file name, the patient id and every UID. The rows are scanned without the patient column, which is the organized folder name by design.
+- Passes on the unchanged code (the first run failed only because the scan included the patient column, a test bug, not a leak).
+- Mutation, run once by hand and not committed: convert's quiet_call name patched with a variant that runs fn() and raises CaseRefused(str(exc)) on any Exception. Result: the test fails. The plan_1 row reason is the full ITK message (with the tmp path and ct_001.dcm) instead of REASON_CT_UNREADABLE, and the plan-refused log line carries it too. Test file restored afterwards.
+- Result: 507 passed, 1 skipped (506 + 1 new); ruff clean.
