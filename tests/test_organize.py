@@ -318,10 +318,16 @@ def test_one_rtplan_in_two_sub_folders_gives_one_plan_folder(tree):
     (src / PID / 'b').mkdir()
     for name in ('plan.dcm', 'dose.dcm'):  # the plan and its dose, exported twice
         (src / PID / 'b' / name).write_bytes((src / PID / 'a' / name).read_bytes())
+        copy = pydicom.dcmread(src / PID / 'b' / name)
+        copy.SeriesDescription = 'SYNTHETIC_COPY'  # the one byte that tells the second path's copy from the first's
+        copy.save_as(src / PID / 'b' / name)
     organize(src, out)
     assert sorted(p.name for p in (out / PID).iterdir()) == ['misc_files', 'plan_1']
     assert modalities(out / PID / 'plan_1') == Counter(CT=3, RTSTRUCT=1, RTPLAN=1, RTDOSE=1)  # one dose, not two to sum
     assert modalities(out / PID / 'misc_files') == Counter(RTPLAN=1, RTDOSE=1)
+    for folder, description in (('plan_1', None), ('misc_files', 'SYNTHETIC_COPY')):  # the first path's copy is the plan's
+        assert {header(p).get('SeriesDescription') for p in (out / PID / folder).iterdir()
+                if header(p).Modality in ('RTPLAN', 'RTDOSE')} == {description}
 
 
 def test_an_out_root_inside_the_source_root_is_refused_before_any_write(tree):
@@ -331,3 +337,16 @@ def test_an_out_root_inside_the_source_root_is_refused_before_any_write(tree):
     with pytest.raises(ValueError, match=org.REASON_OUTSIDE_SRC):
         organize(src, src / 'out')
     assert snapshot(src) == before and not (src / 'out').exists()
+
+
+@pytest.mark.parametrize('where', ['same', 'link_into_src'])
+def test_out_root_equal_to_the_source_or_a_symlink_into_it_is_refused_before_any_write(tree, tmp_path, where):
+    src, _ = tree
+    planning_study(src / 'p', pid='SYNTHETICPTB')
+    (src / 'inside').mkdir()
+    link = tmp_path / 'link'
+    link.symlink_to(src / 'inside', target_is_directory=True)
+    before = snapshot(src)
+    with pytest.raises(ValueError, match=org.REASON_OUTSIDE_SRC):
+        organize(src, src if where == 'same' else link)
+    assert snapshot(src) == before and sorted(p.name for p in src.iterdir()) == ['inside', 'p']
