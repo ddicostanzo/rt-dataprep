@@ -14,12 +14,13 @@ import pytest
 import SimpleITK as sitk
 import synthetic_dicom as sd
 from pydicom.dataset import Dataset
-from test_convert import BOX, PID, dose_spec, edit, every_uid, make_plan, run_plan, tree_hashes
+from test_convert import BOX, PID, arr, dose_spec, edit, every_uid, make_plan, run_plan, tree_hashes
 
 from rt_dataprep import convert as conv
 from rt_dataprep import masks
 from rt_dataprep import series as ser
 from rt_dataprep.dicom_io import CaseRefused, read_header
+from rt_dataprep.organize import organize
 
 PID_B = 'SYNTHETICPTB'
 SECRET = '1.2.3.4.5'  # UID-like, in the message of the exception the tests raise
@@ -1009,3 +1010,32 @@ def test_itks_out_of_memory_reading_the_planning_ct_aborts_the_run_and_leaves_no
         (PID, '', conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
     assert [p.name for p in out.iterdir()] == [conv.REPORT_NAME]  # no patient folder, no partial
     assert any('MemoryError' in message for message in caplog.messages) and PID not in caplog.text
+
+
+# ---------------------------------------------------------------- hardening B6 (#21): an RTSTRUCT in a study of its own
+
+@pytest.mark.parametrize('registered', [False, True])
+def test_an_rtstruct_study_that_also_holds_another_series_still_converts_and_the_series_is_placed_by_registration(
+        tmp_path, registered):
+    src, org, out = tmp_path / 'src', tmp_path / 'org', tmp_path / 'out'
+    folder = src / PID / 'p'
+    folder.mkdir(parents=True)
+    ct = sd.write_ct_series(folder, np.zeros((4, 5, 6), int), patient_id=PID)
+    struct_study = pydicom.uid.generate_uid()  # the RTSTRUCT was exported in a study of its own ...
+    struct = sd.write_rtstruct_rois(folder / 'struct.dcm', ct, [BOX], patient_id=PID, study_uid=struct_study)
+    sd.write_rtplan(folder / 'plan.dcm', struct, np.zeros((2, 3)), patient_id=PID, study_uid=ct['study_uid'])
+    mr = put(src / PID / 'mr', study_uid=struct_study)  # ... which holds an MR series too, on a frame of its own
+    if registered:
+        reg_for(folder / 'reg.dcm', ct, mr)
+    organize(src, org)
+    rows = conv.convert(org, out).rows
+    assert (rows[0].folder, rows[0].outcome, rows[0].reason) == ('plan_1', 'converted', '')
+    assert arr(out / PID / 'plan_1' / 'liver.nii.gz').sum() == 27
+    if registered:
+        assert files_of(rows, 'plan_1') == ['planning_ct.nii.gz', 'liver.nii.gz', 'series_MR_1.nii.gz', 'series.csv']
+        assert [(r.folder, r.outcome, r.reason) for r in rows[1:]] == [('images', 'skipped', conv.REASON_NO_IMAGES)]
+        assert csv_at(out / PID / 'plan_1')[-1]['reg_matrix'] == '1 0 0 10 0 1 0 0 0 0 1 0 0 0 0 1'
+    else:
+        assert files_of(rows, 'plan_1') == ['planning_ct.nii.gz', 'liver.nii.gz', 'series.csv']
+        assert [(r.folder, r.outcome, r.files) for r in rows[1:]] == [('images', 'converted', ['series_MR_1.nii.gz', 'series.csv'])]
+        assert csv_at(out / PID / 'images')[0]['reg_matrix'] == ''

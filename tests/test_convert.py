@@ -809,3 +809,64 @@ def test_another_series_on_an_empty_frame_is_not_registered_to_a_planning_ct_on_
     assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == ['planning_ct.nii.gz', 'series.csv']
     assert sorted(p.name for p in (out / PID / 'images').iterdir()) == ['series.csv', 'series_MR_1.nii.gz']
     assert series_rows(out, 'images')[0]['reg_matrix'] == ''
+
+
+# ---------------------------------------------------------------- hardening B6 (#22): orientation and dose offsets
+
+STORED = 1 + np.arange(np.prod(SHAPE)).reshape(SHAPE)  # a different dose value in every voxel
+INSIDE = ((1, 2), (1, 3), (2, 4))  # box of voxel indices (z, y, x), inclusive
+NAMED = (2, 3, 4)  # (k, j, i): a voxel in the box
+OTHER = (0, 0, 0)  # and one outside it
+
+
+def physical_point(orientation, voxel):
+    """Where voxel (k, j, i) of the synthetic CT sits, from the DICOM geometry alone (not from any converted file)."""
+    k, j, i = voxel
+    row, column = np.asarray(orientation[:3], float), np.asarray(orientation[3:], float)
+    return tuple(np.asarray(ORIGIN) + i * SPACING[0] * row + j * SPACING[1] * column + k * SPACING[2] * np.cross(row, column))
+
+
+def value_at(image, point):
+    return float(image[image.TransformPhysicalPointToIndex(point)])
+
+
+def aligned_dose(orientation, **kwargs):
+    """A dose on the CT's own grid, in the CT's orientation."""
+    return dose_spec(0, stored=STORED, orientation=orientation, **kwargs)
+
+
+@pytest.mark.parametrize('orientation', [(-1, 0, 0, 0, 1, 0), (1, 0, 0, 0, -1, 0), (-1, 0, 0, 0, -1, 0)],
+                         ids=['feet-first-supine', 'feet-first-prone', 'flipped-in-plane'])
+def test_a_ct_with_flipped_axes_or_a_slice_normal_along_minus_z_keeps_ct_dose_and_mask_aligned(tree, orientation):
+    box = dict(number=1, name='Liver', kind='box', box=INSIDE)
+    _, rows, out = one_plan(tree, doses=[aligned_dose(orientation)], rois=[box], ct_meta=dict(orientation=orientation))
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_CONVERTED, '')
+    ct, dose, mask = (read(out / PID / 'plan_1' / name) for name in ('planning_ct.nii.gz', 'dose.nii.gz', 'liver.nii.gz'))
+    values = (np.arange(np.prod(SHAPE)) % 200 - 100).reshape(SHAPE)  # make_plan's default
+    expected_mask = np.zeros(SHAPE)
+    expected_mask[1:3, 1:4, 2:5] = 1
+    for image, expected in ((ct, values), (dose, STORED * SCALING), (mask, expected_mask)):
+        np.testing.assert_allclose(sitk.GetArrayFromImage(image), expected, atol=1e-5)  # one grid for all three
+    for voxel, in_box in ((NAMED, 1), (OTHER, 0)):
+        point = physical_point(orientation, voxel)
+        assert value_at(ct, point) == values[voxel]
+        assert value_at(dose, point) == pytest.approx(STORED[voxel] * SCALING, abs=1e-5)
+        assert value_at(mask, point) == in_box
+
+
+@pytest.mark.parametrize('form', ['relative', 'negative', 'absolute'])  # relative-positive is the control
+def test_a_dose_with_negative_or_absolute_frame_offsets_converts_to_the_grid_of_the_relative_positive_one(tree, form):
+    top = ORIGIN[2] + (SHAPE[0] - 1) * SPACING[2]
+    if form == 'negative':  # the first frame is the highest slice and the offsets count down from it
+        dose = dose_spec(0, stored=STORED[::-1], position=(ORIGIN[0], ORIGIN[1], top),
+                         offsets=[-k * SPACING[2] for k in range(SHAPE[0])])
+    elif form == 'absolute':  # the first value is the first frame's own z
+        dose = dose_spec(0, stored=STORED, offsets=[ORIGIN[2] + k * SPACING[2] for k in range(SHAPE[0])])
+    else:
+        dose = dose_spec(0, stored=STORED)
+    _, rows, out = one_plan(tree, doses=[dose])
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
+    ct, got = read(out / PID / 'plan_1' / 'planning_ct.nii.gz'), read(out / PID / 'plan_1' / 'dose.nii.gz')
+    assert got.GetOrigin() == ct.GetOrigin() and got.GetSize() == ct.GetSize()
+    np.testing.assert_allclose(sitk.GetArrayFromImage(got), STORED * SCALING, atol=1e-5)  # the relative-positive form's dose
+    assert value_at(got, physical_point((1, 0, 0, 0, 1, 0), NAMED)) == pytest.approx(STORED[NAMED] * SCALING, abs=1e-5)
