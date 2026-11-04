@@ -544,10 +544,12 @@ def test_a_ct_shorter_than_one_output_voxel_refuses_the_plan_only(tmp_path):
     assert plan_row(report, folder='plan_2').outcome == 'preprocessed'
 
 
-def test_a_ct_that_only_harmonize_spacing_would_empty_refuses(tmp_path):
+@pytest.mark.parametrize('resample', [False, True])  # True: 2 voxels after a 0.5 mm resample, none at 1.25 mm (#55)
+def test_a_ct_that_only_harmonize_spacing_would_empty_refuses(tmp_path, resample):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
-    write_plan(converted, n=2, spacing=0.6, dose=None, masks={})  # 1.2 mm per axis: one voxel at 1 mm, none at 1.25 mm
-    report = pre.preprocess(converted, out, dataclasses.replace(SMALL, resample=False))
+    write_plan(converted, n=2, spacing=0.6, dose=None, masks={})  # 1.2 mm per axis: none at 1.25 mm
+    # an axis at 1 voxel stays 1 (torchio), so only a finer initial spacing can survive it and then empty
+    report = pre.preprocess(converted, out, dataclasses.replace(SMALL, resample=resample, new_spacing=(0.5, 0.5, 0.5)))
     assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_TOO_SMALL)
 
 
