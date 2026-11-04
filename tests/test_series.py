@@ -807,6 +807,20 @@ def test_b4_excluded_model_studies_and_localizers_are_written_nowhere_and_not_co
     assert np.array_equal(sitk.GetArrayFromImage(nii(study(out) / 'series_MR_1.nii.gz')), VALUES.astype(np.float32))
 
 
+def test_b4_a_whitespace_only_study_uid_is_dropped_like_an_absent_one(tree):
+    org, out = tree
+    misc = org / PID / 'misc_files'
+    kept = put(misc, prefix='kept')
+    blank = put(misc, prefix='blank')
+    for path in blank['paths']:
+        with pytest.warns(UserWarning, match='Invalid value for VR UI'):  # pydicom warns on writing spaces as a UI
+            edit(path, lambda ds: setattr(ds, 'StudyInstanceUID', '  '))
+    assert {pydicom.dcmread(path).StudyInstanceUID for path in blank['paths']} == {''}  # read back stripped, so candidates drops it
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.skipped_series) for r in rows] == [('studies', 'converted', 0), ('study_1/series_MR_1', 'converted', 0)]
+    assert study_uids(out) == {kept['series_uid']} and listing(out / PID) == ['study_1']
+
+
 def copy_to(paths, folder):
     folder.mkdir(parents=True, exist_ok=True)
     for path in paths:
@@ -1548,10 +1562,17 @@ def test_studies_are_numbered_by_date_then_time_then_study_uid_with_the_undated_
     specs = [('a', '1.9.5', None, None),  # undated: last, whatever its uid
              ('b', '1.9.6', STUDY_D2, STUDY_T2), ('c', '1.9.7', STUDY_D2, STUDY_T1), ('d', '1.9.8', STUDY_D1, STUDY_T2),
              ('e', '1.9.4', STUDY_D2, STUDY_T1),  # same date and time as c: the smaller StudyInstanceUID first
-             ('f', '1.9.3', None, STUDY_T1)]  # undated too (a time alone dates nothing); the key's time then puts it after a
+             ('f', '1.9.3', None, STUDY_T1)]  # undated too (a time alone dates nothing); the key's time then puts it before a, which has none
     found = make_studies(org / PID / 'misc_files', specs, reverse)
     conv.convert(org, out)
-    assert numbered(out) == [[found[n]['series_uid']] for n in ('d', 'e', 'c', 'b', 'a', 'f')]
+    assert numbered(out) == [[found[n]['series_uid']] for n in ('d', 'e', 'c', 'b', 'f', 'a')]
+
+
+def test_a_study_without_a_study_time_ranks_after_a_timed_one_on_the_same_date(tree):
+    org, out = tree
+    found = make_studies(org / PID / 'misc_files', [('blank', '1.9.1', STUDY_D1, None), ('timed', '1.9.2', STUDY_D1, STUDY_T2)])
+    conv.convert(org, out)
+    assert numbered(out) == [[found['timed']['series_uid']], [found['blank']['series_uid']]]  # the smaller uid is the blank one
 
 
 def test_two_series_of_one_study_with_different_study_dates_rank_it_by_the_earlier_date(tree):
