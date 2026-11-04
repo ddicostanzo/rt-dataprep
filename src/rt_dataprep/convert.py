@@ -132,10 +132,13 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',)):
 
 
 def crash_site(tb):
-    """(module name, line) of the innermost rt_dataprep frame of `tb`; the file name only selects it and is never formatted."""
+    """
+    (module name, line) of the innermost rt_dataprep frame of `tb` outside dicom_io (quiet_call raises every failure from its
+    own line, so its caller is the site); the file name only selects it and is never formatted.
+    """
     site = ('unknown', 0)
     for frame, lineno in traceback.walk_tb(tb):
-        if Path(frame.f_code.co_filename).parent == PACKAGE_DIR:
+        if Path(frame.f_code.co_filename).parent == PACKAGE_DIR and frame.f_globals['__name__'] != 'rt_dataprep.dicom_io':
             site = (frame.f_globals['__name__'], lineno)
     return site
 
@@ -320,7 +323,7 @@ def _convert_plan(headers, unreadable, case_dir):
         write_atomic(image, case_dir / name)
         files.append(name)
     for name, points, _ in rois.applicators:
-        masks.write_applicator(points, case_dir / name)
+        _atomic(lambda temp, points=points: np.savetxt(temp, points, fmt='%.4f'), case_dir / name)  # gzip text: the name ends .nii.gz
         files.append(name)
     series_rows = _header_call(_series_rows, plan, struct, ct_slices[0][1], dose_heads, rois, files)
     return PlanResult(files, series_uid, series_rows)
@@ -559,10 +562,9 @@ def _atomic(write, path):
     try:
         try:
             write(temp)
-        except (CaseRefused, OSError):
-            failed = True
-        if not failed:
             os.replace(temp, path)
+        except (CaseRefused, OSError):  # both name the path
+            failed = True
     finally:
         with contextlib.suppress(OSError):
             temp.unlink()

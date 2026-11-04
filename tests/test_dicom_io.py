@@ -202,6 +202,19 @@ def test_quiet_call_restores_everything(capfd):
         sitk.ProcessObject.SetGlobalWarningDisplay(shown)
 
 
+def test_quiet_call_refuses_an_exception_whose_str_fails():
+    class Odd(Exception):
+        def __str__(self):
+            raise ValueError(FAKE_PATH)
+
+    def fail():
+        raise Odd()
+    with pytest.raises(CaseRefused) as err:
+        quiet_call(fail, REASON)
+    assert str(err.value) == REASON
+    assert _chain(err.value) == (None, None)
+
+
 @pytest.mark.parametrize('error', [MemoryError(FAKE_PATH), RuntimeError(f'{FAKE_PATH}:179:\nFailed to allocate memory for image.')])
 def test_quiet_call_raises_a_bare_memory_error_when_out_of_memory(error):
     def fail():

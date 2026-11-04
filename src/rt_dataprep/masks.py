@@ -6,7 +6,6 @@ RTSTRUCT -> training-label masks and brachy applicator point files (spec: f2a-co
 verifies the result, because DicomRTTool fails silently with all-zero masks or masks on another grid. Nothing here puts a
 path, ROI name, UID or tag value in a message: every refusal is one fixed REASON_ constant.
 """
-import contextlib
 import os
 import shutil
 import tempfile
@@ -79,17 +78,6 @@ def classify(struct, plan, frame_uid, taken=()):
     if any(name == SUFFIX for name in names) or len(set(names)) != len(names):
         raise CaseRefused(REASON_ROI_NAMES)
     return result
-
-
-def write_applicator(points, path):
-    """`points` (N, 3) as gzip text (np.savetxt, '%.4f') at `path`, through a temp name that also ends .nii.gz."""
-    temp = path.with_name(f'.{os.getpid()}.tmp.{path.name}')
-    try:
-        np.savetxt(temp, points, fmt='%.4f')
-        os.replace(temp, path)
-    finally:
-        with contextlib.suppress(OSError):
-            temp.unlink()
 
 
 def _link_or_copy(source, target):

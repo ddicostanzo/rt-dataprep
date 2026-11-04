@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import logging
 import operator
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -728,3 +729,28 @@ def test_no_case_refused_is_raised_inside_an_except_block():
 
 def test_no_array_view_of_a_temporary_image():
     assert 'GetArrayViewFromImage' not in inspect.getsource(conv)
+
+
+def test_a_failed_rename_of_an_output_file_names_no_path(tmp_path, monkeypatch):
+    def refuse_rename(source, target):
+        raise OSError(f'cannot rename {target}')
+    monkeypatch.setattr(conv.os, 'replace', refuse_rename)
+    with pytest.raises(OSError) as err:
+        conv.write_series_csv([], tmp_path / 'series.csv')
+    assert str(err.value) == conv.REASON_WRITE
+    assert operator.attrgetter('__cause__', '__context__')(err.value) == (None, None)
+    assert list(tmp_path.rglob('*')) == []
+
+
+def test_crash_site_is_the_caller_of_quiet_call(monkeypatch):
+    from rt_dataprep import preprocess as pre
+
+    def boom(image, spacing):
+        raise RuntimeError('SYNTHETICPTA')
+    monkeypatch.setattr(pre, 'resample_to', boom)
+    try:
+        pre.process_ct(sitk.Image(2, 2, 2, sitk.sitkFloat32), pre.LEGACY_RNT)
+    except CaseRefused:
+        module, line = conv.crash_site(sys.exc_info()[2])
+    assert module == 'rt_dataprep.preprocess'
+    assert 'quiet_call(run' in inspect.getsource(pre).splitlines()[line - 1]

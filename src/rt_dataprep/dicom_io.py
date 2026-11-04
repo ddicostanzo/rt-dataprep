@@ -40,8 +40,8 @@ def _fds_quiet():
     """fd 1 and 2 point at a temp file (discarded) for one block, then back. C++ writers (ITK, GDCM) bypass sys.stderr."""
     sys.stdout.flush()
     sys.stderr.flush()
+    sink = tempfile.TemporaryFile()  # before the dups: a failure here leaks no fd
     saved = os.dup(1), os.dup(2)
-    sink = tempfile.TemporaryFile()
     try:
         os.dup2(sink.fileno(), 1)
         os.dup2(sink.fileno(), 2)
@@ -80,7 +80,10 @@ def quiet_call(fn, reason):
                     result = fn()
                 except Exception as exc:  # no message, no traceback kept
                     failed = True
-                    out_of_memory = isinstance(exc, MemoryError) or 'Failed to allocate memory' in str(exc)  # ITK's is a RuntimeError
+                    try:
+                        out_of_memory = isinstance(exc, MemoryError) or 'Failed to allocate memory' in str(exc)  # ITK's is a RuntimeError
+                    except Exception:  # an exception whose str() fails is a refusal like any other
+                        out_of_memory = False
         finally:
             sitk.ProcessObject.SetGlobalWarningDisplay(shown)
             logging.disable(prior_disable)
