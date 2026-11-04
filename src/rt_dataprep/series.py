@@ -182,7 +182,8 @@ def _reg_text(reg, ct_frame, series_frame, headers_by_sop):
     ct_matrix, series_matrix = matrices[ct_frame], matrices[series_frame]
     if len(ct_matrix) > 1 or len(series_matrix) > 1 or ct_matrix[0] is None or series_matrix[0] is None:
         return ''
-    return ' '.join('%.10g' % v for v in (np.linalg.inv(ct_matrix[0]) @ series_matrix[0]).ravel())
+    matrix = np.round(np.linalg.inv(ct_matrix[0]) @ series_matrix[0], 10) + 0.0  # a computed zero prints 0, not -0 or 1e-17
+    return ' '.join('%.10g' % v for v in matrix.ravel())
 
 
 def registration(ct_frame, series_frame, regs, headers_by_sop):
@@ -198,6 +199,8 @@ def registration(ct_frame, series_frame, regs, headers_by_sop):
     A REG qualifies with an item (real or implied by its own frame) for each frame, whatever its matrices hold; a REG with a
     malformed tag does not qualify. Nothing here raises for a bad header.
     """
+    if not ct_frame:  # no FrameOfReferenceUID on the CT: an empty series frame is not the same frame
+        return False, ''
     if ct_frame == series_frame:
         return True, IDENTITY
     keyed = [(sop, reg) for reg in regs if (sop := _header_call(lambda r: str(r.SOPInstanceUID), reg)) is not None]

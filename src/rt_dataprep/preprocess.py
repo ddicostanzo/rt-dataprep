@@ -108,9 +108,10 @@ def reference_grid(image, spacing):
 
 
 def resample_to(image, spacing):
-    """`image` linearly resampled onto reference_grid(image, spacing), default value 0."""
+    """`image` as float32, linearly resampled onto reference_grid(image, spacing), default value 0."""
     size, origin, new_spacing, direction = reference_grid(image, spacing)
-    return sitk.Resample(image, size, sitk.Transform(), sitk.sitkLinear, origin, new_spacing, direction, 0.0, image.GetPixelID())
+    image = sitk.Cast(image, sitk.sitkFloat32)  # an integer CT would be interpolated, then truncated
+    return sitk.Resample(image, size, sitk.Transform(), sitk.sitkLinear, origin, new_spacing, direction, 0.0, sitk.sitkFloat32)
 
 
 def rescale(image):
@@ -258,7 +259,8 @@ def preprocess_one(plan_dir, out_dir, steps):
             raise
         reason = str(exc)
     if reason is not None:  # raised here, after the except block: nothing of the original is chained
-        shutil.rmtree(out_dir, ignore_errors=True)
+        if out_dir.exists():  # a failure is an OSError, the patient's: a refused plan's files must never be renamed into place
+            shutil.rmtree(out_dir)
         log.warning('preprocess: plan refused: %s', reason)
         return PreprocessRow(plan_dir.parent.name, plan_dir.name, conv.OUTCOME_REFUSED, reason)
     return PreprocessRow(plan_dir.parent.name, plan_dir.name, OUTCOME_PREPROCESSED, files=files)
@@ -271,7 +273,7 @@ def same_grid(a, b):
 
 
 def check_rows(plan_dir):
-    """The kept series.csv rows (ct first) of a plan. Every row is checked here, headers only, before the plan's first write."""
+    """(kept series.csv rows, ct first; the CT's read_info). Every row is checked here, headers only, before the plan's first write."""
     malformed = False
     with open(plan_dir / conv.SERIES_NAME, newline='') as handle:
         try:
@@ -298,7 +300,7 @@ def check_rows(plan_dir):
     ct = read_info(plan_dir / kept[0]['file'])
     if any(not same_grid(ct, read_info(plan_dir / row['file'])) for row in kept if row['kind'] in ('dose', 'mask')):
         raise CaseRefused(REASON_GRID)
-    return kept
+    return kept, ct
 
 
 def has_voxels(image):
@@ -324,8 +326,8 @@ def check_crop(native, final):
 
 def preprocess_plan(plan_dir, out_dir, steps):
     """Write the plan into `out_dir` (which must not exist); returns the output file names, series.csv last. CaseRefused on a refusal."""
-    kept = check_rows(plan_dir)
-    if too_small(read_info(plan_dir / kept[0]['file']), steps):
+    kept, ct = check_rows(plan_dir)
+    if too_small(ct, steps):
         raise CaseRefused(REASON_TOO_SMALL)
     geometric = steps.resample or steps.harmonize_spacing or steps.reshape
     out_dir.mkdir()

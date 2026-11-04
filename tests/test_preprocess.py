@@ -539,6 +539,49 @@ def test_a_ct_shorter_than_one_output_voxel_refuses_the_plan_only(tmp_path):
     assert plan_row(report, folder='plan_2').outcome == 'preprocessed'
 
 
+def test_a_ct_that_only_harmonize_spacing_would_empty_refuses(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted, n=2, spacing=0.6, dose=None, masks={})  # 1.2 mm per axis: one voxel at 1 mm, none at 1.25 mm
+    report = pre.preprocess(converted, out, dataclasses.replace(SMALL, resample=False))
+    assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_TOO_SMALL)
+
+
+def test_the_ct_is_processed_first_whatever_its_series_csv_row(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, rows = write_plan(converted)
+    save_rows(folder, [*rows[1:], rows[0]])
+    assert plan_row(pre.preprocess(converted, out, SMALL)).outcome == 'preprocessed'
+
+
+def test_an_integer_ct_is_interpolated_in_float32(tmp_path):
+    ct = sitk.Cast(make_image(np.indices((6, 6, 6)).sum(axis=0) % 2), sitk.sitkInt16)  # a 0/1 checkerboard
+    image = pre.resample_to(ct, (0.5, 0.5, 0.5))
+    values = sitk.GetArrayViewFromImage(image)
+    assert image.GetPixelID() == sitk.sitkFloat32
+    assert ((values > 0) & (values < 1)).any()  # truncated to int16 there would be none
+
+
+def test_a_refused_plan_folder_that_cannot_be_removed_drops_the_patient(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    real = pre.shutil.rmtree
+
+    def stuck(path, *args, **kwargs):
+        if path.name == 'plan_1':  # fails; ignore_errors would hide it and leave the folder
+            if kwargs.get('ignore_errors'):
+                return None
+            raise OSError('SYNTHETICPTA')
+        return real(path, *args, **kwargs)
+
+    def crop(native, final):
+        raise CaseRefused(pre.REASON_CROP)
+    monkeypatch.setattr(pre.shutil, 'rmtree', stuck)
+    monkeypatch.setattr(pre, 'check_crop', crop)
+    report = pre.preprocess(converted, out, SMALL)
+    assert [(r.folder, r.reason) for r in report.rows] == [('', pre.REASON_IO_ERROR)]
+    assert sorted(p.name for p in out.iterdir()) == ['preprocess_report.csv']
+
+
 def test_a_missing_converted_root_writes_no_output_root(tmp_path):
     with pytest.raises(OSError):
         pre.preprocess(tmp_path / 'missing', tmp_path / 'out', SMALL)
