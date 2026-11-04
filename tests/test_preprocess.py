@@ -906,3 +906,112 @@ def test_ctrl_c_still_writes_the_report_of_what_was_done(tmp_path, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         pre.preprocess(converted, out, SMALL)
     assert [(r['patient'], r['outcome']) for r in report_rows(out)] == [('SYNTHETICPTA', 'preprocessed')]
+
+
+# ---- task-03: the study series.csv validator (headers are not read; files may be empty placeholders). ----
+
+def study_row(file, modality='MR', kind='series'):
+    return {**dict.fromkeys(conv.SERIES_COLUMNS, ''), 'file': file, 'kind': kind, 'modality': modality}
+
+
+def write_study(folder, rows, *, files=None):
+    """A study folder holding series.csv for `rows` and an empty placeholder per file (default: every row's)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    conv.write_series_csv(rows, folder / conv.SERIES_NAME)
+    for name in (files if files is not None else [r['file'] for r in rows]):
+        (folder / name).write_bytes(b'')
+    return folder
+
+
+def refused_with(folder):
+    with pytest.raises(CaseRefused) as caught:
+        pre.check_study_rows(folder)
+    return str(caught.value)
+
+
+def test_check_study_rows_returns_the_valid_rows(tmp_path):
+    rows = [study_row('series_CT_1.nii.gz', 'CT'), study_row('reshape_resample_rescale_initialresample_series_MR_2.nii.gz'),
+            study_row('rescale_series_PT_3.nii.gz', 'PT')]
+    got = pre.check_study_rows(write_study(tmp_path / 'study_1', rows))
+    assert got == rows and list(got[0]) == conv.SERIES_COLUMNS
+
+
+def test_check_study_rows_reads_no_header(tmp_path, monkeypatch):
+    folder = write_study(tmp_path / 'study_1', [study_row('series_MR_1.nii.gz')])  # an empty file is no NIfTI
+    for name in ('read_info', 'read_image'):
+        monkeypatch.setattr(pre, name, lambda *a: pytest.fail('a header was read'))
+    monkeypatch.setattr(sitk, 'ReadImage', lambda *a, **k: pytest.fail('a header was read'))
+    assert len(pre.check_study_rows(folder)) == 1
+
+
+def test_series_id_is_group_five_of_a_full_match():
+    assert pre.series_id('series_MR_12.nii.gz') == 'series_MR_12'
+    assert pre.series_id('reshape_resample_rescale_initialresample_series_CT_3.nii.gz') == 'series_CT_3'
+    assert pre.series_id('resample_initialresample_series_PT_1.nii.gz') == 'series_PT_1'
+    for bad in ('series_MR_1.nii', 'xseries_MR_1.nii.gz', 'series_MR_1.nii.gz.bak', 'series_RTDOSE_1.nii.gz', 'series_MR_.nii.gz',
+                'resample_reshape_series_MR_1.nii.gz', 'rescale_rescale_series_MR_1.nii.gz', 'planning_ct.nii.gz', 'series_MR_1\n.nii.gz'):
+        assert pre.series_id(bad) is None
+
+
+@pytest.mark.parametrize('reason, make', [
+    (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_bytes(b'\xff\xfe\x00bad')),
+    (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_text('file,kind\nseries_MR_1.nii.gz,series\n', encoding='utf-8')),
+    (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_text(','.join(conv.SERIES_COLUMNS) + '\nseries_MR_1.nii.gz,series,MR' + ',' * 20 + '\n',
+                                                                       encoding='utf-8')),
+    (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_text(','.join(conv.SERIES_COLUMNS) + '\n', encoding='utf-8')),
+    (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_text('', encoding='utf-8')),
+    (pre.REASON_SERIES_CSV, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz')] * 2, f / conv.SERIES_NAME)),
+    (pre.REASON_SERIES_CSV, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz'), study_row('resample_series_MR_1.nii.gz')],
+                                                           f / conv.SERIES_NAME)),
+    (pre.REASON_KIND, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz'), study_row('series_MR_2.nii.gz', kind='ct')],
+                                                      f / conv.SERIES_NAME)),
+    (pre.REASON_KIND, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz', kind='')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_MODALITY, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz', 'RTDOSE')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_MODALITY, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz', 'mr')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_NAME, lambda f: conv.write_series_csv([study_row('planning_ct.nii.gz')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_NAME, lambda f: conv.write_series_csv([study_row('series_MR_1.nii')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_NAME, lambda f: conv.write_series_csv([study_row('../series_MR_1.nii.gz')], f / conv.SERIES_NAME)),
+    (pre.REASON_FILE_MISSING, lambda f: (f / 'series_MR_1.nii.gz').unlink()),
+    (pre.REASON_FILE_MISSING, lambda f: ((f / 'series_MR_1.nii.gz').unlink(), (f / 'series_MR_1.nii.gz').symlink_to(f / conv.SERIES_NAME))),
+    (pre.REASON_FILE_MISSING, lambda f: ((f / 'series_MR_1.nii.gz').unlink(), (f / 'series_MR_1.nii.gz').mkdir())),
+], ids=['encoding', 'columns', 'long-row', 'zero-rows', 'empty-file', 'duplicate-file', 'duplicate-id', 'kind-ct', 'kind-blank',
+        'modality-rtdose', 'modality-case', 'name-other', 'name-suffix', 'name-separator', 'missing', 'symlink', 'directory'])
+def test_check_study_rows_refuses(tmp_path, reason, make):
+    folder = write_study(tmp_path / 'study_1', [study_row('series_MR_1.nii.gz')])
+    make(folder)
+    assert refused_with(folder) == reason
+
+
+def test_study_reasons_are_distinct_fixed_strings():
+    assert pre.REASON_STUDY_MODALITY != pre.REASON_STUDY_NAME
+    assert 'case folder' in pre.REASON_FILE_MISSING and 'plan folder' not in pre.REASON_FILE_MISSING
+    assert 'the image' in pre.REASON_TOO_SMALL and 'the CT' not in pre.REASON_TOO_SMALL
+
+
+@pytest.mark.parametrize('text, expected', [
+    (','.join(conv.SERIES_COLUMNS) + '\n' + 'a,series\n' * 3, 3),  # short rows still count: the validator refuses them whole
+    (','.join(conv.SERIES_COLUMNS) + '\n', 1),
+    ('', 1),
+    ('file,kind\nseries_MR_1.nii.gz,series\nseries_MR_2.nii.gz,series\n', 2),  # wrong columns: rows are still the series
+])
+def test_study_refusal_count(tmp_path, text, expected):
+    (tmp_path / conv.SERIES_NAME).write_text(text, encoding='utf-8')
+    assert pre.study_refusal_count(tmp_path) == expected
+
+
+def test_study_refusal_count_of_an_unparseable_file_is_one(tmp_path):
+    (tmp_path / conv.SERIES_NAME).write_bytes(b'file,kind\n\xff\xfe,series\nseries_MR_2.nii.gz,series\n')
+    assert pre.study_refusal_count(tmp_path) == 1
+
+
+def test_study_refusal_count_of_a_valid_study(tmp_path):
+    rows = [study_row(f'series_MR_{k}.nii.gz') for k in (1, 2, 3, 4)]
+    assert pre.study_refusal_count(write_study(tmp_path / 'study_1', rows)) == 4
+
+
+def test_check_study_rows_logs_nothing_with_identifiers(tmp_path, caplog):
+    folder = write_study(tmp_path / 'SYNTHETICSTUDYFOLDER', [study_row('series_MR_1.nii.gz', 'RTDOSE')])
+    with caplog.at_level('DEBUG'):
+        reason = refused_with(folder)
+    assert reason == pre.REASON_STUDY_MODALITY and not caplog.records
+    assert 'SYNTHETICSTUDYFOLDER' not in reason and str(tmp_path) not in reason

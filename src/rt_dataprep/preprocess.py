@@ -23,7 +23,7 @@ import SimpleITK as sitk
 
 from rt_dataprep import convert as conv
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
-from rt_dataprep.series import DIRECTION_ATOL
+from rt_dataprep.series import DIRECTION_ATOL, IMAGE_MODALITIES
 
 log = logging.getLogger(__name__)
 
@@ -39,8 +39,10 @@ REASON_NO_CT = 'series.csv does not list exactly one ct file'
 REASON_DOSE_COUNT = 'series.csv lists more than one dose file'
 REASON_KIND = 'series.csv has a row of an unknown kind'
 REASON_SERIES_CSV = 'series.csv is malformed: columns, row length, encoding, or one file named twice'
-REASON_TOO_SMALL = 'the CT is shorter than one output voxel along an axis'
-REASON_FILE_MISSING = 'a series.csv row names a file that is not in the plan folder'
+REASON_TOO_SMALL = 'the image is shorter than one output voxel along an axis'
+REASON_FILE_MISSING = 'a series.csv row names a file that is not in the case folder'
+REASON_STUDY_MODALITY = 'a study series.csv row has a modality other than CT, MR or PT'
+REASON_STUDY_NAME = 'a study series.csv row names a file that is not a series volume'
 REASON_GRID = 'a dose or mask is not on the planning CT grid'
 REASON_CROP = 'a dose or mask would lose voxels to the final grid'
 REASON_IO_ERROR = 'file system error while reading or writing; nothing kept for this patient'
@@ -301,6 +303,59 @@ def check_rows(plan_dir):
     if any(not same_grid(ct, read_info(plan_dir / row['file'])) for row in kept if row['kind'] in ('dose', 'mask')):
         raise CaseRefused(REASON_GRID)
     return kept, ct
+
+
+STUDY_FILE = re.compile(r'(reshape_)?(resample_)?(rescale_)?(initialresample_)?(series_(CT|MR|PT)_\d+)\.nii\.gz')  # output_name's prefixes, in order
+
+
+def series_id(name):
+    """`series_<MOD>_<k>` of a study volume's file name (a full match, so no newline tail), or None when the name is not one."""
+    match = STUDY_FILE.fullmatch(name)
+    return match.group(5) if match else None
+
+
+def read_study_csv(study_dir):
+    """(rows, malformed) of a study's series.csv: malformed when unparseable, other columns, or a cell is missing or extra."""
+    malformed = False
+    with open(study_dir / conv.SERIES_NAME, newline='', encoding='utf-8') as handle:
+        try:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            malformed = reader.fieldnames != conv.SERIES_COLUMNS or any(None in row or None in row.values() for row in rows)
+        except (ValueError, csv.Error):  # UnicodeDecodeError is a ValueError
+            rows, malformed = [], True
+    return rows, malformed
+
+
+def study_refusal_count(study_dir):
+    """What a refused study counts in the manifest: its data rows, or 1 when series.csv cannot be parsed or holds no row."""
+    unparseable = False
+    with open(study_dir / conv.SERIES_NAME, newline='', encoding='utf-8') as handle:
+        try:
+            count = sum(1 for _ in csv.DictReader(handle))
+        except (ValueError, csv.Error):
+            unparseable = True
+    return 1 if unparseable or count == 0 else count
+
+
+def check_study_rows(study_dir):
+    """The series.csv rows of a study folder, every one checked here and no NIfTI header read. A failure refuses the whole study."""
+    rows, malformed = read_study_csv(study_dir)
+    if malformed or not rows or len({row['file'] for row in rows}) != len(rows):
+        raise CaseRefused(REASON_SERIES_CSV)
+    if any(row['kind'] != 'series' for row in rows):
+        raise CaseRefused(REASON_KIND)
+    if any(row['modality'] not in IMAGE_MODALITIES for row in rows):
+        raise CaseRefused(REASON_STUDY_MODALITY)
+    ids = [series_id(row['file']) for row in rows]
+    if None in ids:
+        raise CaseRefused(REASON_STUDY_NAME)
+    if len(set(ids)) != len(ids):
+        raise CaseRefused(REASON_SERIES_CSV)
+    present = {p.name for p in study_dir.iterdir() if p.is_file() and not p.is_symlink()}
+    if any(row['file'] not in present for row in rows):
+        raise CaseRefused(REASON_FILE_MISSING)
+    return rows
 
 
 def has_voxels(image):
