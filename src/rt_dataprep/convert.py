@@ -167,8 +167,11 @@ def _convert_patient(folder, out_root, exclude_models):
     blank = [ds for _, ds in misc_headers if not str(ds.get('PatientID', '')).strip()]
     misc_headers = [(p, ds) for p, ds in misc_headers if str(ds.get('PatientID', '')).strip()]  # blank id: kept, never placed (#12)
     headers = [item for found, _ in plan_headers for item in found] + misc_headers  # folder order: plan_<n> by n, then misc_files
-    # A series with a blank-id slice in misc_files is short without it: known short, like a slice-missing planning CT.
-    split = {_tag(ds, 'SeriesInstanceUID') for ds in blank} & {_tag(ds, 'SeriesInstanceUID') for _, ds in headers} - {''}
+    # A series with a blank-id slice in misc_files is short without it: known short, like a slice-missing planning CT. A blank-id
+    # copy of a slice already present (same SOPInstanceUID) takes nothing away, and a blank or whitespace UID is no series (#71).
+    present = {_tag(ds, 'SOPInstanceUID') for _, ds in headers}
+    series_of = lambda items: {u for ds in items if (u := _tag(ds, 'SeriesInstanceUID')).strip()}  # noqa: E731
+    split = series_of(ds for ds in blank if _tag(ds, 'SOPInstanceUID') not in present) & series_of(ds for _, ds in headers)
     if not plans and not ser.candidates(headers, exclude_models)[0]:
         return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_NO_PLANS)]
     # Built under a hidden name and renamed at the end: a run that dies part-way leaves no folder that a later run would

@@ -472,6 +472,16 @@ def test_a_series_split_between_blank_and_real_patient_ids_refuses_the_patient(t
     assert not (out / PID).exists()
 
 
+def test_a_blank_id_duplicate_of_a_present_slice_does_not_refuse_the_patient(tree):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    copy = mk(src / PID / 'dup') / 'ct_copy.dcm'
+    copy.write_bytes(next((src / PID / 'p').glob('ct*.dcm')).read_bytes())
+    blank_id(copy)  # the same SOPInstanceUID: takes no slice away from the series
+    organize(src, out)
+    assert rows(out)[0]['outcome'] == 'organized'
+
+
 def test_empty_sop_instance_uids_refuse_the_patient(tree):
     src, out = tree
     planning_study(src / PID / 'p')

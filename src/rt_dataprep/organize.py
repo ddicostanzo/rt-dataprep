@@ -87,8 +87,11 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
     name = sanitize_path_component(ids.pop())
     if any(not str(ds.get('SOPInstanceUID', '')).strip() for _, ds in headers):  # type 1; grouping and dedup key on it
         return PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NO_SOP_UID)
-    series_of = lambda items: {str(ds.get('SeriesInstanceUID', '')) for _, ds in items} - {''}  # noqa: E731
-    if series_of(blank) & series_of(headers):  # a series split between blank and real ids would be placed short
+    # A blank or whitespace UID is no series, and a blank-id copy of a slice already present takes nothing away (#71).
+    series_of = lambda items: {u for _, ds in items if (u := str(ds.get('SeriesInstanceUID', ''))).strip()}  # noqa: E731
+    present = {str(ds.SOPInstanceUID) for _, ds in headers}
+    extra = [(path, ds) for path, ds in blank if str(ds.get('SOPInstanceUID', '')) not in present]
+    if series_of(extra) & series_of(headers):  # a series split between blank and real ids would be placed short
         return PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_SPLIT_SERIES)
     if name.casefold() in claimed:  # two folders, one output name: refuse, never merge
         return PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NAME_CLAIMED)

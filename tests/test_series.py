@@ -1295,6 +1295,17 @@ def test_a_misc_series_with_a_blank_patient_id_slice_is_skipped_not_written_shor
     assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1
 
 
+def test_a_blank_id_duplicate_of_a_present_slice_does_not_skip_its_series(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    mr = put(org / PID / 'misc_files', prefix='a')
+    ds = pydicom.dcmread(mr['paths'][-1])
+    ds.PatientID = ''  # same SOPInstanceUID as the real-id slice: a copy, the series is whole
+    ds.save_as(Path(mr['paths'][-1]).with_name('copy.dcm'))
+    conv.convert(org, out)
+    assert images_uids(out) == {mr['series_uid']}
+
+
 def test_a_plan_whose_planning_ct_end_slice_sits_in_misc_with_a_blank_id_is_refused(tree):
     org, out = tree
     plan = make_plan(org / PID / 'plan_1')
