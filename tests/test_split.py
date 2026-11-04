@@ -178,6 +178,22 @@ def test_the_write_is_atomic_a_failed_replace_leaves_no_splits_json_and_no_temp_
     assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv', 'splits.json']
 
 
+def test_without_hard_links_a_ctrl_c_during_the_replace_leaves_no_splits_json(tmp_path, monkeypatch):
+    path = write_manifest(tmp_path, TEN)
+
+    def unsupported(*args):
+        raise PermissionError('SYNTHETIC_PATH')
+
+    def interrupt(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, 'link', unsupported)
+    monkeypatch.setattr(os, 'replace', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv']  # no empty reservation blocks a rerun
+
+
 def test_a_concurrent_run_that_writes_first_wins_and_this_one_is_refused(tmp_path, monkeypatch):
     path = write_manifest(tmp_path, TEN)
     other = '{"SYNTHETIC_OTHER_RUN": 1}\n'

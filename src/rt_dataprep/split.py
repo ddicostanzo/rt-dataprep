@@ -67,10 +67,12 @@ def _write_new(path, text):
                 else:
                     try:
                         os.replace(temp, path)
-                    except OSError:  # names the path
-                        failed = True
+                    except BaseException as exc:  # Ctrl-C too
                         with contextlib.suppress(OSError):
                             path.unlink()  # this run holds the reservation: no empty splits.json may block later runs
+                        if not isinstance(exc, OSError):  # an OSError names the path: REASON_WRITE below
+                            raise
+                        failed = True
         except OSError:  # names the path
             failed = True
     finally:
