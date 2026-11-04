@@ -237,6 +237,7 @@ def test_split_and_manifest_import_no_pandas_sklearn_and_split_no_numpy(module):
 @pytest.mark.parametrize('body', [
     'SYNTHETIC_P00/plan_1\n',  # a short row: patient reads None
     'SYNTHETIC_P00/plan_1,\n',  # an empty patient
+    'SYNTHETIC_P00/plan_1,  \n',  # a whitespace-only patient
     'SYNTHETIC_P00/plan_1,SYNTHETIC_\xe9\n',  # not UTF-8 once written as latin-1
 ])
 def test_a_malformed_row_or_a_non_utf8_manifest_is_refused(tmp_path, capfd, body):
@@ -261,3 +262,10 @@ def test_two_writes_in_one_process_use_different_temp_names(tmp_path, monkeypatc
     for folder in ('a', 'b'):
         run(write_manifest(tmp_path / folder, TEN))
     assert len(set(names)) == 2
+
+
+def test_a_manifest_with_a_utf8_bom_is_read(tmp_path):
+    path = write_manifest(tmp_path, TEN)
+    path.write_bytes(b'\xef\xbb\xbf' + path.read_bytes())
+    obj = run(path)
+    assert sum(len(obj[name]) for name in ('train', 'val', 'test')) == len(TEN)

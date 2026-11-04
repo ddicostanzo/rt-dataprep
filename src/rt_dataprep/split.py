@@ -32,14 +32,14 @@ REASON_ROWS = 'a manifest is not UTF-8 or has a row without a patient or case_di
 
 def _read(manifest_path):
     rows, fields = None, set()
-    with open(manifest_path, newline='', encoding='utf-8') as handle:
+    with open(manifest_path, newline='', encoding='utf-8-sig') as handle:  # -sig: a BOM, as Excel saves it, is not a header
         try:
             reader = csv.DictReader(handle)
             fields = set(reader.fieldnames or ())
             rows = list(reader) if {'patient', 'case_dir'} <= fields else []
         except UnicodeDecodeError:  # a ValueError whose text quotes bytes of the file: refused below, nothing chained (#78)
             pass
-    if rows is None or any(not row.get('patient') or not row.get('case_dir') for row in rows):  # a short row reads None
+    if rows is None or any(not (row.get(k) or '').strip() for row in rows for k in ('patient', 'case_dir')):  # short row: None
         raise ValueError(REASON_ROWS)
     if not {'patient', 'case_dir'} <= fields:
         raise ValueError(REASON_COLUMNS)
