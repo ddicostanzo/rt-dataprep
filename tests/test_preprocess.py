@@ -378,7 +378,8 @@ def test_rescale_only_renames_the_ct_and_copies_dose_and_masks_byte_equal(tmp_pa
 def test_series_csv_keeps_every_column_renames_files_and_drops_series_rows(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     folder, rows = write_plan(converted)
-    series = series_row('series_MR_1.nii.gz', 'series', modality='MR')  # its file is not in the folder: series rows are not read
+    sitk.WriteImage(make_image(np.ones((4, 4, 4))), str(folder / 'series_MR_1.nii.gz'))  # present, as check_rows now requires (task-02)
+    series = series_row('series_MR_1.nii.gz', 'series', modality='MR')
     save_rows(folder, [*rows[:2], series, *rows[2:]])
     pre.preprocess(converted, out, SMALL)
     with open(out / 'SYNTHETICPTA' / 'plan_1' / 'series.csv', newline='') as handle:
@@ -386,6 +387,60 @@ def test_series_csv_keeps_every_column_renames_files_and_drops_series_rows(tmp_p
     names = [CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt']
     assert [r['file'] for r in written] == names
     assert [{k: v for k, v in r.items() if k != 'file'} for r in written] == [{k: v for k, v in r.items() if k != 'file'} for r in rows]
+
+
+def add_series(folder, rows, file='series_MR_1.nii.gz', modality='MR', write=True, **extra):
+    """Append a kind=series row (and a small image file, unless write is False) to a write_plan plan; returns the row."""
+    if write:
+        sitk.WriteImage(make_image(np.ones((4, 4, 4))), str(folder / file))
+    row = series_row(file, 'series', modality=modality, reg_matrix='identity', **extra)
+    save_rows(folder, [*rows, row])
+    return row
+
+
+def test_check_rows_returns_kept_ct_and_the_series_rows_in_input_order(tmp_path):
+    folder, rows = write_plan(tmp_path)
+    for k in (2, 1):  # not sorted: input order must survive
+        rows = [*rows, add_series(folder, rows, f'series_MR_{k}.nii.gz')]
+    kept, ct, series = pre.check_rows(folder)
+    assert [r['file'] for r in kept] == [conv.CT_NAME, conv.DOSE_NAME, 'ptv.nii.gz', 'bladder.nii.gz', 'applicator_a.txt']
+    assert [r['file'] for r in series] == ['series_MR_2.nii.gz', 'series_MR_1.nii.gz'] and all(r['kind'] == 'series' for r in series)
+    assert ct[0] == (12, 12, 12)
+
+
+def test_a_series_row_naming_a_missing_file_refuses_with_file_missing(tmp_path):
+    refuse(tmp_path, pre.REASON_FILE_MISSING, lambda folder, rows: add_series(folder, rows, write=False))
+
+
+@pytest.mark.parametrize('file, modality, reason', [
+    ('series_MR_1.nii.gz', 'RTDOSE', pre.REASON_STUDY_MODALITY),
+    ('series_MR_1.nii.gz', 'mr', pre.REASON_STUDY_MODALITY),
+    ('series_MR_1.nii.gz', '', pre.REASON_STUDY_MODALITY),
+    ('series_CT_1.nii.gz', 'MR', pre.REASON_STUDY_MODALITY),  # the name carries a different MOD than the modality column
+    ('mr_image.nii.gz', 'MR', pre.REASON_STUDY_NAME),
+    ('series_MR_1.nii', 'MR', pre.REASON_STUDY_NAME),
+    ('../series_MR_1.nii.gz', 'MR', pre.REASON_STUDY_NAME),
+])
+def test_a_bad_series_row_refuses_the_plan(tmp_path, file, modality, reason):
+    refuse(tmp_path, reason, lambda folder, rows: add_series(folder, rows, file, modality, write=False))
+
+
+def test_a_series_file_with_step_prefixes_passes_check_rows(tmp_path):
+    folder, rows = write_plan(tmp_path)
+    add_series(folder, rows, 'reshape_resample_initialresample_series_MR_1.nii.gz')
+    assert [r['file'] for r in pre.check_rows(folder)[2]] == ['reshape_resample_initialresample_series_MR_1.nii.gz']
+
+
+def test_check_rows_reads_no_series_header(tmp_path):
+    folder, rows = write_plan(tmp_path)
+    add_series(folder, rows, write=False)
+    (folder / 'series_MR_1.nii.gz').write_bytes(b'SYNTHETIC not a nifti')
+    assert len(pre.check_rows(folder)[2]) == 1
+
+
+def test_the_study_reasons_say_a_series_csv_series_row():
+    for reason in (pre.REASON_STUDY_MODALITY, pre.REASON_STUDY_NAME):
+        assert 'series.csv series row' in reason and 'study' not in reason
 
 
 def test_a_plan_without_a_dose_writes_no_dose(tmp_path):

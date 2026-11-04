@@ -61,7 +61,7 @@ def manifest(root):
     for patient in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith('.')):
         for plan in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(conv.PLAN_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()):
             try:
-                kept, ct = check_rows(plan)
+                kept, ct, _ = check_rows(plan)
             except (CaseRefused, OSError):  # an unreadable series.csv is one refused plan, not the end of the run (#74)
                 refused += 1
                 continue

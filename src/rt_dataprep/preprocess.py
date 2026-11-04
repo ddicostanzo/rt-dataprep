@@ -43,8 +43,8 @@ REASON_KIND = 'series.csv has a row of an unknown kind'
 REASON_SERIES_CSV = 'series.csv is malformed: columns, row length, encoding, or one file named twice'
 REASON_TOO_SMALL = 'the image is shorter than one output voxel along an axis'
 REASON_FILE_MISSING = 'a series.csv row names a file that is not in the case folder'
-REASON_STUDY_MODALITY = 'a study series.csv row has a modality other than CT, MR or PT, or one that differs from its file name'
-REASON_STUDY_NAME = 'a study series.csv row names a file that is not a series volume'
+REASON_STUDY_MODALITY = 'a series.csv series row has a modality other than CT, MR or PT, or one that differs from its file name'
+REASON_STUDY_NAME = 'a series.csv series row names a file that is not a series volume'
 REASON_GRID = 'a dose or mask is not on the planning CT grid'
 REASON_CROP = 'a dose or mask would lose voxels to the final grid'
 REASON_IO_ERROR = 'file system error while reading or writing; nothing kept for this patient'
@@ -332,27 +332,35 @@ def same_grid(a, b):
 
 
 def check_rows(plan_dir):
-    """(kept series.csv rows, ct first; the CT's read_info). Every row is checked here, headers only, before the plan's first write."""
+    """(kept rows, ct first; the CT's read_info; the kind=series rows in input order). Every row is checked here, the CT and dose/mask headers only, before the plan's first write."""
     rows, malformed = read_series_csv(plan_dir)
     if malformed:  # raised here, after the except block: nothing chained
         raise CaseRefused(REASON_SERIES_CSV)
     if any(row['kind'] not in (*KINDS, 'series') for row in rows):
         raise CaseRefused(REASON_KIND)
     kept = [row for row in rows if row['kind'] != 'series']
+    series = [row for row in rows if row['kind'] == 'series']
     if sum(row['kind'] == 'ct' for row in kept) != 1:
         raise CaseRefused(REASON_NO_CT)
     if sum(row['kind'] == 'dose' for row in kept) > 1:
         raise CaseRefused(REASON_DOSE_COUNT)
     if len({row['file'] for row in rows}) != len(rows):  # after the counts: two ct or dose rows are refused as such
         raise CaseRefused(REASON_SERIES_CSV)
+    if any(row['modality'] not in IMAGE_MODALITIES for row in series):
+        raise CaseRefused(REASON_STUDY_MODALITY)
+    ids = [series_id(row['file']) for row in series]
+    if None in ids:
+        raise CaseRefused(REASON_STUDY_NAME)
+    if any(i.split('_')[1] != row['modality'] for i, row in zip(ids, series, strict=True)):
+        raise CaseRefused(REASON_STUDY_MODALITY)
     present = {p.name for p in plan_dir.iterdir() if p.is_file() and not p.is_symlink()}  # a value with a separator or '..' is never in it
-    if any(row['file'] not in present for row in kept):
+    if any(row['file'] not in present for row in (*kept, *series)):
         raise CaseRefused(REASON_FILE_MISSING)
     kept.sort(key=lambda row: row['kind'] != 'ct')
     ct = read_info(plan_dir / kept[0]['file'])
     if any(not same_grid(ct, read_info(plan_dir / row['file'])) for row in kept if row['kind'] in ('dose', 'mask')):
         raise CaseRefused(REASON_GRID)
-    return kept, ct
+    return kept, ct, series
 
 
 STUDY_FILE = re.compile(r'(reshape_)?(resample_)?(rescale_)?(initialresample_)?(series_(CT|MR|PT)_[0-9]+)\.nii\.gz')  # output_name's prefixes, in order
@@ -427,7 +435,7 @@ def check_crop(native, final):
 
 def preprocess_plan(plan_dir, out_dir, steps):
     """Write the plan into `out_dir` (which must not exist); returns the output file names, series.csv last. CaseRefused on a refusal."""
-    kept, ct = check_rows(plan_dir)
+    kept, ct, _ = check_rows(plan_dir)
     if too_small(ct, steps):
         raise CaseRefused(REASON_TOO_SMALL)
     geometric = steps.resample or steps.harmonize_spacing or steps.reshape

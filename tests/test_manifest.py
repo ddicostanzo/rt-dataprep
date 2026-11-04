@@ -8,7 +8,7 @@ import shutil
 import numpy as np
 import pytest
 from test_convert import BOX, PID, dose_spec, make_plan
-from test_preprocess import SMALL, box, save_rows, state, write_plan
+from test_preprocess import SMALL, box, save_rows, series_row, state, write_plan
 from test_series import STUDY_D1, STUDY_D2, STUDY_T1, STUDY_T2, put
 
 from rt_dataprep import convert as conv
@@ -121,6 +121,15 @@ def test_a_semicolon_roi_name_and_float32_spacing_read_back_exactly(tmp_path):
     man.manifest(root)
     row = read(root)[0]
     assert (json.loads(row['masks']), row['ct_spacing']) == (['ptv;boost'], '0.8;0.8;0.8')
+
+
+def test_a_plan_whose_series_row_names_a_missing_file_is_counted_refused(tmp_path):
+    root = tree(tmp_path / 'converted')
+    path = plan(root, 'SYNTHETICPTC', 'plan_1', 'C1')
+    rows = pre.read_series_csv(path)[0]
+    save_rows(path, [*rows, series_row('series_MR_1.nii.gz', 'series', modality='MR', reg_matrix='identity')])  # no such file
+    assert man.manifest(root) == (3, 1)
+    assert 'SYNTHETICPTC' not in {r['patient'] for r in read(root)}
 
 
 def test_an_unreadable_series_csv_is_one_refused_plan_not_the_end_of_the_run(tmp_path, monkeypatch):

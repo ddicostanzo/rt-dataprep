@@ -28,3 +28,13 @@ Append under `## <task-id>`: files changed, decisions, gotchas, and every change
 - Gotcha: float() accepts 'nan', 'inf' and '1_0'; the finite check in `_is_rigid` catches nan and inf, and '1_0' is read as 10 (harmless: convert writes only '%.10g').
 - Existing tests changed: none (12 tests added at the end of tests/test_series.py).
 - Red evidence: with src reverted, the 12 new tests failed (AttributeError on reg_matrix_array / _is_rigid); 167 existing passed.
+
+## task-02
+- Files: src/rt_dataprep/preprocess.py, src/rt_dataprep/manifest.py, tests/test_preprocess.py, tests/test_manifest.py.
+- `check_rows` returns `(kept, ct, series)`; `series` is the kind=series rows in input order. Checks, in this order after the duplicate-file check: modality in CT/MR/PT (REASON_STUDY_MODALITY), `series_id(file)` not None (REASON_STUDY_NAME), the MOD inside the stripped id equals the modality (REASON_STUDY_MODALITY), then every kept and series file present (REASON_FILE_MISSING). No series header is read.
+- `preprocess_plan` and `manifest` unpack `(kept, ct, _)`; series rows are still dropped from the output.
+- REASON_STUDY_MODALITY / REASON_STUDY_NAME reworded to "a series.csv series row ..." (names unchanged; no digits, so the reasons test holds).
+- Gotcha: a series row named like the CT file (planning_ct.nii.gz) is a duplicate file and gives REASON_SERIES_CSV before the name check; tests use a distinct bad name.
+- Gotcha: step-prefix names (reshape_resample_initialresample_series_MR_1.nii.gz) pass because `series_id` strips them; the MOD check runs on the stripped id.
+- Existing tests changed: `test_series_csv_keeps_every_column_renames_files_and_drops_series_rows` (tests/test_preprocess.py): it now writes a small series_MR_1.nii.gz first, because its series file was missing and check_rows now refuses that; its assertions are unchanged. No other existing test changed (test_manifest.py's monkeypatched `check_rows` wrapper passes the tuple through, so it needed no edit).
+- New tests: 12 in tests/test_preprocess.py (check_rows shape and order, missing file, 7 bad-row cases, step prefixes, no header read, reworded reasons) and 1 in tests/test_manifest.py (missing series file counted refused). Red evidence: with src reverted 13 failed (shape, refusals, wording), 162 passed.
