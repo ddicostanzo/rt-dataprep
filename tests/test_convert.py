@@ -286,7 +286,7 @@ def test_two_ct_series_the_rtstruct_reference_is_planning_ct(tree):
     row = row_of(conv.convert(org, out).rows)
     assert row.outcome == conv.OUTCOME_CONVERTED
     np.testing.assert_array_equal(arr(out / PID / 'plan_1' / 'planning_ct.nii.gz'), plan['values'].astype(np.float32))
-    assert sorted(p.name for p in (out / PID).iterdir()) == ['plan_1']  # the other series is not written in this PR
+    assert sorted(p.name for p in (out / PID).iterdir()) == ['images', 'plan_1']  # the other CT goes to images/ (A2.4b)
 
 
 def test_a2_8_missing_rtstruct_refuses_and_leaves_nothing(tree):
@@ -298,7 +298,7 @@ def test_a2_8_missing_rtstruct_refuses_and_leaves_nothing(tree):
     assert (row.outcome, row.reason) == (conv.OUTCOME_REFUSED, conv.REASON_NO_STRUCT)
     assert not (out / PID / 'plan_1').exists()
     assert sorted(p.name for p in out.iterdir()) == [PID, conv.REPORT_NAME]  # no partial, no temp
-    assert list((out / PID).iterdir()) == []
+    assert [p.name for p in (out / PID).iterdir()] == ['images']  # the refused plan's CT
     with open(out / conv.REPORT_NAME, newline='') as handle:
         assert next(r for r in csv.DictReader(handle) if r['folder'] == 'plan_1')['reason'] == conv.REASON_NO_STRUCT
 
@@ -340,7 +340,7 @@ def test_header_missing_a_tag_the_path_reads_refuses_that_plan_and_the_run_conti
     rows = conv.convert(org, out).rows
     assert (row_of(rows, 'plan_1').outcome, row_of(rows, 'plan_1').reason) == (conv.OUTCOME_REFUSED, conv.REASON_MISSING_TAG)
     assert row_of(rows, 'plan_2').outcome == conv.OUTCOME_CONVERTED
-    assert sorted(p.name for p in (out / PID).iterdir()) == ['plan_2']
+    assert sorted(p.name for p in (out / PID).iterdir()) == (['images', 'plan_2'] if what == 'plan_struct_reference' else ['plan_2'])
 
 
 # ---------------------------------------------------------------- layout, atomicity, report
@@ -351,8 +351,9 @@ def test_refused_plan_leaves_no_folder_while_the_other_plans_are_written(tree):
     make_plan(org / PID / 'plan_2', doses=[dose_spec(1, 'PLAN'), dose_spec(2, 'PLAN')])
     make_plan(org / PID / 'plan_3')
     rows = conv.convert(org, out).rows
-    assert [(r.folder, r.outcome) for r in rows] == [('plan_1', 'converted'), ('plan_2', 'refused'), ('plan_3', 'converted')]
-    assert sorted(p.name for p in (out / PID).iterdir()) == ['plan_1', 'plan_3']
+    assert [(r.folder, r.outcome) for r in rows] == [('plan_1', 'converted'), ('plan_2', 'refused'), ('plan_3', 'converted'),
+                                                      ('images', 'converted')]  # the refused plan's CT
+    assert sorted(p.name for p in (out / PID).iterdir()) == ['images', 'plan_1', 'plan_3']
     assert [p.name for p in out.iterdir() if p.name.startswith('.')] == []
 
 
@@ -368,15 +369,15 @@ def test_patient_whose_plans_are_all_refused_is_renamed_into_place(tree):
     for n in (1, 2):
         make_plan(org / PID / f'plan_{n}', doses=[dose_spec(1, 'BRACHY')])
     rows = conv.convert(org, out).rows
-    assert [(r.folder, r.outcome) for r in rows] == [('plan_1', 'refused'), ('plan_2', 'refused')]
-    assert (out / PID).is_dir() and list((out / PID).iterdir()) == []
+    assert [(r.folder, r.outcome) for r in rows] == [('plan_1', 'refused'), ('plan_2', 'refused'), ('images', 'converted')]
+    assert (out / PID).is_dir() and sorted(p.name for p in (out / PID).iterdir()) == ['images']  # only the refused plans' CTs
 
 
 def test_patient_without_plan_folders_is_skipped_with_no_output_folder(tree):
     org, out = tree
     misc = org / PID / 'misc_files'
     misc.mkdir(parents=True)
-    sd.write_ct_series(misc, np.zeros(SHAPE), patient_id=PID)
+    sd.write_ct_series(misc, np.zeros(SHAPE), patient_id=PID, image_type=['ORIGINAL', 'PRIMARY', 'LOCALIZER'])  # not a candidate
     rows = conv.convert(org, out).rows
     assert [(r.patient, r.folder, r.outcome, r.reason) for r in rows] == [(PID, '', 'skipped', conv.REASON_NO_PLANS)]
     assert not (out / PID).exists()
@@ -674,7 +675,7 @@ def test_a2_10_no_output_channel_or_exception_carries_the_patient_id_the_path_or
     rows = conv.convert(org, out).rows
     with pytest.raises(CaseRefused) as caught:
         run_plan(plan['folder'], tmp_path / 'case')
-    assert [(r.outcome, r.reason) for r in rows] == [(conv.OUTCOME_REFUSED, reason)] and str(caught.value) == reason
+    assert [(r.outcome, r.reason) for r in rows if r.folder == 'plan_1'] == [(conv.OUTCOME_REFUSED, reason)] and str(caught.value) == reason
     assert chain(caught.value) == [caught.value]
     captured = capfd.readouterr()
     texts = [captured.out, captured.err, caplog.text, *(r.getMessage() for r in caplog.records),
@@ -705,7 +706,7 @@ def test_a2_11_the_organized_tree_keeps_its_hashes_and_a_rerun_skips_every_patie
     make_plan(org / 'SYNTHETICPTB' / 'plan_1', contour_images=False, patient='SYNTHETICPTB')  # refused: still has its outcome
     before = tree_hashes(org)
     first = conv.convert(org, out).rows
-    assert sorted((r.patient, r.outcome) for r in first) == [(PID, 'converted'), ('SYNTHETICPTB', 'refused')]
+    assert sorted((r.patient, r.outcome) for r in first if r.folder == 'plan_1') == [(PID, 'converted'), ('SYNTHETICPTB', 'refused')]
     assert tree_hashes(org) == before
     after_first = tree_hashes(out)
     rows = conv.convert(org, out).rows

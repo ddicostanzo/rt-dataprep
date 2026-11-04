@@ -7,8 +7,11 @@ reads the pixels and sets origin, spacing and direction from those headers. Both
 logs or raises text that holds a path, UID, date or description.
 
 registration(ct_frame, series_frame, regs, headers_by_sop) says whether a series is registered to the planning CT and
-gives its reg_matrix text (series frame -> CT frame).
+gives its reg_matrix text (series frame -> CT frame). candidates(headers, exclude_models) picks the series and REGs of a
+patient from its headers.
 """
+from collections import defaultdict
+
 import numpy as np
 import SimpleITK as sitk
 
@@ -203,3 +206,44 @@ def registration(ct_frame, series_frame, regs, headers_by_sop):
         if text is not None:
             return True, text
     return False, ''
+
+
+IMAGE_MODALITIES = ('CT', 'MR', 'PT')
+
+
+def _study(ds):
+    return str(ds.get('StudyInstanceUID', ''))
+
+
+def _is_candidate_file(ds):
+    return (ds.get('Modality') in IMAGE_MODALITIES and bool(ds.get('SeriesInstanceUID')) and 'LOCALIZER' not in ds.get('ImageType', []))
+
+
+def candidates(headers, exclude_models):
+    """
+    (series, regs, headers_by_sop) of one patient. `headers`: [(path, Dataset)] of every readable file, in folder order
+    (plan_<n> by numeric n, then misc_files/). Copies of one SOP are reduced to the first path.
+    series: [(SeriesInstanceUID, [(path, header)])] of the CT/MR/PT series, first-seen order; localizer files are dropped one
+    by one, files without a SeriesInstanceUID are dropped, and so is every file of a study that holds a file whose
+    ManufacturerModelName contains an excluded model (case-sensitive substring) or that has no StudyInstanceUID.
+    regs: the REG headers outside those studies. headers_by_sop: {SOPInstanceUID: header} of all files, excluded studies and
+    localizers included. The caller still removes the planning CTs of converted plans from `series`.
+    """
+    excluded = {_study(ds) for _, ds in headers if any(m in str(ds.get('ManufacturerModelName', '')) for m in exclude_models)}
+    excluded.add('')
+    unique, seen = [], set()
+    for path, ds in headers:
+        sop = str(ds.get('SOPInstanceUID', ''))
+        if sop and sop in seen:
+            continue
+        seen.add(sop)
+        unique.append((path, ds))
+    series = defaultdict(list)
+    for path, ds in unique:
+        if _study(ds) not in excluded and _header_call(_is_candidate_file, ds):
+            series[str(ds.SeriesInstanceUID)].append((path, ds))
+    regs = [ds for _, ds in unique if ds.get('Modality') == 'REG' and _study(ds) not in excluded]
+    by_sop = {}
+    for _, ds in headers:
+        by_sop.setdefault(str(ds.get('SOPInstanceUID', '')), ds)
+    return list(series.items()), regs, by_sop

@@ -131,3 +131,35 @@ reached reg_matrix; now refused (isfinite), with nan/inf B3 cases. WARNING (defe
 "found or [...]" vs "found + [...]" mutation survives; the excluded-study and SOP-dedup filtering of REGs is the
 caller's job (task-06 must test a REG in an excluded study). NOTE: tolerance constants not pinned at boundary;
 frame_none test label overstates; %.10g may print -0.
+
+## task-06
+- Files: convert.py, series.py, tests/test_series.py (19 tests appended), and tests/test_convert.py (outside the declared files, see below), this file.
+- series.py: one new public function `candidates(headers, exclude_models) -> (series, regs, headers_by_sop)`. `headers` = the patient's
+  `[(path, ds)]` in folder order (plan_<n> numeric, then misc_files/). Excluded studies are computed over all files (organize's rule,
+  mirrored: substring of `ManufacturerModelName`, no-StudyInstanceUID file excluded); SOP copies reduced to the first path; localizer
+  files dropped one by one for any modality; no SeriesInstanceUID/Modality dropped; `regs` deduplicated and outside excluded studies;
+  `headers_by_sop` from every file (first copy wins). It does NOT subtract planning CTs: only the caller knows the converted plans.
+- convert.py placement (`_place_series`, called in `_convert_patient` after every plan has its outcome, before the series.csv writes):
+  planning CTs of converted plans removed; `check_volume` on each candidate (None = skipped, counted once); survivors sorted by
+  (SeriesDate, SeriesTime, SeriesInstanceUID) of the first sorted slice; then in that order each is registered per converted plan
+  (`registration`), read once (`read_series`, None = skipped, takes no k), and written to each destination right away (one image in
+  memory at a time). k is a per-(folder, modality) counter bumped only on a write, so there is no gap. Files and rows are sorted
+  (CT, MR, PT, k) after the loop and go before `series.csv`. The CT frame and the plan columns come from `result.series_rows[0]` (the CT row).
+- Plan-less patients: misc_files/ is read; no plans and no candidate -> the PR 1 REASON_NO_PLANS row (no folder); otherwise the patient
+  is converted with an images row only (all candidates failing leaves an empty folder, rerun skips it).
+- Images row: `images` folder, converted with files ending series.csv when images/ was written, else skipped with the new
+  REASON_NO_IMAGES; `skipped_series` counts the patient's skipped series once. Summary log:
+  `convert: N plan rows (c converted, r refused, s skipped), N images rows, N patient rows (r refused, s skipped)`.
+- convert.py calls `ser.read_series` etc. through the module (`from rt_dataprep import series as ser`), so a test can patch them;
+  `DIRECTION_ATOL` is imported from series.py (the convert.py definition is gone). No try/except in placement.
+- DEVIATION (needed, same precedent as task-05): eight tests (nine cases) in tests/test_convert.py asserted PR 1 behaviour that this task changes
+  by design (a refused plan's CT, or a second CT in a plan folder, now lands in images/ with an images row; a CT in misc_files/ makes
+  a plan-less patient convert). Restated, assertions only: test_two_ct_series_the_rtstruct_reference_is_planning_ct,
+  test_a2_8_missing_rtstruct_refuses_and_leaves_nothing, test_header_missing_a_tag_the_path_reads_refuses_that_plan_and_the_run_continues,
+  test_refused_plan_leaves_no_folder_while_the_other_plans_are_written, test_patient_whose_plans_are_all_refused_is_renamed_into_place,
+  test_patient_without_plan_folders_is_skipped_with_no_output_folder (its misc CT is now a localizer, i.e. not a candidate),
+  test_a2_10_no_output_channel_or_exception_carries_the_patient_id_the_path_or_a_uid, test_a2_11_the_organized_tree_keeps_its_hashes_and_a_rerun_skips_every_patient.
+- Gotchas: `write_ct_series(study_uid='')` gives a fresh study (the `or`), so a file with no study is made by deleting the tag after writing.
+  A refused plan whose CT lost an end slice to an unreadable file still passes check_volume and goes to images/ one slice short
+  (deferred: hardening). The reg-copy test needs copies that differ (first copy does not qualify), else dedup is unobservable.
+  Mutation-checked: no SOP dedup, no REG excluded-study filter, a k gap after a failed read, and no localizer filter each fail a test.
