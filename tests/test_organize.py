@@ -563,6 +563,7 @@ TIMING = re.compile(r'organize: (\d+\.\d) s total, (\d+\.\d) s reading, (\d+\.\d
 def test_one_timing_line_per_run_with_only_numbers_and_fixed_words(tree, caplog, monkeypatch):
     src, out = tree
     planning_study(src / PID / 'a')  # 3 CT + struct + plan + dose = 6 files
+    (src / PID / 'notes.txt').write_text('SYNTHETIC_ not dicom')  # walked, not in any plan: 7 files
     planning_study(src / 'SYNTHETIC_SECOND' / 'a', pid='SYNTHETIC_SECOND')
     real = getattr(org, '_has_preamble')  # noqa: B009
 
@@ -576,7 +577,7 @@ def test_one_timing_line_per_run_with_only_numbers_and_fixed_words(tree, caplog,
         organize(src, out, workers=2)
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith('organize:') and ' s total' in r.getMessage()]
     assert len(lines) == 1 and TIMING.fullmatch(lines[0])
-    assert TIMING.fullmatch(lines[0]).group(4, 5) == ('6', '2')  # the refused patient adds no files
+    assert TIMING.fullmatch(lines[0]).group(4, 5) == ('7', '2')  # every walked file counts; the refused patient adds none
     assert 'SYNTHETIC' not in lines[0] and '/' not in lines[0]
 
 

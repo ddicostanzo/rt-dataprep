@@ -85,8 +85,8 @@ def _organize_patient(folder, out_root, claimed, exclude_models, workers):
     headers = [(path, ds) for path, ds in results if ds is not None]
     bad = [path for path, ds in results if ds is None]  # has the preamble but the read fails; copied to misc_files (#13)
     unreadable = len(bad)
-    reading = time.monotonic() - started
-    done = lambda row, copy_s=0.0: (row, reading, copy_s, len(paths))  # noqa: E731
+    reading, walked = time.monotonic() - started, len(paths)  # `paths` is rebound by the copy loop below
+    done = lambda row, copy_s=0.0: (row, reading, copy_s, walked)  # noqa: E731
     # A file with a blank PatientID is the folder's but never placed in a plan: it is copied to misc_files (#12).
     blank = [(path, ds) for path, ds in headers if not str(ds.get('PatientID', '')).strip()]
     headers = [(path, ds) for path, ds in headers if str(ds.get('PatientID', '')).strip()]
