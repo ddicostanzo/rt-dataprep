@@ -298,3 +298,33 @@ def test_a1_8_rtstruct_in_another_study_goes_to_the_plan_folder(tree):
     assert [(r.plans, r.misc) for r in report.rows] == [(1, 0)]
     assert not (out / PID / 'misc_files').exists()
     assert modalities(out / PID / 'plan_1') == Counter(CT=3, RTSTRUCT=1, RTPLAN=1, RTDOSE=1)
+
+
+def test_a_file_without_sop_instance_uid_is_unreadable_not_fatal(tree):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    path = next((src / PID / 'p').glob('ct*.dcm'))
+    ds = pydicom.dcmread(path)
+    del ds.SOPInstanceUID
+    ds.save_as(path)
+    organize(src, out)
+    assert rows(out)[0]['outcome'] == 'organized' and rows(out)[0]['unreadable_count'] == '1'
+
+
+def test_one_rtplan_in_two_sub_folders_gives_one_plan_folder(tree):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    (src / PID / 'b').mkdir()
+    (src / PID / 'b' / 'plan.dcm').write_bytes((src / PID / 'a' / 'plan.dcm').read_bytes())
+    organize(src, out)
+    assert sorted(p.name for p in (out / PID).iterdir()) == ['misc_files', 'plan_1']
+    assert modalities(out / PID / 'misc_files') == Counter(RTPLAN=1)
+
+
+def test_an_out_root_inside_the_source_root_is_refused_before_any_write(tree):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    before = snapshot(src)
+    with pytest.raises(ValueError, match=org.REASON_OUTSIDE_SRC):
+        organize(src, src / 'out')
+    assert snapshot(src) == before and not (src / 'out').exists()

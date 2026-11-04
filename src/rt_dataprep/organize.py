@@ -23,6 +23,7 @@ REASON_MIXED_IDS = 'source folder holds more than one PatientID'
 REASON_NO_DICOM = 'source folder holds no readable DICOM file'
 REASON_OUTSIDE_ROOT = 'output folder resolves outside the output root'
 REASON_IO_ERROR = 'file system error while reading or copying; nothing kept for this patient'
+REASON_OUTSIDE_SRC = 'output root is the source root or inside it'
 
 
 @dataclass
@@ -42,6 +43,8 @@ class OrganizeReport:
 
 def organize(src_root, out_root, *, exclude_models=('Acuity',)):
     src_root, out_root = Path(src_root), Path(out_root)
+    if out_root.resolve().is_relative_to(src_root.resolve()):  # before any mkdir: it would be walked as a patient folder
+        raise ValueError(REASON_OUTSIDE_SRC)
     out_root.mkdir(parents=True, exist_ok=True)
     claimed = set()  # casefolded output names taken in this run: a case-insensitive filesystem would merge them
     rows = []
@@ -65,9 +68,14 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
     headers, unreadable = [], 0
     for path in sorted(folder.rglob('*.dcm')):
         try:
-            headers.append((path, read_header(path)))
+            ds = read_header(path)
         except OSError:
             unreadable += 1
+            continue
+        if 'SOPInstanceUID' not in ds:  # type 1, and every grouping step keys on it
+            unreadable += 1
+            continue
+        headers.append((path, ds))
     ids = {str(ds.get('PatientID', '')) for _, ds in headers}
     if len(ids) != 1:  # never pick one of several ids: that would file one patient's data under another
         reason = REASON_MIXED_IDS if ids else REASON_NO_DICOM
@@ -138,11 +146,12 @@ def _group(headers, exclude_models):
     # shortcut: a "planning study" is any study that holds an RTPLAN; a diagnostic study with a plan is not copied in
     planning_studies = {study_of(ds) for _, ds in pool if ds.get('Modality') == 'RTPLAN'}
 
-    cases = []
+    cases, seen = [], set()
     for plan_path, plan in pool:
         series = _planning_ct_series(plan, structs, ct_series) if plan.get('Modality') == 'RTPLAN' else None
-        if series is None:
+        if series is None or plan.SOPInstanceUID in seen:  # one RTPLAN in two sub-folders: the first by path, once
             continue
+        seen.add(plan.SOPInstanceUID)
         ct = min((ds for _, ds in ct_series[series]), key=lambda ds: ds.SOPInstanceUID)
         key = tuple(str(v) for v in (ct.get('SeriesDate', ''), ct.get('SeriesTime', ''), plan.get('RTPlanDate', ''),
                                      plan.get('RTPlanTime', ''), plan.SOPInstanceUID))
