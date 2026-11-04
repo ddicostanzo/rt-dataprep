@@ -62,11 +62,19 @@ def raise_in(monkeypatch, name, exc):
 
 # ---------------------------------------------------------------- the tag catch is per header-only call
 
-@pytest.mark.parametrize('what', ['plan_struct_reference', 'ct_spacing', 'dose_units'])
+def contour_image(ds):
+    return ds.ReferencedFrameOfReferenceSequence[0].RTReferencedStudySequence[0].RTReferencedSeriesSequence[0].ContourImageSequence[0]
+
+
+@pytest.mark.parametrize('what', ['plan_struct_reference', 'ct_spacing', 'contour_image_uid', 'dose_summation', 'dose_units'])
 def test_a_missing_header_tag_still_refuses_the_plan_with_missing_tag(tree, what):
     org, out = tree
-    plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10)] if what == 'dose_units' else [])
-    if what == 'plan_struct_reference':
+    plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10)] if what.startswith('dose') else [])
+    if what == 'contour_image_uid':  # read in _check_contour_images
+        edit(plan['folder'] / 'struct.dcm', lambda ds: delattr(contour_image(ds), 'ReferencedSOPInstanceUID'))
+    elif what == 'dose_summation':  # read in _dose_candidates, before _check_dose_header
+        edit(plan['folder'] / 'dose_0.dcm', lambda ds: delattr(ds, 'DoseSummationType'))
+    elif what == 'plan_struct_reference':
         edit(plan['folder'] / 'plan.dcm', lambda ds: delattr(ds, 'ReferencedStructureSetSequence'))
     elif what == 'ct_spacing':
         edit(plan['ct']['paths'][1], lambda ds: delattr(ds, 'PixelSpacing'))
@@ -87,10 +95,10 @@ def test_a_tag_error_while_building_the_series_rows_refuses_the_plan_and_removes
     assert str(caught.value) == conv.REASON_MISSING_TAG and not (out / 'case').exists()
 
 
-@pytest.mark.parametrize('name', ['_read_ct', 'write_atomic'])
+@pytest.mark.parametrize('name', ['_read_ct', '_read_dose', 'write_atomic'])
 def test_calls_outside_the_tag_catch_do_not_turn_a_type_error_into_a_refusal(tree, monkeypatch, name):
     org, out = tree
-    plan = make_plan(org / PID / 'plan_1')
+    plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10)])
     raise_in(monkeypatch, name, TypeError(SECRET))
     with pytest.raises(TypeError):
         run_plan(plan['folder'], out / 'case')
