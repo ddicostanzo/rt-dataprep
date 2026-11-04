@@ -15,7 +15,7 @@ dist/
 *.npz
 *.npy
 *.pkl
-manifest.csv
+manifest*.csv
 splits.json
 !tests/fixtures/SYNTHETIC_*
 organize_report*.csv
