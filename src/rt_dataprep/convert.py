@@ -535,8 +535,9 @@ def _read_dose(path, offsets, ct):
     """The RTDOSE at `path` in Gy (pixel x DoseGridScaling), linearly resampled onto ct's grid as float32, 0 outside."""
     def extract():  # third-party access and value extraction only: no pydicom object leaves, `offsets` is used by len alone
         ds = pydicom.dcmread(path)
-        values = ds.pixel_array.astype(np.float64) * float(ds.DoseGridScaling)  # (frames, rows, columns)
-        if values.shape[0] != len(offsets):
+        scaling = float(ds.DoseGridScaling)
+        values = ds.pixel_array.astype(np.float64) * scaling  # (frames, rows, columns)
+        if values.shape[0] != len(offsets) or not np.isfinite(scaling):  # a NaN scaling would be written as a NaN dose
             raise ValueError
         geometry = []
         for name, count in (('ImageOrientationPatient', 6), ('ImagePositionPatient', 3), ('PixelSpacing', 2)):

@@ -39,3 +39,12 @@ Baseline at 5977e72: 483 passed, 1 skipped.
 - Passes on the unchanged code (the first run failed only because the scan included the patient column, a test bug, not a leak).
 - Mutation, run once by hand and not committed: convert's quiet_call name patched with a variant that runs fn() and raises CaseRefused(str(exc)) on any Exception. Result: the test fails. The plan_1 row reason is the full ITK message (with the tmp path and ct_001.dcm) instead of REASON_CT_UNREADABLE, and the plan-refused log line carries it too. Test file restored afterwards.
 - Result: 507 passed, 1 skipped (506 + 1 new); ruff clean.
+
+## review-group-1
+No BLOCKING. WARNING: a failing restore dup2 in the fd-quiet finally leaves fd 2 redirected (deferred). NOTES: the inf-offset RuntimeWarning from np.diff before the finiteness check; a third-party BaseException class's init runs outside the quiet block (deferred).
+
+## review-group-2
+No BLOCKING. WARNING: the A9 site regex can't tell the right site from the header-call fallback line (deferred). NOTES: a wrong-VR sequence read as text aborts instead of refusing (accepted in B5); a misspelled keyword in item form still refuses (outside criteria).
+
+## review-loop-pass-1
+Bug review and spec-axis review (Opus): no plan bug. Both flagged a non-finite DoseGridScaling not being refused (a NaN dose image would be written). Labelled BLOCKING (clinical output, same class as B6) and fixed in `_read_dose`'s extract step, refused as REASON_DOSE_UNREADABLE; tests for NaN and inf were red first. Deferred: task-02's spacing and origin tuples are built inside the quiet build closure (trivial); a frame without a module name in the header-call origin check; CT-side non-finite header values are unchecked (not verified to reach output).

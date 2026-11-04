@@ -1002,6 +1002,16 @@ def test_a_dose_with_a_nan_geometry_value_refuses_as_unreadable(tree, tag, value
     assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_UNREADABLE)
 
 
+@pytest.mark.parametrize('scaling', [float('nan'), float('inf')], ids=['nan', 'inf'])
+def test_a_dose_with_a_non_finite_grid_scaling_refuses_as_unreadable(tree, scaling):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    held = resave_dose(plan['folder'], lambda ds: setattr(ds, 'DoseGridScaling', scaling))
+    assert not np.isfinite(float(held.DoseGridScaling))
+    rows = conv.convert(org, out).rows
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_UNREADABLE)
+
+
 # ---------------------------------------------------------------- quiet_call redesign: _header_call refuses only pydicom's own misses (B5)
 
 def header_call(fn):
