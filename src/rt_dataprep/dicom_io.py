@@ -45,18 +45,21 @@ def _fds_quiet():
     sys.stdout.flush()
     sys.stderr.flush()
     sink = tempfile.TemporaryFile()  # before the dups: a failure here leaks no fd
-    saved = os.dup(1), os.dup(2)
+    saved = []  # filled one dup at a time: the finally closes whichever were made
     try:
+        saved.append(os.dup(1))
+        saved.append(os.dup(2))
         os.dup2(sink.fileno(), 1)
         os.dup2(sink.fileno(), 2)
         yield
     finally:
         sys.stdout.flush()  # buffered text must land in the sink, not in the restored fd
         sys.stderr.flush()
-        os.dup2(saved[0], 1)
-        os.dup2(saved[1], 2)
-        os.close(saved[0])
-        os.close(saved[1])
+        if len(saved) == 2:  # both dups made: fd 1 and 2 may have been redirected
+            os.dup2(saved[0], 1)
+            os.dup2(saved[1], 2)
+        for fd in saved:
+            os.close(fd)
         sink.close()
 
 
@@ -66,11 +69,19 @@ def quiet_call(fn, reason):
 
     Silenced and discarded, all restored afterwards: pydicom validation and log, Python warnings, every logger
     (logging.disable, global, so DicomRTTool's worker threads too), ITK warning display, fd 1 and 2, sys.stdout/stderr.
-    Any Exception becomes CaseRefused(reason), raised after the except block so nothing of the original is chained.
+
+    Contract for the closure: it holds third-party access, value extraction and deliberate raises only. No arithmetic or
+    logic of ours: a bug there would read as a per-case refusal, so it belongs outside, where a bug aborts the run (#40).
+    Every Exception from fn becomes CaseRefused(reason), raised after the except block so nothing of the original is chained.
     Running out of memory is the machine's, not the case's: it becomes a bare MemoryError() instead (#47).
+    Any other BaseException keeps its kind and loses its message, raised bare after the except block: SystemExit keeps an
+    int or None code (else 1); one whose constructor needs arguments becomes KeyboardInterrupt().
+
+    Not thread-safe: it swaps process-wide state (fd 1 and 2, logging.disable, warning filters), so parallel callers (#2)
+    must be process-based or serialize it.
     """
     failed = out_of_memory = False
-    result = None
+    interrupt = result = None
     prior_disable = logging.root.manager.disable
     shown = sitk.ProcessObject.GetGlobalWarningDisplay()
     with open(os.devnull, 'w') as sink:
@@ -88,9 +99,22 @@ def quiet_call(fn, reason):
                         out_of_memory = isinstance(exc, MemoryError) or 'Failed to allocate memory' in str(exc)  # ITK's is a RuntimeError
                     except Exception:  # an exception whose str() fails is a refusal like any other
                         out_of_memory = False
+                except BaseException as exc:  # interrupt or exit: keep the kind (and an exit code), drop the message
+                    interrupt = type(exc), exc.code if isinstance(exc, SystemExit) else None
         finally:
             sitk.ProcessObject.SetGlobalWarningDisplay(shown)
             logging.disable(prior_disable)
+    if interrupt:
+        kind, code = interrupt
+        if issubclass(kind, SystemExit):
+            if code is None:
+                raise SystemExit()
+            raise SystemExit(code if isinstance(code, int) else 1)
+        try:
+            bare = kind()
+        except Exception:  # BaseExceptionGroup, a class with required arguments
+            bare = KeyboardInterrupt()
+        raise bare
     if out_of_memory:
         raise MemoryError()
     if failed:

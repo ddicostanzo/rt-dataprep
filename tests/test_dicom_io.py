@@ -3,6 +3,7 @@ import operator
 import os
 import subprocess
 import sys
+import threading
 import warnings
 from pathlib import Path
 
@@ -224,6 +225,87 @@ def test_quiet_call_raises_a_bare_memory_error_when_out_of_memory(error):
         quiet_call(fail, REASON)
     assert err.value.args == ()
     assert _chain(err.value) == (None, None)
+
+
+class _NeedsArg(BaseException):
+    def __init__(self, value):
+        super().__init__(value)
+
+
+def _raiser(exc):
+    def fail():
+        raise exc
+    return fail
+
+
+@pytest.mark.parametrize('error, kind, args, code', [
+    (KeyboardInterrupt('SYNTHETIC_x'), KeyboardInterrupt, (), None),
+    (SystemExit('SYNTHETIC_x'), SystemExit, (1,), 1),
+    (SystemExit(3), SystemExit, (3,), 3),
+    (SystemExit(), SystemExit, (), None),
+    (SystemExit(None), SystemExit, (), None),
+    (_NeedsArg('SYNTHETIC_x'), KeyboardInterrupt, (), None),
+    (GeneratorExit('SYNTHETIC_x'), GeneratorExit, (), None),
+])
+def test_quiet_call_re_raises_a_bare_base_exception(capfd, error, kind, args, code):
+    shown = sitk.ProcessObject.GetGlobalWarningDisplay()
+    prior_disable = logging.root.manager.disable
+    mode = pydicom.config.settings.reading_validation_mode
+    disabled = logging.getLogger('pydicom').disabled
+    stdout, stderr = sys.stdout, sys.stderr
+    with pytest.raises(BaseException) as err:  # noqa: PT011
+        quiet_call(_raiser(error), REASON)
+    assert type(err.value) is kind
+    assert err.value.args == args
+    assert _chain(err.value) == (None, None)
+    if kind is SystemExit:
+        assert err.value.code == code
+    assert sitk.ProcessObject.GetGlobalWarningDisplay() is shown
+    assert logging.root.manager.disable == prior_disable
+    assert pydicom.config.settings.reading_validation_mode == mode
+    assert logging.getLogger('pydicom').disabled == disabled
+    assert (sys.stdout, sys.stderr) == (stdout, stderr)
+    capfd.readouterr()
+    os.write(1, b'after-out')
+    os.write(2, b'after-err')
+    out = capfd.readouterr()
+    assert (out.out, out.err) == ('after-out', 'after-err')  # fds 1 and 2 are back
+
+
+@pytest.mark.skipif(not os.path.isdir('/proc/self/fd'), reason='needs /proc/self/fd')
+def test_fds_quiet_leaks_no_fd_when_the_second_dup_fails(monkeypatch):
+    real_dup, calls = os.dup, []
+
+    def flaky_dup(fd):
+        calls.append(fd)
+        if len(calls) == 2:
+            raise OSError('SYNTHETIC dup failure')
+        return real_dup(fd)
+    fds_quiet = getattr(dicom_io, '_fds_quiet')  # noqa: B009
+    before = set(os.listdir('/proc/self/fd'))
+    failed = False
+    with monkeypatch.context() as patch:  # os is global: keep the patch to the one call
+        patch.setattr(os, 'dup', flaky_dup)
+        try:
+            with fds_quiet():
+                pass
+        except OSError:  # info dropped on leaving: a kept traceback would hold the generator frame
+            failed = True
+    assert failed and len(calls) == 2
+    assert set(os.listdir('/proc/self/fd')) == before
+
+
+def test_quiet_call_swallows_a_warning_from_a_thread_started_inside(capfd):
+    def warn_in_thread():
+        worker = threading.Thread(target=lambda: warnings.warn('SYNTHETIC_x', stacklevel=2))
+        worker.start()
+        worker.join()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        quiet_call(warn_in_thread, REASON)
+    out = capfd.readouterr()
+    assert caught == []
+    assert (out.out, out.err) == ('', '')
 
 
 def test_read_header_error_has_no_context(tmp_path):
