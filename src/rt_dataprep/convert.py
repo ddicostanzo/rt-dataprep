@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 import pydicom
 import SimpleITK as sitk
+from pydicom.datadict import tag_for_keyword
 
 from rt_dataprep import masks
 from rt_dataprep import series as ser
@@ -334,12 +335,27 @@ def convert_plan(headers, unreadable, case_dir):
 
 
 def _header_call(fn, *args, **kwargs):
-    """fn(*args, **kwargs) for a header-only step: a missing tag or odd value (#33) is CaseRefused(REASON_MISSING_TAG)."""
-    failed, result = False, None
+    """
+    fn(*args, **kwargs) for a header-only step: a missing tag or odd value (#33) is CaseRefused(REASON_MISSING_TAG), logged at
+    INFO with the class name and site. An AttributeError/KeyError raised outside pydicom, or an AttributeError for a name that is no
+    DICOM keyword (a typo), is ours: it propagates as itself, and the abort path formats only class and site.
+    """
+    failed, result, ours_exc = False, None, None
     try:
         result = fn(*args, **kwargs)
-    except (AttributeError, KeyError, IndexError, TypeError, ValueError):  # not quoted
-        failed = True
+    except (AttributeError, KeyError, IndexError, TypeError, ValueError) as exc:  # not quoted
+        tb = sys.exc_info()[2]
+        origin = [frame.f_globals['__name__'] for frame, _ in traceback.walk_tb(tb)][-1]
+        ours = origin != 'pydicom' and not origin.startswith('pydicom.')
+        if isinstance(exc, (AttributeError, KeyError)) and (ours or (isinstance(exc, AttributeError)
+                                                                     and tag_for_keyword(getattr(exc, 'name', None)) is None)):
+            ours_exc = exc
+        else:
+            module, line = crash_site(tb)
+            log.info('convert: %s: %s at %s:%d', REASON_MISSING_TAG, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
+            failed = True
+    if ours_exc is not None:  # raised here too (a test forbids a raise inside an except block): the same object, as itself
+        raise ours_exc
     if failed:  # raised here, after the except block: nothing of the original is chained
         raise CaseRefused(REASON_MISSING_TAG)
     return result

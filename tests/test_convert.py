@@ -794,7 +794,7 @@ def test_a_refused_plan_whose_folder_cannot_be_removed_is_the_patients_io_error_
         real(path, ignore_errors=ignore_errors, **kwargs)
 
     def refuse_after_the_plan_folder_exists(*args):
-        raise KeyError  # _series_rows runs after the plan folder is written: a refusal (REASON_MISSING_TAG) from here
+        raise ValueError  # _series_rows runs after the plan folder is written: a refusal (REASON_MISSING_TAG) from here
     monkeypatch.setattr(conv.shutil, 'rmtree', rmtree)
     monkeypatch.setattr(conv, '_series_rows', refuse_after_the_plan_folder_exists)
     rows = conv.convert(org, out).rows
@@ -972,3 +972,55 @@ def test_a_dose_with_a_nan_geometry_value_refuses_as_unreadable(tree, tag, value
     assert any(np.isnan(float(v)) for v in getattr(held, tag))
     rows = conv.convert(org, out).rows
     assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_UNREADABLE)
+
+
+# ---------------------------------------------------------------- quiet_call redesign: _header_call refuses only pydicom's own misses (B5)
+
+def header_call(fn):
+    return getattr(conv, '_header_call')(fn)  # noqa: B009
+
+
+def empty_dataset():
+    return pydicom.Dataset()
+
+
+def test_an_attribute_error_from_our_own_frame_propagates_out_of_header_call():
+    with pytest.raises(AttributeError):
+        header_call(lambda: object().SYNTHETIC_missing)
+
+
+def test_a_key_error_from_our_own_dict_propagates_out_of_header_call():
+    with pytest.raises(KeyError):
+        header_call(lambda: {}['SYNTHETIC_key'])
+
+
+def test_a_misspelled_keyword_on_a_dataset_propagates_out_of_header_call():
+    with pytest.raises(AttributeError):
+        header_call(lambda: empty_dataset().SYNTHETICNotAKeyword)
+
+
+@pytest.mark.parametrize('read', [lambda ds: ds.PatientID, lambda ds: ds['PatientName']], ids=['attribute', 'item'])
+def test_a_missing_tag_refuses_with_one_info_record_naming_class_and_site(read, caplog):
+    caplog.set_level(logging.INFO)
+    with pytest.raises(CaseRefused) as caught:
+        header_call(lambda: read(empty_dataset()))
+    assert str(caught.value) == conv.REASON_MISSING_TAG
+    assert getattr(caught.value, '__cause__') is None and getattr(caught.value, '__context__') is None  # noqa: B009
+    records = [r for r in caplog.records if r.name == 'rt_dataprep.convert']
+    assert len(records) == 1 and records[0].levelno == logging.INFO
+    assert re.fullmatch(rf'convert: {conv.REASON_MISSING_TAG}: (AttributeError|KeyError) at rt_dataprep\.\w+:\d+', records[0].getMessage())
+    assert 'SYNTHETIC_' not in records[0].getMessage() and '/' not in records[0].getMessage()
+
+
+def test_an_attribute_error_from_our_own_frame_in_the_classifier_aborts_the_run(tree, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+
+    def classify(*args, **kwargs):
+        raise AttributeError('SYNTHETIC_missing')
+    monkeypatch.setattr(masks, 'classify', classify)
+    with pytest.raises(conv.ConvertAborted):
+        conv.convert(org, out)
+    with open(out / conv.REPORT_NAME, newline='') as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(r['patient'], r['outcome'], r['reason']) for r in rows] == [(PID, conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]

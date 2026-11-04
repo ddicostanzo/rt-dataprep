@@ -18,3 +18,16 @@ Baseline at 5977e72: 483 passed, 1 skipped.
 - Equivalence: reorder, origin, spacing, direction and the float64 scaling are the old statements moved unchanged, so output for a well-formed RTDOSE is the same; every existing dose test passes unmodified.
 - Gotcha: pydicom reads a one-value DS back as a scalar (DSfloat), not a list; the old and new code both refuse it through the TypeError from iterating it. The A2 fixture check uses np.ravel for that reason.
 - Result: 500 passed, 1 skipped (492 + 8 new cases); ruff and compileall clean.
+
+## task-03
+
+- Red before the change (tests/test_convert.py, 6 new cases, 6 failed): own-frame AttributeError, own-dict KeyError and the misspelled keyword (A9 a, c, d) were all refused instead of propagating; the two missing-tag cases (attribute and item) refused but wrote no INFO record; the end-to-end case with masks.classify patched to raise AttributeError did not abort. The two switched tests (KeyError to ValueError, test_convert.py refuse_after_the_plan_folder_exists and test_series.py test_a_tag_error_while_building_the_series_rows_refuses_the_plan_and_removes_the_folder) pass before and after.
+- Decision (deviation from the plan's note): the propagated exception is re-raised after the except block, not by a bare raise inside it, because the existing guard test_no_case_refused_is_raised_inside_an_except_block forbids any raise inside an except handler in convert.py and may not change. The handler keeps the object, and the raise after it re-raises the same object (same class, args and traceback; innermost frame unchanged, so the abort path's crash site is the same).
+- Typo rule: tag_for_keyword(getattr(exc, 'name', None)); a pydicom AttributeError with no name (None) also propagates, since None is no keyword (tag_for_keyword(None) is None, checked).
+- Audit, attribute or method access on a value pydicom may return as None (empty numeric tags read as None; empty text tags as ''; empty sequences as an empty Sequence), in _assemble, _check_volume, _check_contour_images, _dose_candidates, _check_dose_header, masks.classify, _series_rows and the lambda at the FrameOfReferenceUID read:
+  - Every tag value is first passed to str(), int(), float() or iterated: str(None) is text, int(None) / float(None) / iterating None raise TypeError, and TypeError is refused as REASON_MISSING_TAG (unchanged). Covered: ImageOrientationPatient, PixelSpacing, ImagePositionPatient, Rows, Columns, NumberOfFrames, GridFrameOffsetVector, ReferencedROINumber, ROINumber, ContourData.
+  - The methods called after that (strip, lower, isalnum, reshape, sort, pop) are on a str, a numpy array or our own list, never on a tag value that could be None.
+  - get(name, []) on a Dataset yields a Sequence (possibly empty) for sequence tags, and the optional-text reader _tag maps None to ''; the empty-sequence index reads (ReferencedStructureSetSequence[0]) raise IndexError, refused as before.
+  - Dict reads in our code are guarded (the contours lookup by `in`, the roi_names lookup by the file filter).
+  - Verdict: no attribute or method access on a possibly-None pydicom value found in the wrapped functions. Accepted behaviour stands for any future one: it raises AttributeError from our frame and aborts the run.
+- Result: 506 passed, 1 skipped (500 + 6 new); ruff and compileall clean.
