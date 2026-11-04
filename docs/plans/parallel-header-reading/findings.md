@@ -78,3 +78,15 @@ Deferred (file as hardening at the review round):
 - W2: the organize timing test does not pin that the line follows the summary (convert's does).
 - N3: no organize "no timing line on Ctrl-C" test (code is right: the interrupt leaves before the log line).
 - N5: the organize Ctrl-C .partial assertion passes trivially (interrupt during reading, before any partial exists).
+
+## task-04
+
+- CLI: one argparse type, positive_int (int >= 1; a non-integer or below 1 raises ArgumentTypeError, so argparse exits 2), and one WORKERS_HELP
+  string shared by the organize and convert subparsers. Default 1 is passed as workers=N in both dispatch branches (organize is the
+  `else` branch of the command chain in main). preprocess, manifest and split are untouched; a test pins that `--workers` on them is a usage error.
+- CLI tests monkeypatch `cli.organize` and `cli.convert` (the names __main__ imports) and compare the recorded call; 0, -1, x and 1.5 all exit 2 with no call.
+- End-to-end test (test_organize_then_convert_is_the_same_for_one_worker_and_four): two synthetic patients, each with a dose and a box ROI, organized and
+  converted with workers 1 and 4 into separate roots. The hashed trees (minus the dated report copies, matched by the same regex as `listing`) and
+  the report rows are equal. Two fresh conversions are byte-identical (the NIfTI files, series.csv and the reports), so no comparison was loosened.
+- The test can fail: it asserts 2 organize rows, 2 converted rows, 6 NIfTI files in the converted tree and .dcm files in the organized tree before comparing.
+- The equivalence test passed before the CLI change, as expected: it calls the library kwarg, which tasks 02 and 03 added. Only the CLI tests were red first.

@@ -670,6 +670,28 @@ def test_a2_9_an_rtstruct_in_another_study_is_organized_and_converts(tmp_path):
     assert arr(out / PID / 'plan_1' / 'liver.nii.gz').sum() == 27
 
 
+def test_organize_then_convert_is_the_same_for_one_worker_and_four(tmp_path):
+    src = tmp_path / 'src'
+    for patient in (PID, 'SYNTHETICPTB'):
+        make_plan(src / patient / 'p', doses=[dose_spec(10, 'PLAN')], rois=[BOX], patient=patient)
+    runs = []
+    for workers in (1, 4):
+        org, out = tmp_path / f'org{workers}', tmp_path / f'out{workers}'
+        organized = organize(src, org, workers=workers).rows
+        converted = conv.convert(org, out, workers=workers).rows
+        runs.append((organized, converted, tree_hashes(org), tree_hashes(out), org, out))
+    (org_rows, conv_rows, org_tree, out_tree, *_), (org_rows4, conv_rows4, org_tree4, out_tree4, *_) = runs
+
+    def stable(hashes):  # the dated report copies carry the run's UTC time in their names
+        return {k: v for k, v in hashes.items() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv', k)}
+
+    assert len(org_rows) == 2 and [r.outcome for r in conv_rows] == ['converted'] * 2  # the comparison has something to compare
+    assert sum(k.endswith('.nii.gz') for k in out_tree) == 6 and any(k.endswith('.dcm') for k in org_tree)
+    assert stable(org_tree) == stable(org_tree4) and stable(out_tree) == stable(out_tree4)
+    assert org_rows == org_rows4 and conv_rows == conv_rows4
+    assert 'organize_report.csv' in stable(org_tree4) and 'convert_report.csv' in stable(out_tree4)
+
+
 # ---------------------------------------------------------------- A2.10: PHI
 
 def chain(exc):
