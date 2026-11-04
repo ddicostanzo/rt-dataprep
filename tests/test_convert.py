@@ -906,3 +906,69 @@ def test_point_items_of_a_kept_roi_are_dropped_and_the_mask_is_its_planar_contou
     expected = np.zeros(SHAPE)
     expected[1:3, 1:4, 2:5] = 1
     np.testing.assert_array_equal(sitk.GetArrayFromImage(read(out / PID / 'plan_1' / 'liver.nii.gz')), expected)
+
+
+# ---------------------------------------------------------------- quiet_call redesign: _read_dose's three steps (B1, B6)
+
+class NoNumber:
+    """An offset that is no number: no __float__ or __array__, and it cannot be subtracted."""
+    def __sub__(self, other):
+        raise TypeError('SYNTHETIC_no subtraction')
+
+    def __rsub__(self, other):
+        raise TypeError('SYNTHETIC_no subtraction')
+
+
+def test_a_type_error_in_the_dose_arithmetic_aborts_the_run_and_is_no_unreadable_dose(tree, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    monkeypatch.setattr(conv, '_check_dose_header', lambda ds, ct_frame_uid: [NoNumber() for _ in range(SHAPE[0])])  # len and index work
+    with pytest.raises(conv.ConvertAborted):
+        conv.convert(org, out)
+    with open(out / conv.REPORT_NAME, newline='') as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(r['patient'], r['outcome'], r['reason']) for r in rows] == [(PID, conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
+    assert not any(r['reason'] == conv.REASON_DOSE_UNREADABLE for r in rows)
+
+
+def resave_dose(folder, change):
+    """The plan's first RTDOSE changed through save_as, then read back so the test sees what the code will."""
+    path = folder / 'dose_0.dcm'
+    ds = pydicom.dcmread(path)
+    change(ds)
+    ds.save_as(path)
+    return pydicom.dcmread(path)
+
+
+@pytest.mark.parametrize('tag, value', [('ImageOrientationPatient', [1.0, 0.0, 0.0, 0.0, 1.0]), ('PixelSpacing', [1.5]),
+                                        ('ImagePositionPatient', [1.0, 2.0])], ids=['iop-5', 'spacing-1', 'ipp-2'])
+def test_a_dose_with_a_wrong_count_of_geometry_values_refuses_the_plan_and_the_run_continues(tree, tag, value):
+    org, out = tree
+    bad = make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    make_plan(org / PID / 'plan_2', doses=[dose_spec(20, 'PLAN')])
+    held = resave_dose(bad['folder'], lambda ds: setattr(ds, tag, value))
+    assert np.ravel(np.asarray(getattr(held, tag), dtype=float)).tolist() == value  # one value reads back as a scalar, not a list
+    rows = conv.convert(org, out).rows
+    assert (row_of(rows, 'plan_1').outcome, row_of(rows, 'plan_1').reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_UNREADABLE)
+    assert (row_of(rows, 'plan_2').outcome, row_of(rows, 'plan_2').reason) == (conv.OUTCOME_CONVERTED, '')
+
+
+def test_a_dose_with_a_nan_frame_offset_refuses_with_the_grid_reason(tree):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    held = resave_dose(plan['folder'], lambda ds: setattr(ds, 'GridFrameOffsetVector', [0.0, float('nan'), 2.0, 3.0]))
+    assert np.isnan(float(held.GridFrameOffsetVector[1]))
+    rows = conv.convert(org, out).rows
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_GRID)
+
+
+@pytest.mark.parametrize('tag, value', [('ImagePositionPatient', [float('nan'), 5.0, 7.0]),
+                                        ('ImageOrientationPatient', [1.0, 0.0, 0.0, 0.0, float('nan'), 0.0]),
+                                        ('PixelSpacing', [1.5, float('nan')])], ids=['ipp', 'iop', 'spacing'])
+def test_a_dose_with_a_nan_geometry_value_refuses_as_unreadable(tree, tag, value):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    held = resave_dose(plan['folder'], lambda ds: setattr(ds, tag, value))
+    assert any(np.isnan(float(v)) for v in getattr(held, tag))
+    rows = conv.convert(org, out).rows
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_UNREADABLE)
