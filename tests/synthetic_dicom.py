@@ -5,8 +5,8 @@ Ported from rnt_transformer tests/synthetic_dicom.py.
 Every UID comes from generate_uid() at run time, PatientID and PatientName start with SYNTHETIC_, and a date or time tag
 is set only when asked for. Files carry file meta and the explicit-VR little-endian transfer syntax.
 
-Every writer takes the shared metadata keywords patient_id=, study_uid=, series_date=, series_time= and
-manufacturer_model_name= (all default to "not set" / a fresh study UID / SYNTHETIC_ID), forwarded to `_dataset`.
+Every writer takes the shared metadata keywords patient_id=, study_uid=, series_date=, series_time=,
+study_date=, study_time= and manufacturer_model_name= (all default to "not set" / a fresh study UID / SYNTHETIC_ID), forwarded to `_dataset`.
 """
 import contextlib
 from pathlib import Path
@@ -24,7 +24,8 @@ INVALID_DA = 'SYNTHETIC_notadate'
 
 
 def _dataset(path, sop_class_uid, modality, sop_uid=None, frame_uid=None, series_uid=None, invalid_values=False,
-             patient_id=None, study_uid=None, series_date=None, series_time=None, manufacturer_model_name=None):
+             patient_id=None, study_uid=None, series_date=None, series_time=None, study_date=None, study_time=None,
+             manufacturer_model_name=None):
     ds = Dataset()
     ds.SOPClassUID = sop_class_uid
     ds.SOPInstanceUID = sop_uid or generate_uid()
@@ -40,6 +41,10 @@ def _dataset(path, sop_class_uid, modality, sop_uid=None, frame_uid=None, series
         ds.SeriesDate = series_date
     if series_time:
         ds.SeriesTime = series_time
+    if study_date:  # after the invalid_values StudyDate, so an explicit one wins
+        ds.StudyDate = study_date
+    if study_time:
+        ds.StudyTime = study_time
     if manufacturer_model_name:
         ds.ManufacturerModelName = manufacturer_model_name
     if frame_uid:

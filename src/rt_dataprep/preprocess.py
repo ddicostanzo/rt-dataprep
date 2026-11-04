@@ -6,8 +6,9 @@ and the crop/pad follow torchio 1.2.1 (floor size, centre-preserving origin, cei
 CT image is the one reference grid: dose and masks are each resampled once onto it. Direction is never re-derived.
 Every compute call in the three process_* entry points runs inside dicom_io.quiet_call; a failure is one fixed REASON_.
 
-preprocess() reads each plan's series.csv (kinds ct, dose, mask, applicator; series rows are dropped) and writes a separate
-tree plus preprocess_report.csv in the output root. Log lines and exceptions carry fixed REASON_ constants only; the report
+preprocess() reads each plan's series.csv (kinds ct, dose, mask, applicator; series rows are dropped) and each study folder's
+(<patient>/study_<n>/, one case per series: a CT through every step that is on, an MR or PT through the geometric ones only),
+and writes a separate tree plus preprocess_report.csv in the output root. Log lines and exceptions carry fixed REASON_ constants only; the report
 is the one place the patient folder names appear.
 """
 import csv
@@ -15,7 +16,7 @@ import logging
 import re
 import shutil
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +24,7 @@ import SimpleITK as sitk
 
 from rt_dataprep import convert as conv
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
-from rt_dataprep.series import DIRECTION_ATOL
+from rt_dataprep.series import DIRECTION_ATOL, IMAGE_MODALITIES
 
 log = logging.getLogger(__name__)
 
@@ -34,13 +35,15 @@ KINDS = ('ct', 'dose', 'mask', 'applicator')
 REASON_OUTSIDE_INPUT = 'output root is the converted root or inside it'
 REASON_NO_STEPS = 'no preprocessing step is on'
 REASON_EXISTS = 'output folder already exists'
-REASON_NO_PLANS = 'patient folder holds no plan folder with a series.csv'
+REASON_NO_CASES = 'patient folder holds no plan or study folder with a series.csv'
 REASON_NO_CT = 'series.csv does not list exactly one ct file'
 REASON_DOSE_COUNT = 'series.csv lists more than one dose file'
 REASON_KIND = 'series.csv has a row of an unknown kind'
 REASON_SERIES_CSV = 'series.csv is malformed: columns, row length, encoding, or one file named twice'
-REASON_TOO_SMALL = 'the CT is shorter than one output voxel along an axis'
-REASON_FILE_MISSING = 'a series.csv row names a file that is not in the plan folder'
+REASON_TOO_SMALL = 'the image is shorter than one output voxel along an axis'
+REASON_FILE_MISSING = 'a series.csv row names a file that is not in the case folder'
+REASON_STUDY_MODALITY = 'a study series.csv row has a modality other than CT, MR or PT'
+REASON_STUDY_NAME = 'a study series.csv row names a file that is not a series volume'
 REASON_GRID = 'a dose or mask is not on the planning CT grid'
 REASON_CROP = 'a dose or mask would lose voxels to the final grid'
 REASON_IO_ERROR = 'file system error while reading or writing; nothing kept for this patient'
@@ -178,7 +181,7 @@ class PreprocessAborted(Exception):
 @dataclass
 class PreprocessRow:
     patient: str  # the converted folder name; preprocess_report.csv only
-    folder: str  # plan_<n>, or '' for a patient-level row
+    folder: str  # plan_<n>, study_<n>/series_<MOD>_<k> (study_<n> when the whole study is refused), or '' for a patient-level row
     outcome: str
     reason: str = ''
     files: list = field(default_factory=list)
@@ -190,7 +193,7 @@ class PreprocessReport:
 
 
 def preprocess(converted_root, out_root, steps=PreprocessSteps()):  # noqa: B008 (frozen, so the shared default is safe; with no step on it raises)
-    """Preprocess every <patient>/plan_<n>/ under converted_root into out_root/<patient>/plan_<n>/ and write preprocess_report.csv."""
+    """Preprocess every <patient>/plan_<n>/ and <patient>/study_<n>/ under converted_root into out_root and write preprocess_report.csv."""
     converted_root, out_root = Path(converted_root), Path(out_root)
     if out_root.resolve().is_relative_to(converted_root.resolve()):  # before any mkdir: nothing is written into the input
         raise ValueError(REASON_OUTSIDE_INPUT)
@@ -215,10 +218,12 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps()):  # noqa: B008
     finally:  # Ctrl-C too: the report lists what was done
         write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files'],
                      ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files)] for r in rows))
-    plan_rows = [r for r in rows if r.folder != '']
+    imaging_rows = [r for r in rows if r.folder.startswith('study_')]
+    plan_rows = [r for r in rows if r.folder != '' and r not in imaging_rows]
     patient_rows = [r for r in rows if r.folder == '']
-    log.info('preprocess: %d plan rows (%d preprocessed, %d refused), %d patient rows (%d refused, %d skipped)',
+    log.info('preprocess: %d plan rows (%d preprocessed, %d refused), %d imaging rows (%d preprocessed, %d refused), %d patient rows (%d refused, %d skipped)',
              len(plan_rows), *(sum(r.outcome == o for r in plan_rows) for o in (OUTCOME_PREPROCESSED, conv.OUTCOME_REFUSED)),
+             len(imaging_rows), *(sum(r.outcome == o for r in imaging_rows) for o in (OUTCOME_PREPROCESSED, conv.OUTCOME_REFUSED)),
              len(patient_rows), *(sum(r.outcome == o for r in patient_rows) for o in (conv.OUTCOME_REFUSED, conv.OUTCOME_SKIPPED)))
     if aborted:  # raised here, after the except blocks: nothing of the original is chained
         raise PreprocessAborted(REASON_INTERNAL)
@@ -231,8 +236,10 @@ def preprocess_patient(folder, out_root, steps):
         return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_EXISTS)]
     plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(conv.PLAN_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()),
                    key=lambda p: (int(p.name.split('_')[1]), p.name))  # plan_1 and fx_1: a fixed order
-    if not plans:
-        return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_NO_PLANS)]
+    studies = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(STUDY_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()),
+                     key=lambda p: int(p.name.split('_')[1]))
+    if not plans and not studies:
+        return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_NO_CASES)]
     # Built under a hidden name and renamed at the end, as convert does: a run that dies part-way leaves no folder that a
     # later run would skip as done. The flag, not an except block, decides the cleanup, so any failure (and Ctrl-C) removes it.
     partial = out_root / f'.{folder.name}.partial'
@@ -241,7 +248,9 @@ def preprocess_patient(folder, out_root, steps):
     try:
         partial.mkdir()
         rows = [preprocess_one(plan_dir, partial / plan_dir.name, steps) for plan_dir in plans]
-        partial.rename(target)  # an empty partial (every plan refused) is renamed too: the patient has its outcome
+        for study_dir in studies:
+            rows += preprocess_study(study_dir, partial / study_dir.name, steps)
+        partial.rename(target)  # an empty partial (every plan and series refused) is renamed too: the patient has its outcome
         done = True
     finally:
         if not done:
@@ -264,6 +273,53 @@ def preprocess_one(plan_dir, out_dir, steps):
         log.warning('preprocess: plan refused: %s', reason)
         return PreprocessRow(plan_dir.parent.name, plan_dir.name, conv.OUTCOME_REFUSED, reason)
     return PreprocessRow(plan_dir.parent.name, plan_dir.name, OUTCOME_PREPROCESSED, files=files)
+
+
+def preprocess_study(study_dir, out_dir, steps):
+    """The PreprocessRows of one study, one per series (one row `study_<n>` when check_study_rows refuses it). `out_dir` exists only if a series was written."""
+    patient, study = study_dir.parent.name, study_dir.name
+    refusal = None
+    try:
+        series = check_study_rows(study_dir)
+    except CaseRefused as exc:
+        refusal = exc
+    if refusal is not None:  # an OSError is the patient's and propagates
+        log.warning('preprocess: study refused: %s', refusal)
+        return [PreprocessRow(patient, study, conv.OUTCOME_REFUSED, str(refusal))]
+    rows, written = [], []
+    for row in series:
+        folder = f'{study}/{series_id(row["file"])}'
+        name, refusal = None, None
+        try:
+            name = preprocess_series(study_dir, out_dir, row, steps)
+        except CaseRefused as exc:
+            refusal = exc
+        if refusal is not None and str(refusal) == REASON_INTERNAL:
+            raise refusal  # to the patient, as for a plan
+        if refusal is not None:
+            log.warning('preprocess: series refused: %s', refusal)
+            rows.append(PreprocessRow(patient, folder, conv.OUTCOME_REFUSED, str(refusal)))
+            continue
+        written.append(row | {'file': name})
+        rows.append(PreprocessRow(patient, folder, OUTCOME_PREPROCESSED, files=[name]))
+    if written:
+        conv.write_series_csv(written, out_dir / conv.SERIES_NAME)
+        next(r for r in rows if r.outcome == OUTCOME_PREPROCESSED).files.append(conv.SERIES_NAME)
+    return rows
+
+
+def preprocess_series(study_dir, out_dir, row, steps):
+    """Write one study series into `out_dir` (made on the first write) and return its output name; a CaseRefused refuses this series only and writes nothing."""
+    is_ct = row['modality'] == 'CT'
+    steps = steps if is_ct else replace(steps, rescale=False)  # the HU rescale is for CT only
+    source = study_dir / row['file']
+    if too_small(read_info(source), steps):
+        raise CaseRefused(REASON_TOO_SMALL)
+    image = process_ct(read_image(source), steps)
+    name = output_name(row['file'], steps, ct=is_ct)
+    out_dir.mkdir(exist_ok=True)
+    conv.write_atomic(image, out_dir / name)
+    return name
 
 
 def same_grid(a, b):
@@ -301,6 +357,60 @@ def check_rows(plan_dir):
     if any(not same_grid(ct, read_info(plan_dir / row['file'])) for row in kept if row['kind'] in ('dose', 'mask')):
         raise CaseRefused(REASON_GRID)
     return kept, ct
+
+
+STUDY_FOLDER = r'study_\d+'
+STUDY_FILE = re.compile(r'(reshape_)?(resample_)?(rescale_)?(initialresample_)?(series_(CT|MR|PT)_\d+)\.nii\.gz')  # output_name's prefixes, in order
+
+
+def series_id(name):
+    """`series_<MOD>_<k>` of a study volume's file name (a full match, so no newline tail), or None when the name is not one."""
+    match = STUDY_FILE.fullmatch(name)
+    return match.group(5) if match else None
+
+
+def read_study_csv(study_dir):
+    """(rows, malformed) of a study's series.csv: malformed when unparseable, other columns, or a cell is missing or extra."""
+    malformed = False
+    with open(study_dir / conv.SERIES_NAME, newline='', encoding='utf-8') as handle:
+        try:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            malformed = reader.fieldnames != conv.SERIES_COLUMNS or any(None in row or None in row.values() for row in rows)
+        except (ValueError, csv.Error):  # UnicodeDecodeError is a ValueError
+            rows, malformed = [], True
+    return rows, malformed
+
+
+def study_refusal_count(study_dir):
+    """What a refused study counts in the manifest: its data rows, or 1 when series.csv cannot be parsed or holds no row."""
+    unparseable = False
+    with open(study_dir / conv.SERIES_NAME, newline='', encoding='utf-8') as handle:
+        try:
+            count = sum(1 for _ in csv.DictReader(handle))
+        except (ValueError, csv.Error):
+            unparseable = True
+    return 1 if unparseable or count == 0 else count
+
+
+def check_study_rows(study_dir):
+    """The series.csv rows of a study folder, every one checked here and no NIfTI header read. A failure refuses the whole study."""
+    rows, malformed = read_study_csv(study_dir)
+    if malformed or not rows or len({row['file'] for row in rows}) != len(rows):
+        raise CaseRefused(REASON_SERIES_CSV)
+    if any(row['kind'] != 'series' for row in rows):
+        raise CaseRefused(REASON_KIND)
+    if any(row['modality'] not in IMAGE_MODALITIES for row in rows):
+        raise CaseRefused(REASON_STUDY_MODALITY)
+    ids = [series_id(row['file']) for row in rows]
+    if None in ids:
+        raise CaseRefused(REASON_STUDY_NAME)
+    if len(set(ids)) != len(ids):
+        raise CaseRefused(REASON_SERIES_CSV)
+    present = {p.name for p in study_dir.iterdir() if p.is_file() and not p.is_symlink()}
+    if any(row['file'] not in present for row in rows):
+        raise CaseRefused(REASON_FILE_MISSING)
+    return rows
 
 
 def has_voxels(image):

@@ -329,7 +329,7 @@ def test_two_ct_series_the_rtstruct_reference_is_planning_ct(tree):
     row = row_of(conv.convert(org, out).rows)
     assert row.outcome == conv.OUTCOME_CONVERTED
     np.testing.assert_array_equal(arr(out / PID / 'plan_1' / 'planning_ct.nii.gz'), plan['values'].astype(np.float32))
-    assert sorted(p.name for p in (out / PID).iterdir()) == ['images', 'plan_1']  # the other CT goes to images/ (A2.4b)
+    assert sorted(p.name for p in (out / PID).iterdir()) == ['plan_1', 'study_1']  # the other CT goes to a study folder (A2.4b)
 
 
 def test_a2_8_missing_rtstruct_refuses_and_leaves_nothing(tree):
@@ -341,7 +341,7 @@ def test_a2_8_missing_rtstruct_refuses_and_leaves_nothing(tree):
     assert (row.outcome, row.reason) == (conv.OUTCOME_REFUSED, conv.REASON_NO_STRUCT)
     assert not (out / PID / 'plan_1').exists()
     assert listing(out) == [PID, conv.REPORT_NAME]  # no partial, no temp
-    assert [p.name for p in (out / PID).iterdir()] == ['images']  # the refused plan's CT
+    assert [p.name for p in (out / PID).iterdir()] == ['study_1']  # the refused plan's CT
     with open(out / conv.REPORT_NAME, newline='') as handle:
         assert next(r for r in csv.DictReader(handle) if r['folder'] == 'plan_1')['reason'] == conv.REASON_NO_STRUCT
 
@@ -383,7 +383,7 @@ def test_header_missing_a_tag_the_path_reads_refuses_that_plan_and_the_run_conti
     rows = conv.convert(org, out).rows
     assert (row_of(rows, 'plan_1').outcome, row_of(rows, 'plan_1').reason) == (conv.OUTCOME_REFUSED, conv.REASON_MISSING_TAG)
     assert row_of(rows, 'plan_2').outcome == conv.OUTCOME_CONVERTED
-    assert sorted(p.name for p in (out / PID).iterdir()) == (['images', 'plan_2'] if what == 'plan_struct_reference' else ['plan_2'])
+    assert sorted(p.name for p in (out / PID).iterdir()) == (['plan_2', 'study_1'] if what == 'plan_struct_reference' else ['plan_2'])
 
 
 # ---------------------------------------------------------------- layout, atomicity, report
@@ -395,8 +395,8 @@ def test_refused_plan_leaves_no_folder_while_the_other_plans_are_written(tree):
     make_plan(org / PID / 'plan_3')
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome) for r in rows] == [('plan_1', 'converted'), ('plan_2', 'refused'), ('plan_3', 'converted'),
-                                                      ('images', 'converted')]  # the refused plan's CT
-    assert sorted(p.name for p in (out / PID).iterdir()) == ['images', 'plan_1', 'plan_3']
+                                                      ('studies', 'converted'), ('study_1/series_CT_1', 'converted')]  # the refused plan's CT
+    assert sorted(p.name for p in (out / PID).iterdir()) == ['plan_1', 'plan_3', 'study_1']
     assert [p.name for p in out.iterdir() if p.name.startswith('.')] == []
 
 
@@ -412,8 +412,9 @@ def test_patient_whose_plans_are_all_refused_is_renamed_into_place(tree):
     for n in (1, 2):
         make_plan(org / PID / f'plan_{n}', doses=[dose_spec(1, 'BRACHY')])
     rows = conv.convert(org, out).rows
-    assert [(r.folder, r.outcome) for r in rows] == [('plan_1', 'refused'), ('plan_2', 'refused'), ('images', 'converted')]
-    assert (out / PID).is_dir() and sorted(p.name for p in (out / PID).iterdir()) == ['images']  # only the refused plans' CTs
+    assert [(r.folder, r.outcome) for r in rows] == [
+        ('plan_1', 'refused'), ('plan_2', 'refused'), ('studies', 'converted'), ('study_1/series_CT_1', 'converted'), ('study_2/series_CT_1', 'converted')]
+    assert (out / PID).is_dir() and sorted(p.name for p in (out / PID).iterdir()) == ['study_1', 'study_2']  # only the refused plans' CTs
 
 
 def test_patient_without_plan_folders_is_skipped_with_no_output_folder(tree):
@@ -895,10 +896,11 @@ def test_another_series_on_an_empty_frame_is_not_registered_to_a_planning_ct_on_
     for path in [*plan['ct']['paths'], *other['paths']]:
         edit(path, lambda ds: setattr(ds, 'FrameOfReferenceUID', ''))
     rows = conv.convert(org, out).rows
-    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('plan_1', 'converted', ''), ('images', 'converted', '')]
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [
+        ('plan_1', 'converted', ''), ('studies', 'converted', ''), ('study_1/series_MR_1', 'converted', '')]
     assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == ['planning_ct.nii.gz', 'series.csv']
-    assert sorted(p.name for p in (out / PID / 'images').iterdir()) == ['series.csv', 'series_MR_1.nii.gz']
-    assert series_rows(out, 'images')[0]['reg_matrix'] == ''
+    assert sorted(p.name for p in (out / PID / 'study_1').iterdir()) == ['series.csv', 'series_MR_1.nii.gz']
+    assert series_rows(out, 'study_1')[0]['reg_matrix'] == ''
 
 
 # ---------------------------------------------------------------- hardening B6 (#22): orientation and dose offsets
@@ -1185,7 +1187,7 @@ def test_the_rows_are_identical_for_workers_1_and_4_with_bad_files_in_a_plan_fol
     serial = rows_of(conv.convert(org, out))
     pooled = rows_of(conv.convert(org, tmp_path / 'out4', workers=4))
     assert pooled == serial
-    assert [(r[1], r[2], r[3]) for r in serial if r[1] != 'images'] == [
+    assert [(r[1], r[2], r[3]) for r in serial if r[1].startswith('plan_')] == [
         ('plan_1', conv.OUTCOME_REFUSED, conv.REASON_FILE_UNREADABLE), ('plan_2', conv.OUTCOME_CONVERTED, '')]  # not a vacuous equality
 
 
