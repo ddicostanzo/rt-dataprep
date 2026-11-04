@@ -54,3 +54,9 @@ Fixtures in `tests/synthetic_dicom.py` (all new keywords optional; defaults chec
   (DS limit 16 chars). `images` items always carry the CT SOPClass UID. `matrices=[]` writes an item with an empty
   MatrixSequence; an item with no MatrixRegistrationSequence at all is not expressible (add a keyword if task-04 needs it).
   Any `modality` other than CT/MR/PT now raises KeyError (it used to fall back to CT Image Storage).
+
+## review-1
+No BLOCKING. WARNING: tests do not pin the tag-catch wrappers of masks.classify, _check_contour_images and
+_dose_candidates (mutation check: removing them leaves the suite green); _read_dose outside the catch untested.
+NOTE: synthetic_dicom sop_class KeyError on other modalities; _crash_site matches top-level package modules only; a
+report-write OSError replaces ConvertAborted (CLI message still path-free). Deferred to the review round.
