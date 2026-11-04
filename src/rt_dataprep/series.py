@@ -211,39 +211,51 @@ def registration(ct_frame, series_frame, regs, headers_by_sop):
 IMAGE_MODALITIES = ('CT', 'MR', 'PT')
 
 
-def _study(ds):
-    return str(ds.get('StudyInstanceUID', ''))
+def _file_keys(ds):
+    """(SOPInstanceUID, StudyInstanceUID, Modality, ManufacturerModelName) of one header, each as text ('' when absent)."""
+    return tuple(str(ds.get(tag, '')) for tag in ('SOPInstanceUID', 'StudyInstanceUID', 'Modality', 'ManufacturerModelName'))
 
 
-def _is_candidate_file(ds):
-    return (ds.get('Modality') in IMAGE_MODALITIES and bool(ds.get('SeriesInstanceUID')) and 'LOCALIZER' not in ds.get('ImageType', []))
+def _candidate_series(ds):
+    """The SeriesInstanceUID of a non-localizer CT/MR/PT file, else None."""
+    if ds.get('Modality') in IMAGE_MODALITIES and ds.get('SeriesInstanceUID') and 'LOCALIZER' not in ds.get('ImageType', []):
+        return str(ds.SeriesInstanceUID)
+    return None
 
 
 def candidates(headers, exclude_models):
     """
     (series, regs, headers_by_sop) of one patient. `headers`: [(path, Dataset)] of every readable file, in folder order
-    (plan_<n> by numeric n, then misc_files/). Copies of one SOP are reduced to the first path.
+    (the caller's; the first copy of a SOP is the one kept). A file whose SOPInstanceUID, StudyInstanceUID, Modality or
+    ManufacturerModelName cannot be read is dropped first, and so is the series it belongs to (when that UID reads).
     series: [(SeriesInstanceUID, [(path, header)])] of the CT/MR/PT series, first-seen order; localizer files are dropped one
     by one, files without a SeriesInstanceUID are dropped, and so is every file of a study that holds a file whose
     ManufacturerModelName contains an excluded model (case-sensitive substring) or that has no StudyInstanceUID.
-    regs: the REG headers outside those studies. headers_by_sop: {SOPInstanceUID: header} of all files, excluded studies and
-    localizers included. The caller still removes the planning CTs of converted plans from `series`.
+    regs: the REG headers outside those studies. headers_by_sop: {SOPInstanceUID: header} of all kept files, excluded
+    studies and localizers included. The caller still removes the planning CTs of converted plans from `series`.
     """
-    excluded = {_study(ds) for _, ds in headers if any(m in str(ds.get('ManufacturerModelName', '')) for m in exclude_models)}
+    keyed, broken = [], set()
+    for path, ds in headers:
+        keys = _header_call(_file_keys, ds)
+        if keys is None:  # a dropped slice may be an end slice, which check_volume cannot see: drop its whole series
+            # shortcut: a file whose SeriesInstanceUID is unreadable too taints nothing, upgrade if one shows up in real data
+            broken.add(_header_call(lambda d: str(d.SeriesInstanceUID), ds))
+        else:
+            keyed.append((path, ds, keys))
+    excluded = {study for _, _, (_, study, _, model) in keyed if any(m in model for m in exclude_models)}
     excluded.add('')
     unique, seen = [], set()
-    for path, ds in headers:
-        sop = str(ds.get('SOPInstanceUID', ''))
+    for path, ds, (sop, study, modality, _) in keyed:
         if sop and sop in seen:
             continue
         seen.add(sop)
-        unique.append((path, ds))
+        unique.append((path, ds, study, modality))
     series = defaultdict(list)
-    for path, ds in unique:
-        if _study(ds) not in excluded and _header_call(_is_candidate_file, ds):
-            series[str(ds.SeriesInstanceUID)].append((path, ds))
-    regs = [ds for _, ds in unique if ds.get('Modality') == 'REG' and _study(ds) not in excluded]
+    for path, ds, study, _ in unique:
+        if study not in excluded and (uid := _header_call(_candidate_series, ds)):
+            series[uid].append((path, ds))
+    regs = [ds for _, ds, study, modality in unique if modality == 'REG' and study not in excluded]
     by_sop = {}
-    for _, ds in headers:
-        by_sop.setdefault(str(ds.get('SOPInstanceUID', '')), ds)
-    return list(series.items()), regs, by_sop
+    for _, ds, (sop, *_) in keyed:
+        by_sop.setdefault(sop, ds)
+    return [(uid, slices) for uid, slices in series.items() if uid not in broken], regs, by_sop

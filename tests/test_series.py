@@ -927,3 +927,55 @@ def test_a_refused_plans_ct_that_may_be_short_is_skipped_not_written_to_images(t
     assert (images_row.outcome, images_row.reason, images_row.skipped_series) == (
         conv.OUTCOME_SKIPPED, conv.REASON_NO_IMAGES, 1)
     assert not (out / PID / conv.IMAGES_NAME).exists()
+
+
+# ---------------------------------------------------------------- hardening #37, #35
+
+class Unreadable:
+    def get(self, *args):
+        raise TypeError
+
+
+def test_a_file_whose_identifying_tags_raise_is_dropped_not_the_patient(tmp_path):
+    mr = put(tmp_path / 'misc_files')
+    good = [(Path(path), read_header(path)) for path in mr['paths']]
+    for headers in ([(tmp_path / 'bad.dcm', Unreadable()), *good], [*good, (tmp_path / 'bad.dcm', Unreadable())]):
+        found, regs, by_sop = ser.candidates(headers, ('Acuity',))
+        assert [uid for uid, _ in found] == [mr['series_uid']] and regs == [] and len(by_sop) == len(good)
+    slice_of_mr = Unreadable()
+    slice_of_mr.SeriesInstanceUID = mr['series_uid']  # a dropped slice of the MR: the MR may now lack an end slice
+    assert ser.candidates([*good, (tmp_path / 'bad.dcm', slice_of_mr)], ('Acuity',))[0] == []
+
+
+def copy_renamed(paths, folder):
+    folder.mkdir(parents=True, exist_ok=True)
+    for path in paths:
+        shutil.copy2(path, folder / f'copy_{Path(path).name}')
+
+
+def test_a_series_shared_with_a_refused_unreadable_sibling_is_written_from_the_converted_copy(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    two = make_plan(org / PID / 'plan_2')
+    (org / PID / 'plan_1' / 'junk.dcm').write_bytes(b'not a dicom file')  # plan_1: REASON_FILE_UNREADABLE
+    mr = put(org / PID / 'plan_1', frame_uid=two['ct']['frame_uid'])
+    copy_to(mr['paths'], org / PID / 'plan_2')
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.reason) for r in rows if r.folder.startswith('plan_')] == [
+        ('plan_1', conv.REASON_FILE_UNREADABLE), ('plan_2', '')]
+    assert [r['series_instance_uid'] for r in csv_at(out / PID / 'plan_2')[1:]] == [mr['series_uid']]
+    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1  # plan_1's own CT: short-only
+
+
+def test_a_slice_missing_planning_ct_is_skipped_even_where_a_converted_sibling_holds_a_copy(tree):
+    org, out = tree
+    one = make_plan(org / PID / 'plan_1')
+    make_plan(org / PID / 'plan_2')
+    Path(one['ct']['paths'][-1]).unlink()  # plan_1: REASON_CT_SLICE_MISSING, the rest still one uniform volume
+    copy_renamed(one['ct']['paths'][:-1], org / PID / 'plan_2')
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.reason) for r in rows if r.folder.startswith('plan_')] == [
+        ('plan_1', conv.REASON_CT_SLICE_MISSING), ('plan_2', '')]
+    images_row = next(r for r in rows if r.folder == conv.IMAGES_NAME)
+    assert (images_row.outcome, images_row.skipped_series) == (conv.OUTCOME_SKIPPED, 1)
+    assert len(csv_at(out / PID / 'plan_2')) == 1  # the planning CT row only
