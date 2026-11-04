@@ -66,7 +66,8 @@ Returns the number of cases written and refused.
    instead of overwriting: a split already used for training is never replaced silently. Identical content is
    left as it is. The write is atomic and exclusive (temp file in the same folder, then `os.link`, which refuses an
    existing target, so of two concurrent runs only the first writes, #73; a plain rename where hard links are
-   unsupported). A manifest without a `patient` or `case_dir` column is refused (#72).
+   unsupported). A manifest without a `patient` or `case_dir` column is refused (#72). So is one that is not UTF-8 or holds a row without a
+   `patient` or `case_dir` value (#78).
 
 ### `check_disjoint(splits, external_manifest)`
 

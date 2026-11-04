@@ -232,3 +232,32 @@ def test_split_and_manifest_import_no_pandas_sklearn_and_split_no_numpy(module):
     imported |= {node.module.split('.')[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
     banned = {'pandas', 'sklearn'} | ({'numpy'} if module is sp else set())
     assert not imported & banned
+
+
+@pytest.mark.parametrize('body', [
+    'SYNTHETIC_P00/plan_1\n',  # a short row: patient reads None
+    'SYNTHETIC_P00/plan_1,\n',  # an empty patient
+    'SYNTHETIC_P00/plan_1,SYNTHETIC_\xe9\n',  # not UTF-8 once written as latin-1
+])
+def test_a_malformed_row_or_a_non_utf8_manifest_is_refused(tmp_path, capfd, body):
+    path = tmp_path / 'manifest.csv'
+    path.write_bytes(('case_dir,patient\n' + body).encode('latin-1'))
+    with pytest.raises(ValueError) as excinfo:
+        sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
+    assert str(excinfo.value) == sp.REASON_ROWS
+    assert not (tmp_path / 'splits.json').exists()
+    out, err = capfd.readouterr()
+    assert 'SYNTHETIC' not in out + err
+
+
+def test_two_writes_in_one_process_use_different_temp_names(tmp_path, monkeypatch):
+    names = []
+    real = os.link
+
+    def spy(source, target):
+        names.append(os.path.basename(source))
+        real(source, target)
+    monkeypatch.setattr(os, 'link', spy)
+    for folder in ('a', 'b'):
+        run(write_manifest(tmp_path / folder, TEN))
+    assert len(set(names)) == 2

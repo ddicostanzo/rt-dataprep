@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import os
+import uuid
 from pathlib import Path
 
 from rt_dataprep import convert as conv
@@ -26,20 +27,29 @@ REASON_NO_TRAIN = 'the test and val sizes leave no patient for train'
 REASON_OVERLAP = 'a patient of the external manifest is in a split'
 REASON_EXISTS = 'splits.json already exists with different content; nothing written'
 REASON_COLUMNS = 'a manifest has no patient or case_dir column'
+REASON_ROWS = 'a manifest is not UTF-8 or has a row without a patient or case_dir'
 
 
 def _read(manifest_path):
+    rows, fields = None, set()
     with open(manifest_path, newline='', encoding='utf-8') as handle:
-        reader = csv.DictReader(handle)
-        if not {'patient', 'case_dir'} <= set(reader.fieldnames or ()):
-            raise ValueError(REASON_COLUMNS)
-        return list(reader)
+        try:
+            reader = csv.DictReader(handle)
+            fields = set(reader.fieldnames or ())
+            rows = list(reader) if {'patient', 'case_dir'} <= fields else []
+        except UnicodeDecodeError:  # a ValueError whose text quotes bytes of the file: refused below, nothing chained (#78)
+            pass
+    if rows is None or any(not row.get('patient') or not row.get('case_dir') for row in rows):  # a short row reads None
+        raise ValueError(REASON_ROWS)
+    if not {'patient', 'case_dir'} <= fields:
+        raise ValueError(REASON_COLUMNS)
+    return rows
 
 
 def _write_new(path, text):
     """Create `path` holding `text` atomically, keeping a `path` that appeared meanwhile: os.link, unlike os.replace, refuses
     an existing target, so of two concurrent runs only the first writes (#73)."""
-    temp = path.with_name(f'.{os.getpid()}.tmp.{path.name}')
+    temp = path.with_name(f'.{os.getpid()}.{uuid.uuid4().hex}.tmp.{path.name}')  # unique per call, threads included (#79)
     failed = False
     try:
         try:

@@ -16,7 +16,7 @@ from rt_dataprep.preprocess import (
     preprocess,
 )
 from rt_dataprep.preprocess import REASON_INTERNAL as PREPROCESS_REASON_INTERNAL
-from rt_dataprep.split import REASON_COLUMNS, REASON_EXISTS, REASON_NO_TRAIN, REASON_OVERLAP, REASON_SIZE, SPLIT_NAMES, split
+from rt_dataprep.split import REASON_COLUMNS, REASON_EXISTS, REASON_NO_TRAIN, REASON_OVERLAP, REASON_ROWS, REASON_SIZE, SPLIT_NAMES, split
 
 
 PREPROCESS_HELP = 'resample, rescale and crop/pad a converted tree into a separate output tree; --legacy-rnt is required for any output'
@@ -63,7 +63,7 @@ def main(argv=None):
             organize(args.src, args.out)
     except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug, reported as below
         if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_OUTSIDE_SRC,
-                            REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS):
+                            REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS):
             parser.exit(1, unexpected(exc))
         parser.exit(1, f'rt_dataprep: {exc}\n')
     except ConvertAborted:  # the report is written; the text is fixed, nothing of the original reaches the terminal
