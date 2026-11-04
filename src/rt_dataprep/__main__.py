@@ -1,8 +1,9 @@
 import argparse
 import dataclasses
 import logging
+import sys
 
-from rt_dataprep.convert import REASON_INTERNAL, REASON_OUTSIDE_ORG, ConvertAborted, convert
+from rt_dataprep.convert import REASON_INTERNAL, REASON_OUTSIDE_ORG, ConvertAborted, convert, crash_site
 from rt_dataprep.organize import REASON_OUTSIDE_SRC, organize
 from rt_dataprep.preprocess import (
     LEGACY_RNT,
@@ -42,9 +43,9 @@ def main(argv=None):
             preprocess(args.converted, args.out, dataclasses.replace(steps, legacy_linear_masks=args.legacy_linear_masks))
         else:
             organize(args.src, args.out)
-    except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug and propagates
+    except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug, reported as below
         if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_OUTSIDE_SRC):
-            raise
+            parser.exit(1, unexpected(exc))
         parser.exit(1, f'rt_dataprep: {exc}\n')
     except ConvertAborted:  # the report is written; the text is fixed, nothing of the original reaches the terminal
         parser.exit(1, f'rt_dataprep: {REASON_INTERNAL}\n')
@@ -52,6 +53,14 @@ def main(argv=None):
         parser.exit(1, f'rt_dataprep: {PREPROCESS_REASON_INTERNAL}\n')
     except OSError:  # the message names a path, which can hold a patient id
         parser.exit(1, 'rt_dataprep: file system error on the source or output root\n')
+    except Exception as exc:  # a bug: its type and site only, never its message, which may name a path (#26)
+        parser.exit(1, unexpected(exc))
+
+
+def unexpected(exc):
+    """Fixed text for an unexpected exception being handled: its type and innermost rt_dataprep site, no message."""
+    module, line = crash_site(sys.exc_info()[2])
+    return f'rt_dataprep: unexpected error ({getattr(type(exc), "__name__")} at {module}:{line})\n'  # noqa: B009 (no dunder access)
 
 
 if __name__ == '__main__':

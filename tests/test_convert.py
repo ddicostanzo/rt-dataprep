@@ -876,3 +876,18 @@ def test_a_dose_with_negative_or_absolute_frame_offsets_converts_to_the_grid_of_
     assert got.GetOrigin() == ct.GetOrigin() and got.GetSize() == ct.GetSize()
     np.testing.assert_allclose(sitk.GetArrayFromImage(got), STORED * SCALING, atol=1e-5)  # the relative-positive form's dose
     assert value_at(got, physical_point((1, 0, 0, 0, 1, 0), NAMED)) == pytest.approx(STORED[NAMED] * SCALING, abs=1e-5)
+
+
+def test_point_items_of_a_kept_roi_are_dropped_and_the_mask_is_its_planar_contours(tree):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', rois=[dict(number=1, name='Liver', kind='box', box=INSIDE)])
+    struct = pydicom.dcmread(plan['folder'] / 'struct.dcm')
+    point = pydicom.Dataset()
+    point.ContourGeometricType, point.NumberOfContourPoints, point.ContourData = 'POINT', 1, list(ORIGIN)  # voxel (0, 0, 0)
+    struct.ROIContourSequence[0].ContourSequence.append(point)
+    struct.save_as(plan['folder'] / 'struct.dcm')
+    rows = conv.convert(org, out).rows
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_CONVERTED, '')
+    expected = np.zeros(SHAPE)
+    expected[1:3, 1:4, 2:5] = 1
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(read(out / PID / 'plan_1' / 'liver.nii.gz')), expected)

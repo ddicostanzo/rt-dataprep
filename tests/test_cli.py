@@ -1,6 +1,7 @@
 """CLI (task-06, task-03 of F2b): `python -m rt_dataprep convert` and `preprocess`, always run as a subprocess. Every tree is synthetic and built in tmp_path."""
 import csv
 import dataclasses
+import re
 import subprocess
 import sys
 
@@ -161,3 +162,23 @@ def test_preprocess_help_says_the_preset_is_required_for_any_output():
     result = subprocess.run([sys.executable, '-m', 'rt_dataprep', 'preprocess', '--help'], capture_output=True, text=True)
     assert result.returncode == 0
     assert 'required for any output' in ' '.join(result.stdout.split())
+
+
+# convert itself raises outside the patient loop, so the CLI's own handler reports it; argv comes after -c.
+BUG = """
+import runpy, sys
+from rt_dataprep import convert
+def bug(*args, **kwargs):
+    raise %s('SYNTHETIC_ID in ' + sys.argv[1])
+convert.convert = bug
+sys.argv = ['rt_dataprep', 'convert', sys.argv[1], sys.argv[2]]
+runpy.run_module('rt_dataprep', run_name='__main__')
+"""
+
+
+@pytest.mark.parametrize('kind', ['ValueError', 'TypeError'])
+def test_an_unexpected_exception_prints_its_type_and_site_never_its_message(tmp_path, org, kind):
+    result = subprocess.run([sys.executable, '-c', BUG % kind, str(org), str(tmp_path / 'out')], capture_output=True, text=True)
+    assert result.returncode == 1 and result.stdout == ''
+    assert re.fullmatch(r'rt_dataprep: unexpected error \(' + kind + r' at [\w.]+:\d+\)\n', result.stderr)
+    assert 'SYNTHETIC_ID' not in result.stderr and str(tmp_path) not in result.stderr
