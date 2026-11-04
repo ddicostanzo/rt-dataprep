@@ -46,3 +46,10 @@ Gotchas:
   value instead of the default 0. Tests that assert 0 outside a grid must sit more than half a native voxel beyond it.
 - With the 5^3 fixture at 1 mm, new_spacing 1.5 and final 1.25, a direct 1.25 resample gives n = 4, the two-step gives 3;
   `test_ct_steps_run_in_legacy_order` pins that.
+
+## review-1
+- BLOCKING (fixed by the orchestrator): no test pinned nearest-neighbour masks; linear+uint8 passed every test. Added
+  test_default_masks_take_the_nearest_native_voxel (independent rounding of native indices); the mutant fails it.
+- WARNING (deferred, hardening at PR time): an axis with N >= 2 and N*s < s' gets size 0 and aborts the run
+  (REASON_INTERNAL) instead of refusing one plan. Plan gap; unlikely for a CT.
+- NOTEs: the float32 rescale test uses float32 input (int16 checked by hand); the array-view test is a regression guard.

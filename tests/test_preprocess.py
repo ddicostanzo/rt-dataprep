@@ -175,6 +175,20 @@ def test_masks_are_binary_uint8_by_default_and_fractional_float32_when_legacy_li
     assert soft.GetPixelID() == sitk.sitkFloat32 and ((values > 0) & (values < 1)).any()
 
 
+def test_default_masks_take_the_nearest_native_voxel():
+    ct, mask = cube_fixture(side=8)
+    steps = dataclasses.replace(LEGACY_RNT, new_shape=(20, 20, 20))
+    final = pre.process_ct(ct, steps)
+    out = sitk.GetArrayFromImage(pre.process_mask(mask, final, steps))
+    native = sitk.GetArrayFromImage(mask)
+    expected = np.zeros_like(out)
+    for z, y, x in np.ndindex(out.shape):  # independent of sitk.Resample: round each final centre's native index
+        index = np.rint(mask.TransformPhysicalPointToContinuousIndex(final.TransformIndexToPhysicalPoint((x, y, z)))).astype(int)
+        if (index >= 0).all() and (index < native.shape[::-1]).all():
+            expected[z, y, x] = native[index[2], index[1], index[0]]
+    assert out.sum() > 0 and (out == expected).all()
+
+
 def test_cube_keeps_its_centroid_and_volume_and_a_shifted_copy_fails():
     ct, mask = cube_fixture()
     steps = dataclasses.replace(LEGACY_RNT, new_shape=(20, 20, 20))
