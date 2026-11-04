@@ -255,6 +255,19 @@ def test_a_series_whose_header_cannot_be_read_is_refused_and_its_siblings_are_ke
     assert [r['case_dir'] for r in read(converted)] == [f'{PID}/plan_1', f'{PID}/study_1/series_CT_1', f'{PID}/study_2/series_MR_2']
 
 
+def test_an_unreadable_study_series_csv_is_one_refused_study_and_the_plan_row_is_kept(converted, monkeypatch):
+    real = pre.read_series_csv
+
+    def flaky(folder):
+        if folder.name == 'study_2':
+            raise OSError('SYNTHETIC_PATH')
+        return real(folder)
+
+    monkeypatch.setattr(pre, 'read_series_csv', flaky)
+    assert man.manifest(converted) == (2, 1)
+    assert [r['case_dir'] for r in read(converted)] == [f'{PID}/plan_1', f'{PID}/study_1/series_CT_1']
+
+
 def test_only_study_n_folders_with_a_series_csv_are_walked(converted):
     patient = converted / PID
     (patient / 'study_3').mkdir()  # no series.csv: not a study, not a refusal

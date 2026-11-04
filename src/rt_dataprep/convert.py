@@ -311,9 +311,9 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
     if not study_folders:
         return [ConvertRow(patient, STUDIES_NAME, OUTCOME_SKIPPED, REASON_NO_STUDIES, skipped_series=skipped)]
     rows = [ConvertRow(patient, STUDIES_NAME, OUTCOME_CONVERTED, skipped_series=skipped)]
-    # study_<n> by the earliest (undated last) StudyDate and StudyTime over the series written to it, then the UID. The text is
+    # study_<n> by the earliest (undated, then untimed, last) StudyDate and StudyTime over the series written to it, then the UID. The text is
     # compared as stored, stripped: an invalid DA sorts and never raises.
-    rank = lambda uid: (min((date == '', date, time) for date, time in study_dates[uid]), uid)  # noqa: E731
+    rank = lambda uid: (min((date == '', date, time == '', time) for date, time in study_dates[uid]), uid)  # noqa: E731
     for n, uid in enumerate(sorted(study_folders, key=rank), 1):
         (partial / study_folders[uid]).rename(partial / f'study_{n}')
         series_rows = [item[2] for item in written[study_folders[uid]]]
