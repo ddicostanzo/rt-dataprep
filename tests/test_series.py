@@ -1136,3 +1136,53 @@ def test_a_blank_patient_id_series_in_misc_files_is_never_placed(tree):
     conv.convert(org, out)
     assert len(csv_at(out / PID / 'plan_1')) == 1  # the planning CT row only
     assert not (out / PID / conv.IMAGES_NAME).exists()
+
+
+def images_uids(out):
+    return {r['series_instance_uid'] for r in csv_at(out / PID / conv.IMAGES_NAME)} if (out / PID / conv.IMAGES_NAME).exists() else set()
+
+
+def test_an_unreadable_misc_file_whose_study_can_be_salvaged_skips_that_study_only(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    misc = org / PID / 'misc_files'
+    at_risk, other = put(misc, prefix='a'), put(misc, prefix='b')
+    (misc / 'stray.dcm').write_bytes(Path(at_risk['paths'][0]).read_bytes()[132:])  # no preamble: unreadable, its tags intact
+    rows = conv.convert(org, out).rows
+    assert images_uids(out) == {other['series_uid']}
+    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1
+
+
+def test_an_unreadable_misc_file_with_no_study_skips_every_misc_only_series(tree):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    misc = org / PID / 'misc_files'
+    put(misc, prefix='a')
+    put(misc, prefix='b')
+    kept = put(org / PID / 'plan_1', prefix='c', frame_uid=plan['ct']['frame_uid'])  # in the plan folder, not misc-only
+    (misc / 'stray.dcm').write_bytes(b'SYNTHETIC not dicom at all')
+    rows = conv.convert(org, out).rows
+    assert images_uids(out) == set()
+    assert [r['series_instance_uid'] for r in csv_at(out / PID / 'plan_1') if r['kind'] == 'series'] == [kept['series_uid']]
+    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 2
+
+
+def test_a_file_dropped_for_a_bad_tag_skips_every_series_of_its_study(tree, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    misc = org / PID / 'misc_files'
+    first = put(misc, prefix='a')
+    sibling = put(misc, prefix='c', study_uid=first['study_uid'])  # another series of the same study
+    other = put(misc, prefix='b')
+    bad = pydicom.dcmread(first['paths'][0], stop_before_pixels=True).SOPInstanceUID
+    real = getattr(ser, '_file_keys')  # noqa: B009 (a private name, never dotted)
+
+    def keys(ds):
+        if str(ds.get('SOPInstanceUID', '')) == bad:
+            raise ValueError('SYNTHETIC bad tag')
+        return real(ds)
+    monkeypatch.setattr(ser, '_file_keys', keys)
+    rows = conv.convert(org, out).rows
+    assert images_uids(out) == {other['series_uid']}
+    assert sibling['series_uid'] not in images_uids(out)
+    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1  # the sibling; the first was dropped whole

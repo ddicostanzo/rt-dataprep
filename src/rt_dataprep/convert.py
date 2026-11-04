@@ -156,9 +156,15 @@ def _convert_patient(folder, out_root, exclude_models):
     plan_headers = [read_folder_headers(plan_dir) for plan_dir in plans]
     misc_dir = folder / 'misc_files'
     misc_headers, misc_unreadable = read_folder_headers(misc_dir) if misc_dir.is_dir() else ([], False)
-    misc_headers = [(p, ds) for p, ds in misc_headers if str(ds.get('PatientID', '')).strip()]  # blank id: kept, never placed (#12)
+    # An unreadable misc file may be a lost slice of any series of its study: those are skipped (#36). Its study is read
+    # with force=True; when even that fails, every misc-only series of the patient is skipped.
+    misc_taint = set(), False
     if misc_unreadable:
-        log.info('convert: %d unreadable files in misc_files', sum(p.is_file() for p in misc_dir.iterdir()) - len(misc_headers))
+        read = {p for p, _ in misc_headers}
+        studies = [_salvage_study(p) for p in sorted(misc_dir.iterdir()) if p.is_file() and p not in read]
+        log.info('convert: %d unreadable files in misc_files', len(studies))
+        misc_taint = {s for s in studies if s}, None in studies
+    misc_headers = [(p, ds) for p, ds in misc_headers if str(ds.get('PatientID', '')).strip()]  # blank id: kept, never placed (#12)
     headers = [item for found, _ in plan_headers for item in found] + misc_headers  # folder order: plan_<n> by n, then misc_files
     if not plans and not ser.candidates(headers, exclude_models)[0]:
         return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_NO_PLANS)]
@@ -183,7 +189,7 @@ def _convert_patient(folder, out_root, exclude_models):
         # Organize copies a study whole into every folder that holds it, so a converted folder's copy is complete: the
         # SOP dedup keeps it over a short folder's copy (#35). Only a SOP found nowhere else stays in a short folder.
         ordered = sorted(headers, key=lambda item: item[0].parent in short)
-        images_row = _place_series(folder.name, ordered, exclude_models, outcomes, partial, short, lost)
+        images_row = _place_series(folder.name, ordered, exclude_models, outcomes, partial, short, lost, misc_taint)
         rows += [images_row] if images_row else []
         for row, result in outcomes:  # series.csv of each converted plan folder goes in last
             if result is not None:
@@ -196,6 +202,16 @@ def _convert_patient(folder, out_root, exclude_models):
     return rows
 
 
+def _salvage_study(path):
+    """StudyInstanceUID of an unreadable file, read again with force=True and tags only; None when even that fails (#36)."""
+    try:
+        ds = quiet_call(lambda: pydicom.dcmread(path, force=True, stop_before_pixels=True, specific_tags=['StudyInstanceUID']),
+                        REASON_FILE_UNREADABLE)
+    except CaseRefused:
+        return None
+    return str(ds.get('StudyInstanceUID', '')) or None
+
+
 def _refuse_on_lost_ct(row, result, partial, lost):
     """(row, result) of a plan, refused as REASON_CT_SLICE_MISSING when it converted on a planning CT a sibling found short (#44)."""
     if result is None or result.ct_series_uid not in lost:
@@ -205,13 +221,15 @@ def _refuse_on_lost_ct(row, result, partial, lost):
     return ConvertRow(row.patient, row.folder, OUTCOME_REFUSED, REASON_CT_SLICE_MISSING), None
 
 
-def _place_series(patient, headers, exclude_models, outcomes, partial, short=frozenset(), lost=frozenset()):
+def _place_series(patient, headers, exclude_models, outcomes, partial, short=frozenset(), lost=frozenset(), misc_taint=(frozenset(), False)):
     """
     Write every other series of the patient into the converted plan folders it is registered to, else into images/, each
     series read once. Adds the series files and rows to the plan rows and results; writes images/series.csv. Returns the
     images ConvertRow, None when the patient has no candidate series. Nothing here catches: a bad header is a None from
     series.py, anything else is the patient's REASON_INTERNAL. A series with a kept file in a folder of `short` (refused
-    plan folders that may have lost a slice) or whose SeriesInstanceUID is in `lost` (known short) is skipped and counted.
+    plan folders that may have lost a slice) or whose SeriesInstanceUID is in `lost` (known short) is skipped and counted,
+    and so is a series of a tainted study (`misc_taint` and series.tainted_studies) or, when a taint has no study, a series
+    held only in misc_files.
     """
     found, regs, by_sop = ser.candidates(headers, exclude_models)
     converted = [(row, result, result.series_rows[0]) for row, result in outcomes if result is not None]  # row 0 is the CT row
@@ -219,7 +237,13 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
     found = [(uid, slices) for uid, slices in found if uid not in planning]
     if not found:
         return None
-    checked = [None if uid in lost or any(path.parent in short for path, _ in slices) else ser.check_volume(slices)
+    dropped, dropped_blind = ser.tainted_studies(headers)
+    tainted, blind = misc_taint[0] | dropped, misc_taint[1] or dropped_blind
+
+    def at_risk(slices):
+        return (_tag(slices[0][1], 'StudyInstanceUID') in tainted
+                or (blind and all(path.parent.name == 'misc_files' for path, _ in slices)))
+    checked = [None if uid in lost or any(path.parent in short for path, _ in slices) or at_risk(slices) else ser.check_volume(slices)
                for uid, slices in found]
     skipped = checked.count(None)
     order = lambda ordered: tuple(_tag(ordered[0][1], tag) for tag in ('SeriesDate', 'SeriesTime', 'SeriesInstanceUID'))  # noqa: E731
