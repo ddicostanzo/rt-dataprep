@@ -155,11 +155,26 @@ def _rigid_matrix(item):
     if len(values) != 16:
         return None
     matrix = np.asarray(values).reshape(4, 4)
+    return matrix if _is_rigid(matrix) else None
+
+
+def _is_rigid(matrix):
+    """True for a finite 4x4 matrix with last row 0 0 0 1 and a proper rotation in the top left (the one rigidity test)."""
     rotation = matrix[:3, :3]
-    usable = (np.isfinite(matrix).all()  # a NaN or inf translation would pass the rotation checks below
-              and np.abs(matrix[3] - (0, 0, 0, 1)).max() <= LAST_ROW_ATOL
-              and np.abs(rotation.T @ rotation - np.eye(3)).max() <= RIGID_ATOL and np.linalg.det(rotation) > 0)
-    return matrix if usable else None
+    return bool(np.isfinite(matrix).all()  # a NaN or inf translation would pass the rotation checks below
+                and np.abs(matrix[3] - (0, 0, 0, 1)).max() <= LAST_ROW_ATOL
+                and np.abs(rotation.T @ rotation - np.eye(3)).max() <= RIGID_ATOL and np.linalg.det(rotation) > 0)
+
+
+def reg_matrix_array(text):
+    """The 4x4 matrix of a series.csv reg_matrix text: np.eye(4) for 'identity', else its 16 numbers when rigid, or None."""
+    if text == IDENTITY:
+        return np.eye(4)
+    values = [_or_none(float, token) for token in text.split()]
+    if len(values) != 16 or None in values:
+        return None
+    matrix = np.asarray(values).reshape(4, 4)
+    return matrix if _is_rigid(matrix) else None
 
 
 def _item_frame(item, headers_by_sop):

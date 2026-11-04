@@ -329,7 +329,7 @@ def state(root):
 def report_rows(out):
     with open(out / 'preprocess_report.csv', newline='') as handle:
         reader = csv.DictReader(handle)
-        assert reader.fieldnames == ['patient', 'folder', 'outcome', 'reason', 'files']
+        assert reader.fieldnames == ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series']
         return list(reader)
 
 
@@ -348,7 +348,7 @@ def test_preset_writes_the_prefixed_files_and_leaves_the_input_alone(tmp_path):
     assert (row.outcome, row.reason, row.files) == ('preprocessed', '', expected) and len(report.rows) == 1
     assert sorted(p.name for p in (out / 'SYNTHETICPTA' / 'plan_1').iterdir()) == sorted(expected)
     assert listing(out) == ['SYNTHETICPTA', 'preprocess_report.csv']  # no partial left
-    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='plan_1', outcome='preprocessed', reason='', files=';'.join(expected))]
+    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='plan_1', outcome='preprocessed', reason='', files=';'.join(expected), skipped_series='0')]
     done = out / 'SYNTHETICPTA' / 'plan_1'
     assert (done / 'applicator_a.txt').read_bytes() == APPLICATOR_BYTES
     final = sitk.ReadImage(str(done / CT_FILE))
@@ -375,17 +375,72 @@ def test_rescale_only_renames_the_ct_and_copies_dose_and_masks_byte_equal(tmp_pa
     assert np.abs(sitk.GetArrayFromImage(sitk.ReadImage(str(done / 'rescale_planning_ct.nii.gz'))) - (hu + 1024) / 4096).max() < 1e-6
 
 
-def test_series_csv_keeps_every_column_renames_files_and_drops_series_rows(tmp_path):
+def test_series_csv_keeps_every_column_and_renames_files_and_lists_the_aligned_series_last(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     folder, rows = write_plan(converted)
-    series = series_row('series_MR_1.nii.gz', 'series', modality='MR')  # its file is not in the folder: series rows are not read
+    sitk.WriteImage(make_image(np.ones((4, 4, 4))), str(folder / 'series_MR_1.nii.gz'))  # present, as check_rows now requires (task-02)
+    series = series_row('series_MR_1.nii.gz', 'series', modality='MR', reg_matrix='identity')  # an empty matrix would leave it out
     save_rows(folder, [*rows[:2], series, *rows[2:]])
     pre.preprocess(converted, out, SMALL)
     with open(out / 'SYNTHETICPTA' / 'plan_1' / 'series.csv', newline='') as handle:
         written = list(csv.DictReader(handle))
-    names = [CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt']
+    names = [CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt', pre.output_name('series_MR_1.nii.gz', SMALL)]
     assert [r['file'] for r in written] == names
-    assert [{k: v for k, v in r.items() if k != 'file'} for r in written] == [{k: v for k, v in r.items() if k != 'file'} for r in rows]
+    assert [{k: v for k, v in r.items() if k != 'file'} for r in written] == [{k: v for k, v in r.items() if k != 'file'} for r in [*rows, series]]
+
+
+def add_series(folder, rows, file='series_MR_1.nii.gz', modality='MR', write=True, **extra):
+    """Append a kind=series row (and a small image file, unless write is False) to a write_plan plan; returns the row."""
+    if write:
+        sitk.WriteImage(make_image(np.ones((4, 4, 4))), str(folder / file))
+    row = series_row(file, 'series', modality=modality, reg_matrix='identity', **extra)
+    save_rows(folder, [*rows, row])
+    return row
+
+
+def test_check_rows_returns_kept_ct_and_the_series_rows_in_input_order(tmp_path):
+    folder, rows = write_plan(tmp_path)
+    for k in (2, 1):  # not sorted: input order must survive
+        rows = [*rows, add_series(folder, rows, f'series_MR_{k}.nii.gz')]
+    kept, ct, series = pre.check_rows(folder)
+    assert [r['file'] for r in kept] == [conv.CT_NAME, conv.DOSE_NAME, 'ptv.nii.gz', 'bladder.nii.gz', 'applicator_a.txt']
+    assert [r['file'] for r in series] == ['series_MR_2.nii.gz', 'series_MR_1.nii.gz'] and all(r['kind'] == 'series' for r in series)
+    assert ct[0] == (12, 12, 12)
+
+
+def test_a_series_row_naming_a_missing_file_refuses_with_file_missing(tmp_path):
+    refuse(tmp_path, pre.REASON_FILE_MISSING, lambda folder, rows: add_series(folder, rows, write=False))
+
+
+@pytest.mark.parametrize('file, modality, reason', [
+    ('series_MR_1.nii.gz', 'RTDOSE', pre.REASON_STUDY_MODALITY),
+    ('series_MR_1.nii.gz', 'mr', pre.REASON_STUDY_MODALITY),
+    ('series_MR_1.nii.gz', '', pre.REASON_STUDY_MODALITY),
+    ('series_CT_1.nii.gz', 'MR', pre.REASON_STUDY_MODALITY),  # the name carries a different MOD than the modality column
+    ('mr_image.nii.gz', 'MR', pre.REASON_STUDY_NAME),
+    ('series_MR_1.nii', 'MR', pre.REASON_STUDY_NAME),
+    ('../series_MR_1.nii.gz', 'MR', pre.REASON_STUDY_NAME),
+])
+def test_a_bad_series_row_refuses_the_plan(tmp_path, file, modality, reason):
+    refuse(tmp_path, reason, lambda folder, rows: add_series(folder, rows, file, modality, write=False))
+
+
+def test_a_series_file_with_step_prefixes_passes_check_rows(tmp_path):
+    folder, rows = write_plan(tmp_path)
+    add_series(folder, rows, 'reshape_resample_initialresample_series_MR_1.nii.gz')
+    assert [r['file'] for r in pre.check_rows(folder)[2]] == ['reshape_resample_initialresample_series_MR_1.nii.gz']
+
+
+def test_check_rows_reads_no_series_header(tmp_path):
+    folder, rows = write_plan(tmp_path)
+    add_series(folder, rows, write=False)
+    (folder / 'series_MR_1.nii.gz').write_bytes(b'SYNTHETIC not a nifti')
+    assert len(pre.check_rows(folder)[2]) == 1
+
+
+def test_the_study_reasons_say_a_series_csv_series_row():
+    for reason in (pre.REASON_STUDY_MODALITY, pre.REASON_STUDY_NAME):
+        assert 'series.csv series row' in reason and 'study' not in reason
 
 
 def test_a_plan_without_a_dose_writes_no_dose(tmp_path):
@@ -756,7 +811,7 @@ def test_a_compute_failure_aborts_with_a_flushed_report_and_nothing_chained(tmp_
     chain = ''.join(traceback.format_exception(caught.value))
     assert 'direct cause' not in chain and 'During handling' not in chain  # nothing chained
     assert not issubclass(pre.PreprocessAborted, (ValueError, OSError))
-    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='')]
+    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='', skipped_series='0')]
     assert listing(out) == ['preprocess_report.csv']  # no partial, and the next patient was not started
 
 
@@ -770,7 +825,7 @@ def test_running_out_of_memory_reading_a_nifti_aborts_instead_of_refusing_the_pl
     monkeypatch.setattr(sitk, 'ReadImage', no_memory)
     with pytest.raises(pre.PreprocessAborted):
         pre.preprocess(converted, out, SMALL)
-    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='')]
+    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='', skipped_series='0')]
     assert listing(out) == ['preprocess_report.csv']
 
 
@@ -804,12 +859,17 @@ def test_no_log_line_carries_a_path_a_folder_name_or_a_series_value(tmp_path, mo
     folder, _ = write_plan(converted, plan='plan_2')
     (folder / 'ptv.nii.gz').write_bytes(b'not an image')
     write_plan(converted, patient='SYNTHETICPTB')
+    third, rows = write_plan(converted, plan='plan_3')  # a registered series, kept, and one left out
+    sitk.WriteImage(make_image(np.ones((4, 4, 4))), str(third / 'series_MR_1.nii.gz'))
+    sitk.WriteImage(make_image(np.ones((4, 4, 4))), str(third / 'series_MR_2.nii.gz'))
+    save_rows(third, [*rows, series_row('series_MR_1.nii.gz', 'series', modality='MR', reg_matrix='identity'),
+                      series_row('series_MR_2.nii.gz', 'series', modality='MR', reg_matrix='')])
     with caplog.at_level('DEBUG'):
         pre.preprocess(converted, out, SMALL)
         monkeypatch.setattr(pre, 'resample_to', lambda image, spacing: 1 / 0)
         with pytest.raises(pre.PreprocessAborted):
             pre.preprocess(converted, tmp_path / 'out2', SMALL)
-    assert caplog.records and not any(s in caplog.text for s in ('SYNTHETICPT', str(tmp_path), 'ptv', 'SYNTHETICCTUID', 'SYNTHETICPLAN'))
+    assert caplog.records and not any(s in caplog.text for s in ('SYNTHETICPT', str(tmp_path), 'ptv', 'SYNTHETICCTUID', 'SYNTHETICPLAN', 'series_MR'))
 
 
 def test_reasons_hold_no_separator_digit_run_or_uid():
@@ -1221,7 +1281,7 @@ def test_an_internal_error_in_a_study_series_aborts_the_run_and_removes_the_part
     assert str(caught.value) == pre.REASON_INTERNAL
     chain = ''.join(traceback.format_exception(caught.value))
     assert 'direct cause' not in chain and 'During handling' not in chain
-    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='')]
+    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='', skipped_series='0')]
     assert listing(out) == ['preprocess_report.csv']
 
 
@@ -1234,7 +1294,7 @@ def test_the_run_log_counts_plan_rows_and_imaging_rows_separately(tmp_path, capl
         pre.preprocess(converted, out, SMALL)
     messages = [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.preprocess' and r.getMessage().startswith('preprocess: ')]
     summary = [m for m in messages if 'plan rows' in m]
-    assert summary == ['preprocess: 1 plan rows (1 preprocessed, 0 refused), 4 imaging rows (2 preprocessed, 2 refused), 1 patient rows (0 refused, 1 skipped)']
+    assert summary == ['preprocess: 1 plan rows (1 preprocessed, 0 refused), 4 imaging rows (2 preprocessed, 2 refused), 1 patient rows (0 refused, 1 skipped); 0 registered series skipped']
 
 
 def test_study_refusals_log_only_reasons(tmp_path, caplog):
@@ -1276,3 +1336,254 @@ def test_manifest_lists_the_same_cases_on_the_converted_and_the_preprocessed_tre
         assert done['image'] == pre.output_name(kept['image'], steps, ct=kept['modality'] == 'CT')
         assert (out / PID / done['case_dir'].split('/')[1] / done['image']).is_file()
     assert [r['image'] for r in after[2:]] == [pre.output_name(f'series_MR_{k}.nii.gz', steps) for k in (1, 2)]
+
+
+# ---- task-03: registered series aligned onto the final CT grid (reg-resampling D1-D9, D13). SYNTHETIC volumes with one bright landmark voxel. ----
+
+CT_FRAME, MR_FRAME = 'SYNTHETICFORCT', 'SYNTHETICFORMR'
+FINAL = pre.process_ct(make_image(np.zeros((12, 12, 12)), **grid(12)), SMALL)  # the geometry of write_plan's final CT under SMALL: 10^3 at 1.25 mm, origin -6.25
+FINAL_ORIGIN = np.array(FINAL.GetOrigin())
+MR_GRID = dict(spacing=(1.25,) * 3, origin=tuple(FINAL_ORIGIN + (1.9 * 1.25, 1.7 * 1.25, 2.9 * 1.25)))  # a different grid: shifted by fractions of a voxel
+MR_SIZE = (8, 9, 7)
+NON_RIGID = '2 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1'
+BASE_FILES = [CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt']
+MR_OUT = pre.output_name('series_MR_1.nii.gz', SMALL)
+
+
+def matrix_text(matrix):
+    return ' '.join('%.10g' % v for v in np.asarray(matrix).ravel())
+
+
+def rigid(rotation_degrees=0.0, translation=(0, 0, 0)):
+    """A 4x4 rotation about z plus translation (mm)."""
+    c, s = np.cos(np.radians(rotation_degrees)), np.sin(np.radians(rotation_degrees))
+    matrix = np.eye(4)
+    matrix[:2, :2] = [[c, -s], [s, c]]
+    matrix[:3, 3] = translation
+    return matrix
+
+
+def landmark(size, index, value=100.0):
+    array = np.zeros(size[::-1])
+    array[index[2], index[1], index[0]] = value
+    return array
+
+
+def run_plan(tmp_path, specs, steps=SMALL):
+    """write_plan plus the series of `specs` ((file, modality, array or raw bytes or None, reg_matrix text, geometry), in series.csv order); preprocessed.
+    Returns (report, output plan folder, converted plan folder)."""
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, rows = write_plan(converted)
+    rows[0]['frame_of_reference_uid'] = CT_FRAME
+    for file, modality, array, text, geometry in specs:
+        if isinstance(array, bytes):
+            (folder / file).write_bytes(array)
+        elif array is not None:
+            sitk.WriteImage(make_image(array, **geometry), str(folder / file))
+        rows.append(series_row(file, 'series', modality=modality, reg_matrix=text, frame_of_reference_uid=MR_FRAME))
+    save_rows(folder, rows)
+    report = pre.preprocess(converted, out, steps)
+    return report, out / 'SYNTHETICPTA' / 'plan_1', folder
+
+
+def mr_spec(array, matrix, geometry=MR_GRID, file='series_MR_1.nii.gz', modality='MR'):
+    return (file, modality, array, matrix if isinstance(matrix, str) else matrix_text(matrix), geometry)
+
+
+def peak_index(image):
+    return np.array(np.unravel_index(np.argmax(sitk.GetArrayViewFromImage(image)), image.GetSize()[::-1])[::-1], float)
+
+
+def landmark_indices(out_image, series_geometry, size, index, matrix):
+    """(expected, inverse-mapped) continuous indices on the output of the landmark's physical point mapped through `matrix` and through its inverse."""
+    p = make_image(np.zeros(size[::-1]), **series_geometry).TransformIndexToPhysicalPoint(index)
+    def at(m):
+        return np.array(out_image.TransformPhysicalPointToContinuousIndex((m @ [*p, 1])[:3].tolist()))
+    return at(matrix), at(np.linalg.inv(matrix))
+
+
+def check_landmark(out_image, expected):
+    assert ((expected >= 0) & (expected <= np.array(out_image.GetSize()) - 1)).all()  # the landmark lies inside the final grid by construction
+    assert (np.abs(peak_index(out_image) - expected) <= 0.5 + 1e-6).all()
+
+
+def check_direction(out_image, expected, inverse_mapped):
+    difference = np.abs(inverse_mapped - expected)
+    axis = int(difference.argmax())
+    assert difference[axis] > 1 and abs(peak_index(out_image)[axis] - inverse_mapped[axis]) > 0.5
+
+
+def read_out(folder, name=MR_OUT):
+    return sitk.ReadImage(str(folder / name))
+
+
+def test_ac1_a_registered_mr_is_written_on_exactly_the_final_ct_grid_and_listed_after_the_existing_rows(tmp_path):
+    report, done, _ = run_plan(tmp_path, [mr_spec(landmark(MR_SIZE, (3, 4, 2)), rigid(0, (1.25, 0, 0)))])
+    assert plan_row(report).outcome == 'preprocessed' and plan_row(report).files == [*BASE_FILES, MR_OUT, 'series.csv']
+    image, ct = read_out(done), read_out(done, CT_FILE)
+    assert (image.GetSize(), image.GetOrigin(), image.GetSpacing(), image.GetDirection()) == (ct.GetSize(), ct.GetOrigin(), ct.GetSpacing(), ct.GetDirection())
+    assert image.GetPixelID() == sitk.sitkFloat32
+    rows = conv_rows(done)
+    assert [r['file'] for r in rows] == [*BASE_FILES, MR_OUT]
+    assert (rows[-1]['kind'], rows[-1]['modality'], rows[-1]['reg_matrix'], rows[-1]['frame_of_reference_uid']) == ('series', 'MR', 'identity', CT_FRAME)
+    assert rows[0]['frame_of_reference_uid'] == CT_FRAME
+
+
+def test_ac2a_identity_on_a_different_grid(tmp_path):
+    _, done, _ = run_plan(tmp_path, [mr_spec(landmark(MR_SIZE, (3, 4, 2)), 'identity')])
+    image = read_out(done)
+    expected, _ = landmark_indices(image, MR_GRID, MR_SIZE, (3, 4, 2), np.eye(4))
+    assert np.abs(expected - (4.9, 5.7, 4.9)).max() < 1e-6  # the grids differ by fractions of a voxel
+    check_landmark(image, expected)
+
+
+def test_ac2b_a_whole_voxel_translation_lands_the_landmark_at_the_mapped_index_and_not_at_the_inverse_one(tmp_path):
+    matrix = rigid(0, (3 * 1.25, -2 * 1.25, 1.25))
+    _, done, _ = run_plan(tmp_path, [mr_spec(landmark(MR_SIZE, (2, 3, 3)), matrix)])
+    image = read_out(done)
+    expected, inverse_mapped = landmark_indices(image, MR_GRID, MR_SIZE, (2, 3, 3), matrix)
+    check_landmark(image, expected)
+    check_direction(image, expected, inverse_mapped)
+
+
+def test_ac2c_a_rotation_about_z_plus_translation_lands_the_landmark_at_the_mapped_index_and_not_at_the_inverse_one(tmp_path):
+    geometry, size, index = dict(spacing=(1.0, 1.5, 2.0), origin=(-7.0, -9.0, -6.0)), (16, 12, 10), (6, 5, 3)
+    p = np.array(make_image(np.zeros(size[::-1]), **geometry).TransformIndexToPhysicalPoint(index))
+    q = np.array(FINAL.TransformIndexToPhysicalPoint((5, 4, 5)))  # the landmark is built to land on this final voxel centre
+    matrix = rigid(30)
+    matrix[:3, 3] = q - matrix[:3, :3] @ p
+    _, done, _ = run_plan(tmp_path, [mr_spec(landmark(size, index), matrix, geometry)])
+    image = read_out(done)
+    expected, inverse_mapped = landmark_indices(image, geometry, size, index, matrix)
+    assert np.abs(expected - (5, 4, 5)).max() < 1e-6
+    check_landmark(image, expected)
+    check_direction(image, expected, inverse_mapped)
+
+
+def coverage(out_image, series_geometry, size, matrix):
+    """(interior, outside) boolean (z, y, x) arrays: final voxels whose source continuous index is at least one voxel from the series boundary, and outside its buffer."""
+    series = make_image(np.zeros(size[::-1]), **series_geometry)
+    inverse = np.linalg.inv(matrix)
+    interior, outside = np.zeros(out_image.GetSize()[::-1], bool), np.zeros(out_image.GetSize()[::-1], bool)
+    for x, y, z in np.ndindex(*out_image.GetSize()):
+        p = (inverse @ [*out_image.TransformIndexToPhysicalPoint((x, y, z)), 1])[:3]
+        c = np.array(series.TransformPhysicalPointToContinuousIndex(p.tolist()))
+        interior[z, y, x] = ((c >= 1) & (c <= np.array(size) - 2)).all()
+        outside[z, y, x] = ((c < -0.5 - 1e-3) | (c > np.array(size) - 0.5 + 1e-3)).any()
+    assert interior.any() and outside.any()
+    return interior, outside
+
+
+def test_ac3_outside_the_series_fov_is_zero_and_a_constant_mr_keeps_its_value_at_interior_voxels(tmp_path):
+    size, matrix = (8, 8, 8), rigid(0, (0.6, 0.3, -0.4))
+    _, done, _ = run_plan(tmp_path, [mr_spec(np.full((8, 8, 8), 7.0), matrix, dict(spacing=(1.25,) * 3, origin=(-3.875, -4.125, -2.625)))])
+    values = sitk.GetArrayFromImage(read_out(done))
+    interior, outside = coverage(read_out(done), dict(spacing=(1.25,) * 3, origin=(-3.875, -4.125, -2.625)), size, matrix)
+    assert np.abs(values[interior] - 7.0).max() < 1e-4 and (values[outside] == 0).all()
+
+
+def test_ac4_a_registered_ct_is_rescaled_before_the_resample_and_gets_the_rescale_prefix(tmp_path):
+    geometry, matrix = dict(spacing=(1.25,) * 3, origin=(-3.875, -4.125, -2.625)), rigid(0, (0.6, 0.3, -0.4))
+    name = pre.output_name('series_CT_1.nii.gz', SMALL, ct=True)
+    report, done, _ = run_plan(tmp_path, [mr_spec(np.full((8, 8, 8), 100.0), matrix, geometry, 'series_CT_1.nii.gz', 'CT')])
+    assert name.startswith('reshape_resample_rescale_initialresample_') and plan_row(report).files[-2] == name
+    values = sitk.GetArrayFromImage(read_out(done, name))
+    interior, outside = coverage(read_out(done, name), geometry, (8, 8, 8), matrix)
+    assert np.abs(values[interior] - (100.0 + 1024) / 4096).max() < 1e-4 and (values[outside] == 0).all()
+    assert conv_rows(done)[-1]['file'] == name and conv_rows(done)[-1]['modality'] == 'CT'
+
+
+@pytest.mark.parametrize('text', ['', NON_RIGID])
+def test_ac5_an_unusable_matrix_leaves_the_series_out_and_counts_it(tmp_path, text):
+    report, done, _ = run_plan(tmp_path, [mr_spec(np.ones((4, 4, 4)), text)])
+    assert (plan_row(report).outcome, plan_row(report).skipped_series) == ('preprocessed', 1)
+    assert plan_row(report).files == [*BASE_FILES, 'series.csv'] and sorted(p.name for p in done.iterdir()) == sorted(plan_row(report).files)
+    assert [r['file'] for r in conv_rows(done)] == BASE_FILES
+
+
+def test_ac6_a_series_entirely_outside_the_ct_is_left_out_and_one_partly_outside_is_kept(tmp_path):
+    ones = np.ones((8, 8, 8))
+    report, done, _ = run_plan(tmp_path, [mr_spec(ones, rigid(0, (500, 0, 0))), mr_spec(ones, rigid(0, (8, 0, 0)), file='series_MR_2.nii.gz')])
+    kept = pre.output_name('series_MR_2.nii.gz', SMALL)
+    assert plan_row(report).skipped_series == 1 and plan_row(report).files == [*BASE_FILES, kept, 'series.csv']
+    values = sitk.GetArrayFromImage(read_out(done, kept))
+    assert (values > 0).any() and (values == 0).any() and [r['file'] for r in conv_rows(done)][-1] == kept
+
+
+def test_ac7_an_unreadable_series_file_is_left_out_and_counted(tmp_path):
+    report, done, _ = run_plan(tmp_path, [mr_spec(b'SYNTHETIC not a nifti', 'identity')])
+    assert (plan_row(report).outcome, plan_row(report).skipped_series) == ('preprocessed', 1)
+    assert plan_row(report).files == [*BASE_FILES, 'series.csv'] and not (done / MR_OUT).exists()
+
+
+def test_ac7_an_internal_error_while_resampling_a_series_still_stops_the_run(tmp_path, monkeypatch):
+    real = sitk.Resample
+
+    def resample(*args):
+        if isinstance(args[2], sitk.AffineTransform):  # only the series resample passes an affine
+            raise RuntimeError('SYNTHETICPTA')
+        return real(*args)
+    monkeypatch.setattr(sitk, 'Resample', resample)
+    with pytest.raises(pre.PreprocessAborted):
+        run_plan(tmp_path, [mr_spec(np.ones((4, 4, 4)), rigid(0, (1, 0, 0)))])
+    assert report_rows(tmp_path / 'out') == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='', skipped_series='0')]
+
+
+def test_ac9_rescale_only_resamples_an_mr_onto_the_native_ct_grid_and_keeps_its_name(tmp_path):
+    matrix = rigid(0, (1.0, -2.0, 1.0))
+    report, done, folder = run_plan(tmp_path, [mr_spec(landmark(MR_SIZE, (2, 3, 3)), matrix)], PreprocessSteps(rescale=True))
+    assert plan_row(report).files == ['rescale_planning_ct.nii.gz', 'dose.nii.gz', 'ptv.nii.gz', 'bladder.nii.gz', 'applicator_a.txt', 'series_MR_1.nii.gz', 'series.csv']
+    image, native = read_out(done, 'series_MR_1.nii.gz'), sitk.ReadImage(str(folder / conv.CT_NAME))
+    assert (image.GetSize(), image.GetOrigin(), image.GetSpacing(), image.GetDirection()) == (native.GetSize(), native.GetOrigin(), native.GetSpacing(), native.GetDirection())
+    assert (done / 'series_MR_1.nii.gz').read_bytes() != (folder / 'series_MR_1.nii.gz').read_bytes()  # resampled, not copied
+    expected, _ = landmark_indices(image, MR_GRID, MR_SIZE, (2, 3, 3), matrix)
+    check_landmark(image, expected)
+
+
+def test_ac10_the_report_counts_skipped_series_on_plan_rows_only_and_the_closing_line_has_the_total(tmp_path, caplog):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, rows = write_plan(converted)
+    rows += [add_series(folder, rows)]  # identity: kept
+    sitk.WriteImage(make_image(np.ones((4, 4, 4))), str(folder / 'series_MR_2.nii.gz'))
+    save_rows(folder, [*rows, series_row('series_MR_2.nii.gz', 'series', modality='MR', reg_matrix='')])  # skipped
+    refused, _ = write_plan(converted, plan='plan_2')
+    (refused / 'ptv.nii.gz').unlink()
+    write_study_tree(converted)
+    write_plan(converted, patient='SYNTHETICPTB')
+    with caplog.at_level('INFO'):
+        report = pre.preprocess(converted, out, SMALL)
+    csv_rows = [(r['folder'], r['skipped_series']) for r in report_rows(out)]
+    assert csv_rows[0] == ('plan_1', '1') and all(count == '0' for _, count in csv_rows[1:]) and len(csv_rows) == 5
+    assert plan_row(report).skipped_series == 1 and sum(r.skipped_series for r in report.rows) == 1
+    assert any('1 registered series skipped' in record.getMessage() for record in caplog.records)
+
+
+def test_two_registered_series_are_written_in_input_order_after_the_existing_rows(tmp_path):
+    ones = np.ones((4, 4, 4))
+    report, done, _ = run_plan(tmp_path, [mr_spec(ones, 'identity', file='series_MR_2.nii.gz'), mr_spec(ones, 'identity', file='series_PT_1.nii.gz', modality='PT')])
+    names = [pre.output_name('series_MR_2.nii.gz', SMALL), pre.output_name('series_PT_1.nii.gz', SMALL)]
+    assert plan_row(report).files == [*BASE_FILES, *names, 'series.csv']
+    assert [r['file'] for r in conv_rows(done)] == [*BASE_FILES, *names]
+    assert [r['modality'] for r in conv_rows(done)[-2:]] == ['MR', 'PT']
+
+
+def test_each_series_is_released_before_the_next_file_is_read(tmp_path, monkeypatch):
+    tracked, alive_at_read = [], []
+    read_image, process_series = pre.read_image, pre.process_series
+
+    def track(image):
+        tracked.append(weakref.ref(image))
+        return image
+
+    def read(path):
+        alive_at_read.append(sum(ref() is not None for ref in tracked))
+        image = read_image(path)
+        return image if len(alive_at_read) == 1 else track(image)  # the CT is the reference grid: it stays
+
+    monkeypatch.setattr(pre, 'read_image', read)
+    monkeypatch.setattr(pre, 'process_series', lambda *args: track(process_series(*args)))
+    ones = np.ones((4, 4, 4))
+    report, _, _ = run_plan(tmp_path, [mr_spec(ones, 'identity'), mr_spec(ones, 'identity', file='series_MR_2.nii.gz')])
+    assert plan_row(report).outcome == 'preprocessed'
+    assert alive_at_read == [0] * 6  # CT, dose, two masks, two series
+    assert sum(ref() is not None for ref in tracked) == 0
