@@ -462,6 +462,8 @@ def test_a_study_link_without_a_frame_match_and_a_deformable_reg_do_not_register
     [(RIGID, sd.transformation_matrix(rotation=np.diag([1, 1, -1]), translation=(10, 0, 0)))],  # a reflection
     [(RIGID, sd.transformation_matrix()[:15])],
     [(RIGID, [*sd.transformation_matrix()[:12], 0, 0, 0.001, 1])],  # last row off
+    [(RIGID, [*sd.transformation_matrix()[:3], 'nan', *sd.transformation_matrix()[4:]])],  # non-finite translation
+    [(RIGID, [*sd.transformation_matrix()[:3], 'inf', *sd.transformation_matrix()[4:]])],
     [(RIGID, sd.transformation_matrix(translation=(10, 0, 0))), (RIGID, sd.transformation_matrix())],
     [],
 ])

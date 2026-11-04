@@ -150,7 +150,8 @@ def _rigid_matrix(item):
         return None
     matrix = np.asarray(values).reshape(4, 4)
     rotation = matrix[:3, :3]
-    usable = (np.abs(matrix[3] - (0, 0, 0, 1)).max() <= LAST_ROW_ATOL  # written so that NaN fails
+    usable = (np.isfinite(matrix).all()  # a NaN or inf translation would pass the rotation checks below
+              and np.abs(matrix[3] - (0, 0, 0, 1)).max() <= LAST_ROW_ATOL
               and np.abs(rotation.T @ rotation - np.eye(3)).max() <= RIGID_ATOL and np.linalg.det(rotation) > 0)
     return matrix if usable else None
 

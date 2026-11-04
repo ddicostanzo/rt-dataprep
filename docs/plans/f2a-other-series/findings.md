@@ -124,3 +124,10 @@ change); misc unreadable count re-scans the folder.
 - Gotchas: translation-only fixtures cannot tell inv(M_ct).M_series from M_series.inv(M_ct) (translations commute), so the rotation test
   carries the order check (mutation-checked: swapping the order, dropping the sort, dropping det > 0 each fail a test). `%.10g` can
   print `-0` or `1e-17` for a computed zero; left as is. An implied identity item exists only when the REG has no real item for that frame.
+
+## review-3
+No BLOCKING. Fixed by orchestrator (clinical-adjacent): a NaN/inf translation passed the rigid checks and would have
+reached reg_matrix; now refused (isfinite), with nan/inf B3 cases. WARNING (deferred): the implied-identity
+"found or [...]" vs "found + [...]" mutation survives; the excluded-study and SOP-dedup filtering of REGs is the
+caller's job (task-06 must test a REG in an excluded study). NOTE: tolerance constants not pinned at boundary;
+frame_none test label overstates; %.10g may print -0.
