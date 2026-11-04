@@ -969,6 +969,8 @@ def test_series_id_is_group_five_of_a_full_match():
     (pre.REASON_KIND, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz', kind='')], f / conv.SERIES_NAME)),
     (pre.REASON_STUDY_MODALITY, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz', 'RTDOSE')], f / conv.SERIES_NAME)),
     (pre.REASON_STUDY_MODALITY, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz', 'mr')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_MODALITY, lambda f: conv.write_series_csv([study_row('series_CT_1.nii.gz', 'MR')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_NAME, lambda f: conv.write_series_csv([study_row('series_MR_\u0661.nii.gz')], f / conv.SERIES_NAME)),  # an Arabic-Indic digit
     (pre.REASON_STUDY_NAME, lambda f: conv.write_series_csv([study_row('planning_ct.nii.gz')], f / conv.SERIES_NAME)),
     (pre.REASON_STUDY_NAME, lambda f: conv.write_series_csv([study_row('series_MR_1.nii')], f / conv.SERIES_NAME)),
     (pre.REASON_STUDY_NAME, lambda f: conv.write_series_csv([study_row('../series_MR_1.nii.gz')], f / conv.SERIES_NAME)),
@@ -976,7 +978,7 @@ def test_series_id_is_group_five_of_a_full_match():
     (pre.REASON_FILE_MISSING, lambda f: ((f / 'series_MR_1.nii.gz').unlink(), (f / 'series_MR_1.nii.gz').symlink_to(f / conv.SERIES_NAME))),
     (pre.REASON_FILE_MISSING, lambda f: ((f / 'series_MR_1.nii.gz').unlink(), (f / 'series_MR_1.nii.gz').mkdir())),
 ], ids=['encoding', 'columns', 'long-row', 'zero-rows', 'empty-file', 'duplicate-file', 'duplicate-id', 'kind-ct', 'kind-blank',
-        'modality-rtdose', 'modality-case', 'name-other', 'name-suffix', 'name-separator', 'missing', 'symlink', 'directory'])
+        'modality-rtdose', 'modality-case', 'modality-vs-name', 'name-digit', 'name-other', 'name-suffix', 'name-separator', 'missing', 'symlink', 'directory'])
 def test_check_study_rows_refuses(tmp_path, reason, make):
     folder = write_study(tmp_path / 'study_1', [study_row('series_MR_1.nii.gz')])
     make(folder)
@@ -1083,14 +1085,15 @@ def test_mr_and_pt_intensities_are_not_rescaled_and_ct_is(tmp_path):
     np.testing.assert_allclose(ct, (native + 1024) / 4096, atol=1e-4)
 
 
-def test_rescale_alone_leaves_an_mr_under_its_own_name(tmp_path):
+def test_rescale_alone_refuses_an_mr_and_still_preprocesses_a_ct(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     write_study_tree(converted)
-    pre.preprocess(converted, out, PreprocessSteps(rescale=True))
+    report = pre.preprocess(converted, out, PreprocessSteps(rescale=True))
+    assert imaging_rows(report) == [('study_1/series_CT_1', 'preprocessed', '', ['rescale_series_CT_1.nii.gz', 'series.csv']),
+                                    ('study_1/series_MR_1', 'refused', pre.REASON_NO_STEPS, [])]
     study = out / 'SYNTHETICPTA' / 'study_1'
-    assert sorted(p.name for p in study.iterdir()) == ['rescale_series_CT_1.nii.gz', 'series.csv', 'series_MR_1.nii.gz']
-    assert [r['file'] for r in conv_rows(study)] == ['rescale_series_CT_1.nii.gz', 'series_MR_1.nii.gz']
-    assert float(sitk.GetArrayFromImage(sitk.ReadImage(str(study / 'series_MR_1.nii.gz'))).min()) == pytest.approx(VALUE_OF['MR'])
+    assert sorted(p.name for p in study.iterdir()) == ['rescale_series_CT_1.nii.gz', 'series.csv']  # no MR file, whatever its name
+    assert [r['file'] for r in conv_rows(study)] == ['rescale_series_CT_1.nii.gz']
 
 
 def two_bad_series(converted):

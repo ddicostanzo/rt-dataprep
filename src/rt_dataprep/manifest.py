@@ -16,14 +16,13 @@ import numpy as np
 
 from rt_dataprep import convert as conv
 from rt_dataprep.dicom_io import CaseRefused, write_report
-from rt_dataprep.preprocess import check_rows, check_study_rows, read_info, series_id, study_refusal_count
+from rt_dataprep.preprocess import STUDY_FOLDER, check_rows, check_study_rows, read_info, series_id, study_refusal_count
 
 log = logging.getLogger(__name__)
 
 MANIFEST_NAME = 'manifest.csv'
 COLUMNS = ['case_dir', 'patient', 'fx', 'ct_size', 'ct_spacing', 'dose', 'masks', 'rtplan_uid', 'ct_series_uid', 'study_uid',
            'case_type', 'modality', 'image']
-STUDY_FOLDER = r'study_\d+'
 
 
 def _geometry(size, spacing):
