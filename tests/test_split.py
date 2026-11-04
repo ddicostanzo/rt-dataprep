@@ -5,6 +5,8 @@ import hashlib
 import inspect
 import json
 import os
+import threading
+import time
 
 import pytest
 
@@ -223,6 +225,31 @@ def test_without_hard_links_a_concurrent_run_that_writes_first_is_kept_and_this_
         sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
     assert (tmp_path / 'splits.json').read_text() == other
     assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv', 'splits.json']
+
+
+def test_an_identical_split_is_not_refused_by_another_runs_empty_reservation(tmp_path):
+    path = write_manifest(tmp_path, TEN)
+    text = json.dumps(sp.split(write_manifest(tmp_path / 'other', TEN), test_size=0.2, val_size=0.2, seed=SEED_A), indent=1,
+                      sort_keys=True) + '\n'
+    (tmp_path / 'splits.json').write_text('')  # the other run's O_EXCL reservation, not yet renamed over
+    timer = threading.Timer(0.2, (tmp_path / 'splits.json').write_text, [text])
+    timer.start()
+    try:
+        obj = sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
+    finally:
+        timer.cancel()
+        timer.join()
+    assert json.dumps(obj, indent=1, sort_keys=True) + '\n' == text
+
+
+def test_an_empty_splits_json_that_is_never_filled_is_still_refused_after_about_a_second(tmp_path):
+    path = write_manifest(tmp_path, TEN)
+    (tmp_path / 'splits.json').write_text('')
+    started = time.monotonic()
+    with pytest.raises(ValueError, match=sp.REASON_EXISTS):
+        sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
+    assert time.monotonic() - started < 1.5
+    assert (tmp_path / 'splits.json').read_text() == ''
 
 
 def test_without_hard_links_the_write_falls_back_to_a_rename(tmp_path, monkeypatch):

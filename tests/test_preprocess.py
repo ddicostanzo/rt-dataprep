@@ -721,6 +721,7 @@ def test_each_dose_or_mask_image_is_released_before_the_next_file_is_read(tmp_pa
     report = pre.preprocess(converted, out, SMALL)
     assert plan_row(report).outcome == 'preprocessed'
     assert alive_at_read == [0, 0, 0, 0]  # CT, dose, ptv, bladder: the previous native and processed images are gone
+    assert sum(ref() is not None for ref in tracked) == 0  # the last mask's images are released too
 
 
 def test_an_oserror_while_writing_refuses_the_patient_and_removes_the_partial(tmp_path, monkeypatch):
@@ -833,17 +834,18 @@ def rotation(z_degrees, x_degrees):
     return tuple((about_x @ about_z).ravel())
 
 
-@pytest.mark.parametrize('direction', [
-    (1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0), (-1.0, 0, 0, 0, -1.0, 0, 0, 0, 1.0), (1.0, 0, 0, 0, 1.0, 0, 0, 0, -1.0), rotation(20, 10)],
-    ids=['axial', 'flipped-xy', 'flipped-z', 'oblique'])
-def test_matches_torchio(tmp_path, direction):
+@pytest.mark.parametrize('direction, y_spacing', [
+    ((1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0), 1.0), ((-1.0, 0, 0, 0, -1.0, 0, 0, 0, 1.0), 1.0), ((1.0, 0, 0, 0, 1.0, 0, 0, 0, -1.0), 1.0),
+    (rotation(20, 10), 1.1)], ids=['axial', 'flipped-xy', 'flipped-z', 'oblique'])
+def test_matches_torchio(tmp_path, direction, y_spacing):
     """A2.6: the SimpleITK chain equals torchio 1.2.1 Resample -> rescale -> Resample -> CropOrPad on a synthetic CT (rescale on)."""
     tio = pytest.importorskip('torchio')
     # native 11x9x7, anisotropic: 1.5 mm gives 8x6x9, 1.25 mm gives 9x7x10; new_shape (14, 4, 13) pads x by 3+2, crops y by 2+1, pads z by 2+1
-    # y spacing 1.1, not 1.0: torchio takes the spacing from the affine (0.9999999999999999 on an oblique grid), so an exact
-    # integer ratio (9 * 1.0 / 1.5) floors one voxel lower there than on sitk's 1.0. The sizes above are the same for 1.1.
+    # y spacing 1.0 keeps the exact whole-number ratio (9 * 1.0 / 1.5 = 6) under test. Only oblique uses 1.1 (#100): torchio takes
+    # the spacing from the affine (0.9999999999999999 on an oblique grid), so there that ratio floors one voxel lower than on
+    # sitk's 1.0. The sizes above are the same for 1.1.
     rng = np.random.default_rng(7)
-    ct = make_image(rng.uniform(-1000, 1000, (7, 9, 11)), spacing=(1.2, 1.1, 2.0), origin=(-5.0, 3.0, 40.0), direction=direction)
+    ct = make_image(rng.uniform(-1000, 1000, (7, 9, 11)), spacing=(1.2, y_spacing, 2.0), origin=(-5.0, 3.0, 40.0), direction=direction)
     mask_array = np.zeros((7, 9, 11), np.uint8)
     mask_array[2:5, 3:7, 4:9] = 1
     mask_array[3, 4, 5] = 2

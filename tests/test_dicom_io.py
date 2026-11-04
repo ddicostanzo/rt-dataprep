@@ -473,7 +473,26 @@ def test_read_pooled_waits_for_running_steps_even_when_the_shutdown_join_is_inte
         return real_shutdown(self, *args, **kwargs)
 
     monkeypatch.setattr(ThreadPoolExecutor, 'shutdown', shutdown)
-    with pytest.raises(KeyboardInterrupt) as raised:
-        read_pooled(step, ['SYNTHETIC_1', 'SYNTHETIC_2'], 2)
-    assert len(shutdowns) == 2 and getattr(raised.value, '__suppress_context__')  # noqa: B009
-    assert finished.is_set()  # the running step ended inside the block
+    try:
+        with pytest.raises(KeyboardInterrupt) as raised:
+            read_pooled(step, ['SYNTHETIC_1', 'SYNTHETIC_2'], 2)
+        assert len(shutdowns) == 2 and getattr(raised.value, '__suppress_context__')  # noqa: B009
+        assert finished.is_set()  # the running step ended inside the block
+    finally:
+        release.set()  # on a regression worker 2 ends at once instead of waiting out its 5 s timeout
+
+
+def test_read_pooled_raises_the_ctrl_c_of_the_join_even_when_every_step_succeeded(monkeypatch):
+    shutdowns = []
+    real_shutdown = ThreadPoolExecutor.shutdown
+
+    def shutdown(self, *args, **kwargs):
+        shutdowns.append(1)
+        if len(shutdowns) == 1:
+            raise KeyboardInterrupt  # Ctrl-C mid-join, without delegating
+        return real_shutdown(self, *args, **kwargs)
+
+    monkeypatch.setattr(ThreadPoolExecutor, 'shutdown', shutdown)
+    with pytest.raises(KeyboardInterrupt):  # not a list of results
+        read_pooled(lambda path: path, ['SYNTHETIC_1', 'SYNTHETIC_2'], 2)
+    assert len(shutdowns) == 2
