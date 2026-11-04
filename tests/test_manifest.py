@@ -8,7 +8,7 @@ import shutil
 import numpy as np
 import pytest
 from test_convert import BOX, PID, dose_spec, make_plan
-from test_preprocess import SMALL, box, save_rows, series_row, state, write_plan
+from test_preprocess import MR_OUT, MR_SIZE, SMALL, box, grid, landmark, mr_spec, rigid, run_plan, save_rows, series_row, state, write_plan
 from test_series import STUDY_D1, STUDY_D2, STUDY_T1, STUDY_T2, put
 
 from rt_dataprep import convert as conv
@@ -16,7 +16,7 @@ from rt_dataprep import manifest as man
 from rt_dataprep import preprocess as pre
 
 COLUMNS = ['case_dir', 'patient', 'fx', 'ct_size', 'ct_spacing', 'dose', 'masks', 'rtplan_uid', 'ct_series_uid', 'study_uid',
-           'case_type', 'modality', 'image']
+           'case_type', 'modality', 'image', 'series']
 PATIENT_A, PATIENT_B = 'SYNTHETIC_PTA_2', 'SYNTHETICPTB'
 ONE_MASK = {'ptv': box((4, 4, 4), (8, 8, 8))}
 
@@ -51,7 +51,7 @@ def test_rows_columns_and_values_on_a_converted_tree(tmp_path):
     assert [r['case_dir'] for r in rows] == [f'{PATIENT_B}/fx_1', f'{PATIENT_A}/plan_1', f'{PATIENT_A}/plan_2']  # '_' sorts after 'P'
     assert rows[1] == dict(case_dir=f'{PATIENT_A}/plan_1', patient=PATIENT_A, fx='plan_1', ct_size='12;12;12', ct_spacing='1.0;1.0;1.0',
                            dose='1', masks='["bladder", "ptv"]', rtplan_uid='SYNTHETICRTPLANA1', ct_series_uid='SYNTHETICCTA1',
-                           study_uid='SYNTHETICSTUDYA1', case_type='plan', modality='CT', image='')
+                           study_uid='SYNTHETICSTUDYA1', case_type='plan', modality='CT', image='', series='[]')
     assert (rows[2]['dose'], rows[2]['masks'], rows[2]['rtplan_uid']) == ('0', '["ptv"]', 'SYNTHETICRTPLANA2')
     assert (rows[0]['patient'], rows[0]['fx'], rows[0]['ct_size'], rows[0]['masks']) == (PATIENT_B, 'fx_1', '14;14;14', '[]')
     assert {r['case_type'] for r in rows} == {'plan'} and {r['modality'] for r in rows} == {'CT'} and {r['image'] for r in rows} == {''}
@@ -147,7 +147,7 @@ def test_an_unreadable_series_csv_is_one_refused_plan_not_the_end_of_the_run(tmp
 
 # ---------------------------------------------------------------- task-04: imaging rows of the study folders
 
-BLANK_IMAGING = dict(fx='', dose='0', masks='[]', rtplan_uid='')
+BLANK_IMAGING = dict(fx='', dose='0', masks='[]', rtplan_uid='', series='[]')
 SERIES_CSV_COLUMN = conv.SERIES_COLUMNS.index
 
 
@@ -296,3 +296,41 @@ def test_the_log_and_exceptions_of_the_imaging_path_carry_counts_only(converted,
         for secret in ('SYNTHETIC', PID, str(converted), 'study_', 'series_', '.nii'):
             assert secret not in text
     assert [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.manifest'] == ['manifest: 2 written, 2 refused']
+
+
+# ---- task-04: the series column lists the plan's aligned series (reg-resampling D10, AC11) ----
+
+def series_column(root, case='plan_1'):
+    man.manifest(root)
+    return json.loads(next(r for r in read(root) if r['case_dir'].endswith(f'/{case}'))['series'])
+
+
+CT_GRID_SIZE = (12, 12, 12)  # write_plan's native CT grid
+
+
+def test_ac11_a_preprocessed_tree_lists_the_aligned_mr_by_output_name_and_the_converted_tree_lists_none(tmp_path):
+    run_plan(tmp_path, [mr_spec(landmark(MR_SIZE, (3, 4, 2)), rigid(0, (1.25, 0, 0)))])
+    assert series_column(tmp_path / 'out') == [{'file': MR_OUT, 'modality': 'MR'}]
+    assert series_column(tmp_path / 'converted') == []  # a translated MR on its own grid
+
+
+def test_ac11_a_translated_mr_with_the_ct_geometry_is_not_listed_but_an_identity_one_is(tmp_path):
+    ones = np.ones(CT_GRID_SIZE)
+    translated = mr_spec(ones, rigid(0, (2.0, 0, 0)), grid(12))
+    on_grid = mr_spec(ones, 'identity', grid(12), file='series_PT_1.nii.gz', modality='PT')
+    run_plan(tmp_path, [translated, on_grid])
+    assert series_column(tmp_path / 'converted') == [{'file': 'series_PT_1.nii.gz', 'modality': 'PT'}]
+
+
+def test_the_series_column_keeps_series_csv_order_and_skips_an_unreadable_header_without_refusing_the_plan(tmp_path):
+    ones = np.ones(CT_GRID_SIZE)
+    run_plan(tmp_path, [mr_spec(ones, 'identity', grid(12), file='series_PT_1.nii.gz', modality='PT'),
+                        mr_spec(b'not a nifti', 'identity', file='series_MR_2.nii.gz'),
+                        mr_spec(ones, 'identity', grid(12))])
+    assert man.manifest(tmp_path / 'converted') == (1, 0)
+    assert series_column(tmp_path / 'converted') == [{'file': 'series_PT_1.nii.gz', 'modality': 'PT'}, {'file': 'series_MR_1.nii.gz', 'modality': 'MR'}]
+
+
+def test_imaging_rows_hold_an_empty_series_list(converted):
+    man.manifest(converted)
+    assert [r['series'] for r in read(converted)[1:]] == ['[]'] * 3

@@ -35,8 +35,12 @@ SYNTHETIC_P1/
 - Plan folders are as before. Every other CT, MR and PT series goes to `study_<n>/` as `series_<MOD>_<k>.nii.gz`. A series
   registered to a plan stays in its plan folder and is also written to its study. A plan's planning CT is not repeated in a study.
 - Studies are numbered by StudyDate, then StudyTime, undated last. Patients with no RTPLAN get study folders only.
-- `manifest` writes one row per plan folder or study series. Three columns come after the first ten: `case_type`
-  (`plan` or `imaging`), `modality` and `image` (blank for plans).
+- `manifest` writes one row per plan folder or study series. Four columns come after the first ten: `case_type`
+  (`plan` or `imaging`), `modality`, `image` (blank for plans) and `series`: a JSON list of `{"file": ..., "modality": ...}`
+  for the plan's aligned series only (identity matrix and on the planning CT's grid; `[]` for imaging rows).
+- `preprocess` resamples each registered MR or PT series of a plan onto the final CT grid and writes it with `identity`.
+  A series it cannot align (unusable matrix, no overlap, unreadable file) is left out and counted in the
+  `skipped_series` column of `preprocess_report.csv`.
 - An imaging `case_dir` is a case id, `<patient>/study_<n>/series_<MOD>_<k>`, not a path. Open
   `<root>/<patient>/study_<n>/<image>`, where `image` is the volume file name (it has the step prefixes in a preprocessed tree).
 - `preprocess` runs study series one at a time. CT gets every step that is on; MR and PT get the geometric steps only

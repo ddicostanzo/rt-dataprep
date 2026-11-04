@@ -56,3 +56,16 @@ Append under `## <task-id>`: files changed, decisions, gotchas, and every change
   - `test_the_run_log_counts_plan_rows_and_imaging_rows_separately`: the expected closing line ends `; 0 registered series skipped`.
   - `test_series_csv_keeps_every_column_renames_files_and_drops_series_rows` renamed `test_series_csv_keeps_every_column_and_renames_files_and_lists_the_aligned_series_last`: its series row has `reg_matrix='identity'`, and the output now lists the aligned series last (file renamed, other columns equal).
   - `test_no_log_line_carries_a_path_a_folder_name_or_a_series_value`: also runs a plan_3 with a kept and a skipped registered series, and forbids `series_MR` in the log text.
+
+## task-04
+- Files: src/rt_dataprep/manifest.py, tests/test_manifest.py, README.md, docs/plans/reg-resampling/findings.md.
+- `COLUMNS` gains a last column `series`. New `_aligned(plan, series, ct)` in manifest.py: for each kind=series row (check_rows' third value) whose `reg_matrix` is exactly `identity`, `read_info` on the file and `same_grid` against the CT info check_rows returns; `CaseRefused` or `OSError` on the header just leaves that series out (no plan refusal). Plan rows get `json.dumps` of the list, imaging rows `json.dumps([])`.
+- Gotcha: the preprocessed tree needs no special case: the aligned output row already has `identity` and the CT grid, so it is listed by its output name.
+- Tests reuse `run_plan`, `mr_spec`, `rigid`, `landmark`, `grid` and `MR_OUT` from tests/test_preprocess.py.
+- New tests (tests/test_manifest.py): `test_ac11_a_preprocessed_tree_lists_the_aligned_mr_by_output_name_and_the_converted_tree_lists_none`, `test_ac11_a_translated_mr_with_the_ct_geometry_is_not_listed_but_an_identity_one_is`, `test_the_series_column_keeps_series_csv_order_and_skips_an_unreadable_header_without_refusing_the_plan`, `test_imaging_rows_hold_an_empty_series_list`.
+- Existing tests changed (all in tests/test_manifest.py, by pinning the new column; no assertion weakened):
+  - module constant `COLUMNS` gains `'series'`; the `read` helper asserts it, so every test that reads manifest.csv goes through the new header.
+  - `test_rows_columns_and_values_on_a_converted_tree`: the expected plan row gains `series='[]'`.
+  - `BLANK_IMAGING` gains `series='[]'`, used by `test_a_converted_tree_gives_one_imaging_row_per_study_series_and_a_plan_row`.
+  - No other test body changed; tests/test_plan_regression.py is unchanged.
+- Red evidence: with the tests and the `COLUMNS` pin in place and src untouched, 26 failed (4 new, 22 through the new header), 4 passed in tests/test_manifest.py. Suite: 756 passed, 4 skipped (baseline 752 + 4 new); ruff clean.

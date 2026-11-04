@@ -16,13 +16,13 @@ import numpy as np
 
 from rt_dataprep import convert as conv
 from rt_dataprep.dicom_io import CaseRefused, write_report
-from rt_dataprep.preprocess import STUDY_FOLDER, check_rows, check_study_rows, read_info, series_id, study_refusal_count
+from rt_dataprep.preprocess import STUDY_FOLDER, check_rows, check_study_rows, read_info, same_grid, series_id, study_refusal_count
 
 log = logging.getLogger(__name__)
 
 MANIFEST_NAME = 'manifest.csv'
 COLUMNS = ['case_dir', 'patient', 'fx', 'ct_size', 'ct_spacing', 'dose', 'masks', 'rtplan_uid', 'ct_series_uid', 'study_uid',
-           'case_type', 'modality', 'image']
+           'case_type', 'modality', 'image', 'series']
 
 
 def _geometry(size, spacing):
@@ -50,8 +50,23 @@ def _study_rows(patient, study):
             refused += 1
             continue
         rows.append([f'{patient.name}/{study.name}/{series_id(row["file"])}', patient.name, '', *_geometry(size, spacing),
-                     '0', json.dumps([]), '', row['series_instance_uid'], row['study_instance_uid'], 'imaging', row['modality'], row['file']])
+                     '0', json.dumps([]), '', row['series_instance_uid'], row['study_instance_uid'], 'imaging', row['modality'], row['file'], json.dumps([])])
     return rows, refused
+
+
+def _aligned(plan, series, ct):
+    """The plan's series rows that are in the CT frame (identity) and on the CT grid, as {file, modality}, in series.csv order (D10)."""
+    listed = []
+    for row in series:
+        if row['reg_matrix'] != 'identity':
+            continue
+        try:
+            on_grid = same_grid(read_info(plan / row['file']), ct)
+        except (CaseRefused, OSError):  # this series only: it is not listed, the plan keeps its row
+            continue
+        if on_grid:
+            listed.append({'file': row['file'], 'modality': row['modality']})
+    return listed
 
 
 def manifest(root):
@@ -61,7 +76,7 @@ def manifest(root):
     for patient in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith('.')):
         for plan in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(conv.PLAN_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()):
             try:
-                kept, ct, _ = check_rows(plan)
+                kept, ct, series = check_rows(plan)
             except (CaseRefused, OSError):  # an unreadable series.csv is one refused plan, not the end of the run (#74)
                 refused += 1
                 continue
@@ -70,7 +85,7 @@ def manifest(root):
             rows.append([f'{patient.name}/{plan.name}', patient.name, plan.name, *_geometry(ct[0], ct[2]),
                          str(int(any(row['kind'] == 'dose' for row in kept))), json.dumps(masks),
                          kept[0]['rtplan_uid'], kept[0]['series_instance_uid'], kept[0]['study_instance_uid'],  # kept[0] is the ct row
-                         'plan', 'CT', ''])
+                         'plan', 'CT', '', json.dumps(_aligned(plan, series, ct))])
         for study in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(STUDY_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()):
             study_rows, study_refused = _study_rows(patient, study)
             rows += study_rows
