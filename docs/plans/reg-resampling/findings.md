@@ -20,3 +20,11 @@ Append under `## <task-id>`: files changed, decisions, gotchas, and every change
 
 ## Decisions Log
 - max_parallel_worktrees is 1, so tasks run in order directly on feat/reg-resampling (one commit or more per task) instead of per-task worktrees and squash merges; the wave review runs over each task's commits.
+
+## task-01
+- Files: src/rt_dataprep/series.py, tests/test_series.py.
+- `_is_rigid(matrix)` holds the rigidity test (finite, last row, R^T R = I, det > 0); `_rigid_matrix` calls it. New public `reg_matrix_array(text)`: `identity` -> np.eye(4); else 16 floats that pass `_is_rigid`, or None (empty, wrong count, non-number, nan/inf, non-rigid).
+- Decision: tokens parsed with the existing `_or_none(float, token)`, so no try/except was added.
+- Gotcha: float() accepts 'nan', 'inf' and '1_0'; the finite check in `_is_rigid` catches nan and inf, and '1_0' is read as 10 (harmless: convert writes only '%.10g').
+- Existing tests changed: none (12 tests added at the end of tests/test_series.py).
+- Red evidence: with src reverted, the 12 new tests failed (AttributeError on reg_matrix_array / _is_rigid); 167 existing passed.

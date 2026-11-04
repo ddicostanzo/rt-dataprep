@@ -1702,3 +1702,45 @@ def test_images_name_and_no_images_reason_are_gone_from_src():
     text = ''.join(p.read_text() for p in root.rglob('*.py'))
     assert 'IMAGES_NAME' not in text and 'REASON_NO_IMAGES' not in text
     assert not hasattr(conv, 'IMAGES_NAME') and not hasattr(conv, 'REASON_NO_IMAGES')
+
+
+def matrix_text(matrix):
+    return ' '.join('%.10g' % v for v in np.asarray(matrix).ravel())
+
+
+def test_reg_matrix_array_reads_identity_and_a_rigid_matrix():
+    assert np.array_equal(ser.reg_matrix_array('identity'), np.eye(4))
+    turn = [[0, -1, 0], [1, 0, 0], [0, 0, 1]]
+    expected = np.asarray(sd.transformation_matrix(rotation=turn, translation=(1.5, -2.0, 3.25))).reshape(4, 4)
+    parsed = ser.reg_matrix_array(matrix_text(expected))
+    assert parsed.shape == (4, 4) and np.array_equal(parsed, expected)
+
+
+@pytest.mark.parametrize('text', [
+    '',
+    ' '.join(['1'] * 15),
+    ' '.join(['1'] * 17),
+    matrix_text(np.eye(4)).replace('1', 'x', 1),
+    matrix_text(np.eye(4)).replace('0', 'nan', 1),
+    matrix_text(np.eye(4)).replace('0', 'inf', 1),
+    matrix_text(np.diag([1, 1, -1, 1])),  # a reflection
+    matrix_text(np.diag([2, 1, 1, 1])),  # not orthonormal
+    matrix_text([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0.001, 1]]),  # last row off
+])
+def test_reg_matrix_array_gives_none_for_an_unusable_text(text):
+    assert ser.reg_matrix_array(text) is None
+
+
+def test_reg_matrix_array_round_trips_the_text_registration_writes(world):
+    turn = np.array([[0.6, -0.8, 0.0], [0.8, 0.6, 0.0], [0.0, 0.0, 1.0]])
+    sequence = world.items(rigid(), rigid(rotation=turn, translation=(10.5, -3.0, 0.25)))
+    _, text = world.registration([world.reg(sequence)])
+    parsed = ser.reg_matrix_array(text)
+    assert np.allclose(parsed[:3, :3], turn, rtol=0, atol=1e-9) and np.allclose(parsed[:3, 3], (10.5, -3.0, 0.25), rtol=0, atol=1e-9)
+    assert np.allclose(apply(text, MR_POINT), (parsed @ [*MR_POINT, 1.0])[:3], rtol=0, atol=1e-9)
+
+
+def test_the_parser_and_the_reg_item_reader_share_one_rigidity_helper(world, monkeypatch):
+    monkeypatch.setattr(ser, '_is_rigid', lambda matrix: False)
+    assert ser.reg_matrix_array(matrix_text(np.eye(4))) is None
+    assert world.registration([world.reg(world.items(rigid(), rigid(translation=(10, 0, 0))))]) == (True, '')
