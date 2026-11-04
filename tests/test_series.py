@@ -1011,6 +1011,15 @@ def test_a_plan_on_a_planning_ct_its_sibling_found_short_is_refused_too(tree):
     assert listing(out / PID) == []
 
 
+def test_a_sibling_plan_on_a_different_ct_stays_converted_when_one_ct_is_short(tree):
+    org, out = tree
+    one = make_plan(org / PID / 'plan_1')
+    make_plan(org / PID / 'plan_2')  # its own CT series
+    Path(one['ct']['paths'][-1]).unlink()  # plan_1: REASON_CT_SLICE_MISSING
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome) for r in rows if r.folder.startswith('plan_')] == [('plan_1', 'refused'), ('plan_2', 'converted')]
+
+
 def test_legacy_fx_folders_convert_like_plan_folders(tree):
     org, out = tree
     make_plan(org / PID / 'fx_2')

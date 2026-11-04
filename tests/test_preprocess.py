@@ -827,3 +827,28 @@ def test_matches_torchio(tmp_path):
     assert mine_labels.GetSize() == tio_labels.GetSize() == mine.GetSize()
     assert np.array_equal(sitk.GetArrayFromImage(mine_labels), sitk.GetArrayFromImage(tio_labels).astype(np.uint8))
     assert sitk.GetArrayFromImage(mine_labels).any()
+
+
+def test_legacy_fx_folders_are_preprocessed(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted, plan='fx_1')
+    report = pre.preprocess(converted, out, SMALL)
+    assert plan_row(report, folder='fx_1').outcome == 'preprocessed'
+
+
+def test_ctrl_c_still_writes_the_report_of_what_was_done(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    write_plan(converted, patient='SYNTHETICPTB')
+    real, calls = pre.preprocess_patient, []
+
+    def interrupt(*args):
+        calls.append(1)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return real(*args)
+
+    monkeypatch.setattr(pre, 'preprocess_patient', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        pre.preprocess(converted, out, SMALL)
+    assert [(r['patient'], r['outcome']) for r in report_rows(out)] == [('SYNTHETICPTA', 'preprocessed')]

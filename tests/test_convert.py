@@ -596,7 +596,7 @@ def test_series_csv_is_the_last_file_and_goes_through_a_temp_name(tree, monkeypa
         real(source, target)
     monkeypatch.setattr(conv.os, 'replace', spy)
     conv.convert(org, out)
-    source, target, _ = replaced[-1]
+    source, target, _ = [r for r in replaced if r[2] == 'plan_1'][-1]  # the run report is replaced after it, in out/
     assert target == 'series.csv' and source != target and source.endswith('series.csv')
     assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == ['liver.nii.gz', 'planning_ct.nii.gz', 'series.csv']
 

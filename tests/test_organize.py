@@ -480,3 +480,21 @@ def test_empty_sop_instance_uids_refuse_the_patient(tree):
         ds.save_as(path)
     organize(src, out)
     assert (rows(out)[0]['outcome'], rows(out)[0]['reason']) == ('refused', org.REASON_NO_SOP_UID)
+
+
+def test_ctrl_c_still_writes_the_report_of_what_was_done(tree, monkeypatch):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    planning_study(src / 'SYNTHETIC_SECOND' / 'a', pid='SYNTHETIC_SECOND')
+    real = org.read_header
+
+    def interrupt(path):
+        if 'SYNTHETIC_SECOND' in str(path):
+            raise KeyboardInterrupt
+        return real(path)
+
+    monkeypatch.setattr(org, 'read_header', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        organize(src, out)
+    with open(out / org.REPORT_NAME, newline='') as handle:
+        assert [row['outcome'] for row in csv.DictReader(handle)] == [org.OUTCOME_ORGANIZED]

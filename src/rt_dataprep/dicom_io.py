@@ -151,4 +151,6 @@ def write_report(out_root, name, header, rows):
         writer = csv.writer(handle)
         writer.writerow(header)
         writer.writerows(rows)
-    shutil.copyfile(dated, out_root / name)
+    latest = out_root / f'.{os.getpid()}.tmp.{name}'
+    shutil.copyfile(dated, latest)
+    os.replace(latest, out_root / name)  # atomic: a second Ctrl-C mid-copy cannot truncate the latest report (#65)
