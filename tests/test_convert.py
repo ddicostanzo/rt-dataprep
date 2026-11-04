@@ -703,6 +703,34 @@ def test_a2_10_the_broken_rtstruct_really_makes_dicomrttool_log_the_path(tree, c
     assert str(plan['folder']) in caplog.text
 
 
+def test_a2_10_a_slice_lost_after_the_header_read_refuses_without_the_path_ITK_names(tree, tmp_path, capfd, caplog, recwarn,
+                                                                                         monkeypatch):
+    """ITK's own read error says 'Could not open file: <path>'; none of that may reach a row, a log record or fd 1/2."""
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', rois=[BOX])
+    lost = Path(plan['ct']['paths'][1])
+    secrets = [PID, str(tmp_path), lost.name, *every_uid(plan['folder'])]
+    assert len(secrets) > 10
+    real = conv.read_folder_headers
+
+    def read_then_lose_a_slice(folder):
+        found = real(folder)
+        if Path(folder).name == 'plan_1':
+            lost.unlink()  # setup only: a slice lost between the header read and ITK's read; the code under test deletes nothing
+        return found
+    monkeypatch.setattr(conv, 'read_folder_headers', read_then_lose_a_slice)
+    caplog.set_level(logging.DEBUG)
+    capfd.readouterr()
+    rows = conv.convert(org, out).rows
+    assert not lost.exists()
+    assert [(r.outcome, r.reason) for r in rows if r.folder == 'plan_1'] == [(conv.OUTCOME_REFUSED, conv.REASON_CT_UNREADABLE)]
+    captured = capfd.readouterr()
+    texts = [captured.out, captured.err, caplog.text, *(r.getMessage() for r in caplog.records),
+             *(str(w.message) for w in recwarn.list),
+             *(repr((r.folder, r.outcome, r.reason, r.files)) for r in rows)]  # the patient column is the folder name by design
+    assert [s for s in secrets for t in texts if s in t] == []
+
+
 # ---------------------------------------------------------------- A2.11: rerun safety
 
 def tree_hashes(root):
@@ -794,7 +822,7 @@ def test_a_refused_plan_whose_folder_cannot_be_removed_is_the_patients_io_error_
         real(path, ignore_errors=ignore_errors, **kwargs)
 
     def refuse_after_the_plan_folder_exists(*args):
-        raise KeyError  # _series_rows runs after the plan folder is written: a refusal (REASON_MISSING_TAG) from here
+        raise ValueError  # _series_rows runs after the plan folder is written: a refusal (REASON_MISSING_TAG) from here
     monkeypatch.setattr(conv.shutil, 'rmtree', rmtree)
     monkeypatch.setattr(conv, '_series_rows', refuse_after_the_plan_folder_exists)
     rows = conv.convert(org, out).rows
@@ -906,3 +934,131 @@ def test_point_items_of_a_kept_roi_are_dropped_and_the_mask_is_its_planar_contou
     expected = np.zeros(SHAPE)
     expected[1:3, 1:4, 2:5] = 1
     np.testing.assert_array_equal(sitk.GetArrayFromImage(read(out / PID / 'plan_1' / 'liver.nii.gz')), expected)
+
+
+# ---------------------------------------------------------------- quiet_call redesign: _read_dose's three steps (B1, B6)
+
+class NoNumber:
+    """An offset that is no number: no __float__ or __array__, and it cannot be subtracted."""
+    def __sub__(self, other):
+        raise TypeError('SYNTHETIC_no subtraction')
+
+    def __rsub__(self, other):
+        raise TypeError('SYNTHETIC_no subtraction')
+
+
+def test_a_type_error_in_the_dose_arithmetic_aborts_the_run_and_is_no_unreadable_dose(tree, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    monkeypatch.setattr(conv, '_check_dose_header', lambda ds, ct_frame_uid: [NoNumber() for _ in range(SHAPE[0])])  # len and index work
+    with pytest.raises(conv.ConvertAborted):
+        conv.convert(org, out)
+    with open(out / conv.REPORT_NAME, newline='') as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(r['patient'], r['outcome'], r['reason']) for r in rows] == [(PID, conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
+    assert not any(r['reason'] == conv.REASON_DOSE_UNREADABLE for r in rows)
+
+
+def resave_dose(folder, change):
+    """The plan's first RTDOSE changed through save_as, then read back so the test sees what the code will."""
+    path = folder / 'dose_0.dcm'
+    ds = pydicom.dcmread(path)
+    change(ds)
+    ds.save_as(path)
+    return pydicom.dcmread(path)
+
+
+@pytest.mark.parametrize('tag, value', [('ImageOrientationPatient', [1.0, 0.0, 0.0, 0.0, 1.0]), ('PixelSpacing', [1.5]),
+                                        ('ImagePositionPatient', [1.0, 2.0])], ids=['iop-5', 'spacing-1', 'ipp-2'])
+def test_a_dose_with_a_wrong_count_of_geometry_values_refuses_the_plan_and_the_run_continues(tree, tag, value):
+    org, out = tree
+    bad = make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    make_plan(org / PID / 'plan_2', doses=[dose_spec(20, 'PLAN')])
+    held = resave_dose(bad['folder'], lambda ds: setattr(ds, tag, value))
+    assert np.ravel(np.asarray(getattr(held, tag), dtype=float)).tolist() == value  # one value reads back as a scalar, not a list
+    rows = conv.convert(org, out).rows
+    assert (row_of(rows, 'plan_1').outcome, row_of(rows, 'plan_1').reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_UNREADABLE)
+    assert (row_of(rows, 'plan_2').outcome, row_of(rows, 'plan_2').reason) == (conv.OUTCOME_CONVERTED, '')
+
+
+def test_a_dose_with_a_nan_frame_offset_refuses_with_the_grid_reason(tree):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    held = resave_dose(plan['folder'], lambda ds: setattr(ds, 'GridFrameOffsetVector', [0.0, float('nan'), 2.0, 3.0]))
+    assert np.isnan(float(held.GridFrameOffsetVector[1]))
+    rows = conv.convert(org, out).rows
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_GRID)
+
+
+@pytest.mark.parametrize('tag, value', [('ImagePositionPatient', [float('nan'), 5.0, 7.0]),
+                                        ('ImageOrientationPatient', [1.0, 0.0, 0.0, 0.0, float('nan'), 0.0]),
+                                        ('PixelSpacing', [1.5, float('nan')])], ids=['ipp', 'iop', 'spacing'])
+def test_a_dose_with_a_nan_geometry_value_refuses_as_unreadable(tree, tag, value):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    held = resave_dose(plan['folder'], lambda ds: setattr(ds, tag, value))
+    assert any(np.isnan(float(v)) for v in getattr(held, tag))
+    rows = conv.convert(org, out).rows
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_UNREADABLE)
+
+
+@pytest.mark.parametrize('scaling', [float('nan'), float('inf')], ids=['nan', 'inf'])
+def test_a_dose_with_a_non_finite_grid_scaling_refuses_as_unreadable(tree, scaling):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    held = resave_dose(plan['folder'], lambda ds: setattr(ds, 'DoseGridScaling', scaling))
+    assert not np.isfinite(float(held.DoseGridScaling))
+    rows = conv.convert(org, out).rows
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_UNREADABLE)
+
+
+# ---------------------------------------------------------------- quiet_call redesign: _header_call refuses only pydicom's own misses (B5)
+
+def header_call(fn):
+    return getattr(conv, '_header_call')(fn)  # noqa: B009
+
+
+def empty_dataset():
+    return pydicom.Dataset()
+
+
+def test_an_attribute_error_from_our_own_frame_propagates_out_of_header_call():
+    with pytest.raises(AttributeError):
+        header_call(lambda: object().SYNTHETIC_missing)
+
+
+def test_a_key_error_from_our_own_dict_propagates_out_of_header_call():
+    with pytest.raises(KeyError):
+        header_call(lambda: {}['SYNTHETIC_key'])
+
+
+def test_a_misspelled_keyword_on_a_dataset_propagates_out_of_header_call():
+    with pytest.raises(AttributeError):
+        header_call(lambda: empty_dataset().SYNTHETICNotAKeyword)
+
+
+@pytest.mark.parametrize('read', [lambda ds: ds.PatientID, lambda ds: ds['PatientName']], ids=['attribute', 'item'])
+def test_a_missing_tag_refuses_with_one_info_record_naming_class_and_site(read, caplog):
+    caplog.set_level(logging.INFO)
+    with pytest.raises(CaseRefused) as caught:
+        header_call(lambda: read(empty_dataset()))
+    assert str(caught.value) == conv.REASON_MISSING_TAG
+    assert getattr(caught.value, '__cause__') is None and getattr(caught.value, '__context__') is None  # noqa: B009
+    records = [r for r in caplog.records if r.name == 'rt_dataprep.convert']
+    assert len(records) == 1 and records[0].levelno == logging.INFO
+    assert re.fullmatch(rf'convert: {conv.REASON_MISSING_TAG}: (AttributeError|KeyError) at rt_dataprep\.\w+:\d+', records[0].getMessage())
+    assert 'SYNTHETIC_' not in records[0].getMessage() and '/' not in records[0].getMessage()
+
+
+def test_an_attribute_error_from_our_own_frame_in_the_classifier_aborts_the_run(tree, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+
+    def classify(*args, **kwargs):
+        raise AttributeError('SYNTHETIC_missing')
+    monkeypatch.setattr(masks, 'classify', classify)
+    with pytest.raises(conv.ConvertAborted):
+        conv.convert(org, out)
+    with open(out / conv.REPORT_NAME, newline='') as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(r['patient'], r['outcome'], r['reason']) for r in rows] == [(PID, conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]

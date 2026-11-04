@@ -1,0 +1,128 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "dicom_io: quiet_call BaseException handling, _fds_quiet fd leak, contract docstring (B2, B3, B4)",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/dicom_io.py",
+        "tests/test_dicom_io.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/dicom_io.py": "modify",
+        "tests/test_dicom_io.py": "modify"
+      },
+      "test_approach": "Red first in tests/test_dicom_io.py, next to the existing quiet_call tests (lines ~158-224; follow their capfd/caplog style and their getattr(..., '__context__')  # noqa: B009 pattern). A4: fn raising KeyboardInterrupt('SYNTHETIC_x'), SystemExit('SYNTHETIC_x'), SystemExit(3), and a BaseException subclass whose __init__ needs an argument. A5: inside monkeypatch.context() around the one call (it patches the global os module), patch os.dup with a counter that raises OSError on call 2, list /proc/self/fd before and after (patch removed and exception info dropped before the after-listing), pytest.mark.skipif without /proc/self/fd. A6: fn starts and joins a threading.Thread that calls warnings.warn('SYNTHETIC_x'); assert no warning recorded outside (warnings.catch_warnings(record=True) around the call) and nothing on capfd. Confirm A4 and A5 fail on the pre-change code before implementing; A6 passes on it (a pin). Then `uv run --group dev pytest -q --tb=short tests/test_dicom_io.py` and the full suite (483 passed, 1 skipped at 5977e72).",
+      "criteria": [
+        "quiet_call(fn) where fn raises KeyboardInterrupt('SYNTHETIC_x') raises KeyboardInterrupt with empty args, __context__ None and __cause__ None, and pydicom settings, the pydicom logger, logging.disable, the ITK warning display, fds 1/2 and sys.stdout/stderr are restored",
+        "SystemExit('SYNTHETIC_x') from fn becomes SystemExit(1); SystemExit(3) stays SystemExit(3); SystemExit() / SystemExit(None) keeps a None code; nothing chained",
+        "A BaseException subclass whose constructor needs arguments, raised from fn, becomes a bare KeyboardInterrupt(); any other non-Exception BaseException is re-raised as bare type(exc)(); all raised after the except block",
+        "Exception and MemoryError behaviour of quiet_call is unchanged (existing tests pass unmodified)",
+        "With os.dup failing on its second call, _fds_quiet raises and the set of entries in /proc/self/fd is the same before and after; this test fails on the pre-change code",
+        "A warnings.warn issued in a thread started and joined inside fn emits nothing: no warning recorded by the caller, nothing on fd 1 or 2",
+        "quiet_call's docstring states: a closure holds third-party access, value extraction and deliberate raises only (no arithmetic or logic of ours, which belongs outside where a bug aborts the run, #40); every Exception becomes CaseRefused(reason); the BaseException mapping; it swaps process-wide state and is not thread-safe (#2 must be process-based or serialize it)"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "convert: split _read_dose into quiet extraction, plain arithmetic, quiet build; dose finiteness (B1, B6)",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_convert.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_convert.py": "modify"
+      },
+      "test_approach": "Red first in tests/test_convert.py using make_plan/dose_spec/edit from tests/synthetic_dicom.py and the existing dose tests (~lines 100-200, 846-880) as models. A1: monkeypatch.setattr(conv, '_check_dose_header', ...) returning a list of N (the RTDOSE's frame count) instances of a test class that has no __float__/__array__ and whose __sub__ and __rsub__ raise TypeError; run conv.convert and assert ConvertAborted, the patient's row REASON_INTERNAL, no REASON_DOSE_UNREADABLE row. Do NOT patch numpy (_header_call(_assemble) would catch it). A2: edit the RTDOSE so ImageOrientationPatient has 5 values / PixelSpacing has 1 (through save_as, read back with dcmread to confirm the fixture holds); assert REASON_DOSE_UNREADABLE and that a second plan still converts. A10: a NaN GridFrameOffsetVector entry -> REASON_DOSE_GRID; a NaN ImagePositionPatient value -> REASON_DOSE_UNREADABLE. Confirm A1 and both A10 cases fail on the pre-change code (plan review verified A10: pydicom round-trips NaN DS through save_as/dcmread, and the pre-change code converts it without refusing, an all-zero dose). Then the file and the full suite.",
+      "criteria": [
+        "_read_dose runs three steps: (1) quiet_call(..., REASON_DOSE_UNREADABLE) doing dcmread, pixel_array as float64 times float(DoseGridScaling), the frame-count check against offsets, and ImageOrientationPatient / ImagePositionPatient / PixelSpacing as plain floats with counts 6 / 3 / 2 and finiteness checked, returning only floats and an ndarray; (2) the cosine, normal, reorder, origin, spacing and direction arithmetic outside any quiet_call or _header_call; (3) quiet_call(..., REASON_DOSE_UNREADABLE) doing GetImageFromArray, SetSpacing, SetDirection, SetOrigin and resample_dose",
+        "Step (1) uses offsets only through len(offsets); step (2) is the first code that indexes, subtracts or converts offsets",
+        "A TypeError raised from the arithmetic step (injected via a patched _check_dose_header returning an offsets object whose subtraction raises TypeError) aborts the run: ConvertAborted, the patient's row REASON_INTERNAL, no REASON_DOSE_UNREADABLE row; this test fails on the pre-change code",
+        "An RTDOSE whose ImageOrientationPatient has 5 values, or whose PixelSpacing has 1, refuses the plan with REASON_DOSE_UNREADABLE and the run continues (fixture through save_as/dcmread)",
+        "_check_dose_header refuses an RTDOSE with any non-finite GridFrameOffsetVector value with REASON_DOSE_GRID; an RTDOSE with a NaN ImagePositionPatient value refuses with REASON_DOSE_UNREADABLE; each test fails on the pre-change code (verified: the pre-change code converts without refusing, an all-zero dose)",
+        "Every existing dose test (A2.1, summation rules, orientation, negative and absolute offsets) passes unmodified, so output for every well-formed RTDOSE is unchanged",
+        "No pydicom value is converted outside step (1) (vault: pydicom-validates-lazily-on-first-tag-access)"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "convert: _header_call lets our own AttributeError/KeyError and keyword typos through, logs refusal sites (B5)",
+      "depends_on": [
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_convert.py",
+        "tests/test_series.py",
+        "docs/plans/quiet-call-redesign/findings.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_convert.py": "modify",
+        "tests/test_series.py": "modify",
+        "docs/plans/quiet-call-redesign/findings.md": "modify"
+      },
+      "test_approach": "Red first. Direct tests of _header_call via getattr(conv, '_header_call')  # noqa: B009: a step raising AttributeError on a plain object (ours) propagates; a step reading a missing tag on a pydicom Dataset refuses REASON_MISSING_TAG; a step raising KeyError from a plain dict propagates; ds['PatientName'] missing refuses; ds.SYNTHETICNotAKeyword propagates as AttributeError. caplog.set_level(logging.INFO) first (pytest's root stays at WARNING otherwise; existing tests do the same at DEBUG): the refusal logs one record with the class name and an rt_dataprep.* module and line, and no tmp path or SYNTHETIC_ id. One end-to-end: monkeypatch masks.classify (as convert sees it) to raise AttributeError from the test's own frame -> conv.convert raises ConvertAborted with the patient row REASON_INTERNAL. Switch the two existing tests whose injected KeyError stands for a refusal (test_convert.py refuse_after_the_plan_folder_exists; test_series.py test_a_tag_error_while_building_the_series_rows_refuses_the_plan_and_removes_the_folder) to ValueError, nothing else in them. Confirm the new propagate tests fail on the pre-change code. Audit: grep the functions wrapped by _header_call (_assemble, _check_volume, _check_contour_images, _dose_candidates, _check_dose_header, masks.classify, _series_rows, the lambda at the FrameOfReferenceUID read) for attribute or method access on a value pydicom may return as None; record the list and the verdict in findings.md under ## task-03.",
+      "criteria": [
+        "_header_call keeps its except tuple; a caught AttributeError or KeyError whose innermost traceback frame (the last frame of traceback.walk_tb(sys.exc_info()[2])) has f_globals['__name__'] neither 'pydicom' nor starting with 'pydicom.' propagates as itself",
+        "A caught AttributeError raised from pydicom whose name attribute is not a DICOM keyword (pydicom.datadict.tag_for_keyword(name) is None) propagates as itself",
+        "Every other caught exception refuses with CaseRefused(REASON_MISSING_TAG), nothing chained, after one INFO log record 'convert: %s: %s at %s:%d' with REASON_MISSING_TAG, the exception class name and crash_site(sys.exc_info()[2]) evaluated inside the except block; no path, tag value or SYNTHETIC_ id in the record",
+        "A missing tag read as ds.X or ds['X'] still refuses with REASON_MISSING_TAG; every existing REASON_MISSING_TAG test passes",
+        "An AttributeError from our own frame injected into masks.classify aborts conv.convert: ConvertAborted, the patient row REASON_INTERNAL; the new propagate tests fail on the pre-change code",
+        "The two existing tests that injected KeyError as a stand-in for a refusal raise ValueError instead, with no other change; they pass",
+        "findings.md ## task-03 lists every attribute or method access on a possibly-None pydicom value in the wrapped functions and states the verdict (accepted behaviour: such an access aborts the run)"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "convert: A2.10 test where ITK's raw CT read error names the path (#24)",
+      "depends_on": [
+        "task-03"
+      ],
+      "files": [
+        "tests/test_convert.py",
+        "docs/plans/quiet-call-redesign/findings.md"
+      ],
+      "file_ops": {
+        "tests/test_convert.py": "modify",
+        "docs/plans/quiet-call-redesign/findings.md": "modify"
+      },
+      "test_approach": "A separate test next to the A2.10 section (~line 640), not a new case of its parametrize. Wrap conv.read_folder_headers (monkeypatch.setattr on the convert module) so that after the real call returns for plan_1 it deletes one planning-CT slice from disk; run conv.convert on a SYNTHETIC_ patient tree with caplog and capfd. Before the assertions, show once in a scratch run that the raw ITK message names the path ('Could not open file: <path>'): replacing or truncating the slice instead names no path and must not be used. Mutation check, run once by hand and recorded in findings.md: patch conv.quiet_call (the name convert imported) with a variant raising CaseRefused(str(exc)); the test must fail. The test carries a comment that the deletion is setup for a slice lost between the header read and ITK's read; the code under test deletes nothing.",
+      "criteria": [
+        "A planning-CT slice removed after the header read makes the plan refuse with REASON_CT_UNREADABLE",
+        "No tmp path, file name or SYNTHETIC_ id appears in the report rows, any log record, or fds 1/2",
+        "With conv.quiet_call patched to pass str(exc) through as the reason, the test fails; the mutation run and its result are recorded in findings.md under ## task-04"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01",
+      "task-02"
+    ],
+    [
+      "task-03"
+    ],
+    [
+      "task-04"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-04",
+    "spec": "docs/specs/2026-11-04-quiet-call-redesign.md",
+    "profile": "project-profile.yml",
+    "issues": "closes #40, #20, #24",
+    "guardrails": [
+      "Commit gate: at most 5 staged files per commit; private-API scan flags a dotted private reference (module, dot, underscore name) incl. dunders in added lines: tests use getattr(module, '_name')  # noqa: B009, code reads the traceback via sys.exc_info()[2]; the scan covers every added line, findings.md, docstrings and comments included: write private helpers bare (_assemble), never dotted",
+      "PHI: fixed REASON_ text and counts only; test data SYNTHETIC_-prefixed; no .dcm committed",
+      "Vault third-party-loader-errors-and-warnings-embed-phi-paths: raise after the except block; assert message, __context__, __cause__ are clean",
+      "Vault pydicom-validates-lazily-on-first-tag-access: every pydicom value read inside the quiet step; quiet tests assert nothing at all is emitted",
+      "Vault Memory/rt-dataprep/pre-push-uses-stale-dotvenv-pytest: run uv run --group dev pytest once before pushing",
+      "New guards: build DICOM fixtures through save_as/dcmread and run the new test against the pre-change code first",
+      "PR body names the NaN dose-finiteness fix (no issue; pre-change code turned a NaN RTDOSE into an all-zero dose). Post a comment on #2: quiet_call is process-wide; parallelism must be process-based or serialize it."
+    ]
+  }
+}

@@ -81,7 +81,7 @@ def test_a_missing_header_tag_still_refuses_the_plan_with_missing_tag(tree, what
 def test_a_tag_error_while_building_the_series_rows_refuses_the_plan_and_removes_the_folder(tree, monkeypatch):
     org, out = tree
     plan = make_plan(org / PID / 'plan_1')
-    raise_in(monkeypatch, '_series_rows', KeyError(SECRET))
+    raise_in(monkeypatch, '_series_rows', ValueError(SECRET))
     with pytest.raises(CaseRefused) as caught:
         run_plan(plan['folder'], out / 'case')
     assert str(caught.value) == conv.REASON_MISSING_TAG and not (out / 'case').exists()
