@@ -25,7 +25,7 @@
         "B1: convert() then raises an error with fixed text, raised after the except block exits (a flag), whose str, __cause__ and __context__ hold no part of the original message; capfd captures none of it",
         "B1: a log record names the exception class (TypeError) and the innermost rt_dataprep frame as module name and line number, with no file path and no message or arguments",
         "KeyboardInterrupt and SystemExit are not caught by the internal-error path: no REASON_INTERNAL row, and PR 1's flag-based partial cleanup still runs",
-        "The CLI catches ConvertAborted and exits 1 with stderr exactly 'rt_dataprep: ' + REASON_INTERNAL + newline and empty stdout, like its OSError branch",
+        "The CLI catches ConvertAborted and exits 1 with empty stdout; stderr's last line is exactly 'rt_dataprep: ' + REASON_INTERNAL, and no stderr line holds the original exception message, a UID or a path (amended 2026-11-03, user decision: the crash-site log line stays visible in the CLI)",
         "The full suite passes; any existing test that now raises is a PR 1 bug fixed in this task, and the catch is never widened again to make it pass",
         "The traceback is walked via sys.exc_info()[2] and traceback.walk_tb; the module name comes from the frame's f_globals['__name__'] and the line from the walk's lineno; the frame filename only selects the innermost rt_dataprep frame and is never formatted; tests read the chain with getattr(err, '__cause__') and getattr(err, '__context__')",
         "Guardrail (commit gate): no added line puts mrn/patient_id next to a run of 6-10 digits and no added line has a dotted name whose last part starts with an underscore; at most 5 staged files per commit",
@@ -215,6 +215,9 @@
       "tests/test_organize.py:24 and tests/test_dicom_io.py:85 trip the MRN rule if edited: neither file is edited in this PR",
       "Never write a dotted name whose last part starts with an underscore (module dot _name, package dot __main__) on an added line in any file type, docs and JSON included; drive the CLI with a subprocess running 'python -m rt_dataprep', never by importing the package's main module",
       "At most 5 staged files per commit (findings.md counts)"
+    ],
+    "decisions_log": [
+      "task-01 criterion amended by user decision 2026-11-03: CLI stderr 'exactly the fixed line' conflicted with the user's crash-site log record (CLI logs INFO to stderr); now the last stderr line is the fixed text and no line carries PHI"
     ]
   }
 }
