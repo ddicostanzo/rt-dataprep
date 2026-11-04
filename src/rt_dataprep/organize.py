@@ -5,6 +5,7 @@ Files are copied, never moved. Log lines and exception messages carry counts and
 PatientID, folder name, date or path; organize_report.csv in the output root is the one place the sanitized id appears.
 """
 import logging
+import os
 import shutil
 from collections import defaultdict
 from dataclasses import dataclass
@@ -26,7 +27,8 @@ REASON_OUTSIDE_ROOT = 'output folder resolves outside the output root'
 REASON_IO_ERROR = 'file system error while reading or copying; nothing kept for this patient'
 REASON_OUTSIDE_SRC = 'output root is the source root or inside it'
 REASON_NO_SOP_UID = 'a DICOM file has no or an empty SOPInstanceUID'
-_CT_DATES = ('SeriesDate', 'StudyDate', 'AcquisitionDate', 'ContentDate')  # fx order: first non-blank wins
+_CT_DATES = (('SeriesDate', 'SeriesTime'), ('StudyDate', 'StudyTime'), ('AcquisitionDate', 'AcquisitionTime'),
+             ('ContentDate', 'ContentTime'))  # fx order: the first non-blank date wins, with its own time as the tiebreak (#68)
 
 
 @dataclass
@@ -52,7 +54,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',)):
     claimed = set()  # casefolded output names taken in this run: a case-insensitive filesystem would merge them
     rows = []
     try:
-        for folder in sorted(p for p in src_root.iterdir() if p.is_dir()):
+        for folder in sorted(p for p in src_root.iterdir() if p.is_dir() and not p.name.startswith('.')):  # .X.partial too
             try:
                 rows.append(_organize_patient(folder, out_root, claimed, exclude_models))
             except OSError:  # its message names a path, i.e. the patient: report a fixed reason and go on
@@ -69,7 +71,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',)):
 
 def _organize_patient(folder, out_root, claimed, exclude_models):
     headers, bad = [], []  # bad: has the preamble but read_header fails; copied to misc_files (#13)
-    for path in sorted(p for p in folder.rglob('*') if _has_preamble(p)):
+    for path in sorted(p for p in _walk(folder) if _has_preamble(p)):
         try:
             headers.append((path, read_header(path)))
         except OSError:
@@ -112,6 +114,18 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
         shutil.rmtree(partial, ignore_errors=True)
         raise
     return PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED)
+
+
+def _walk(folder):
+    """
+    Every file under `folder`, hidden folders skipped (a hidden file is kept: a slice may be named so, and _has_preamble
+    sorts it). An unlistable folder raises OSError, so no patient is organized with files missing (#68).
+    """
+    def fail(error):
+        raise error
+    for top, dirs, files in os.walk(folder, onerror=fail):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        yield from (Path(top) / name for name in files)
 
 
 def _has_preamble(path):
@@ -171,9 +185,9 @@ def _group(headers, exclude_models):
         if series is None:
             continue
         ct = min((ds for _, ds in ct_series[series]), key=lambda ds: ds.SOPInstanceUID)
-        date = next((d for d in (str(ct.get(t, '')).strip() for t in _CT_DATES) if d), '')
-        key = (date == '', date) + tuple(str(v) for v in (ct.get('SeriesTime', ''), plan.get('RTPlanDate', ''),
-                                                          plan.get('RTPlanTime', ''), plan.SOPInstanceUID))  # undated last (#9)
+        date, time = next(((d, str(ct.get(t, '')).strip()) for tag, t in _CT_DATES if (d := str(ct.get(tag, '')).strip())), ('', ''))
+        key = (date == '', date, time) + tuple(str(v) for v in (plan.get('RTPlanDate', ''), plan.get('RTPlanTime', ''),
+                                                                plan.SOPInstanceUID))  # undated last (#9)
         ct_study = study_of(ct)
         # The resolved RTSTRUCT always comes along, even when it was exported in a study other than the CT's.
         files = [plan_path, struct_paths[_uids(plan, 'ReferencedStructureSetSequence', 'ReferencedSOPInstanceUID')[0]]]

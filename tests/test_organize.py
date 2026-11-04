@@ -2,6 +2,7 @@
 import csv
 import hashlib
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -498,3 +499,45 @@ def test_ctrl_c_still_writes_the_report_of_what_was_done(tree, monkeypatch):
         organize(src, out)
     with open(out / org.REPORT_NAME, newline='') as handle:
         assert [row['outcome'] for row in csv.DictReader(handle)] == [org.OUTCOME_ORGANIZED]
+
+
+def test_same_day_fallback_dates_are_ordered_by_their_own_time(tree):
+    src, out = tree
+    late = planning_study(src / PID / 'a', date=EARLY)  # first by name and by SeriesTime, later by StudyTime
+    early = planning_study(src / PID / 'b', date=EARLY)
+    redate_ct(late, SeriesDate=None, StudyDate=LATE, SeriesTime='080000', StudyTime='110000')
+    redate_ct(early, SeriesDate=None, StudyDate=LATE, SeriesTime='090000', StudyTime='100000')
+    organize(src, out)
+    assert plan_ct_series(out) == [{early['ct']['series_uid']}, {late['ct']['series_uid']}]
+
+
+def test_a_folder_of_only_non_dicom_files_is_no_dicom_with_nothing_unreadable(tree):
+    src, out = tree
+    mk(src / PID)
+    (src / PID / 'notes.txt').write_text('not dicom')
+    row = organize(src, out).rows[0]
+    assert (row.outcome, row.reason, row.unreadable) == (org.OUTCOME_REFUSED, org.REASON_NO_DICOM, 0)
+
+
+def test_hidden_folders_are_not_walked(tree):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    planning_study(src / '.SYNTHETIC_OLD.partial' / 'a', pid='SYNTHETIC_OLD')  # an old output root's leftover
+    planning_study(src / PID / '.cache', pid='SYNTHETIC_OTHER')  # would be REASON_MIXED_IDS if walked
+    rows = organize(src, out).rows
+    assert [(r.patient, r.outcome) for r in rows] == [(PID, org.OUTCOME_ORGANIZED)]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason='root lists any folder')
+def test_an_unlistable_subfolder_refuses_the_patient(tree):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    locked = src / PID / 'locked'
+    planning_study(locked, tag='x')
+    locked.chmod(0)
+    try:
+        row = organize(src, out).rows[0]
+    finally:
+        locked.chmod(0o755)
+    assert (row.outcome, row.reason) == (org.OUTCOME_REFUSED, org.REASON_IO_ERROR)
+    assert not (out / PID).exists()
