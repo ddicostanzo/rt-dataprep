@@ -262,6 +262,16 @@ def test_a_missing_or_malformed_tag_skips_the_series_without_an_exception(tmp_pa
     assert ser.check_volume(items) is None and ser.read_series(items) is None
 
 
+@pytest.mark.parametrize('change', [
+    lambda i, ds: setattr(ds, 'PixelSpacing', [0.0, 1.0]),
+    lambda i, ds: setattr(ds, 'PixelSpacing', [-1.0, 1.0]),
+    lambda i, ds: setattr(ds, 'ImagePositionPatient', [0.0, 0.0, 0.0]),
+], ids=['zero-spacing', 'negative-spacing', 'all-duplicate-positions'])
+def test_a_degenerate_spacing_or_step_skips_the_series_without_an_exception(tmp_path, change):
+    items = header_edit(tmp_path, change)  # every slice agrees, so only the degenerate value can refuse
+    assert ser.check_volume(items) is None and ser.read_series(items) is None
+
+
 def test_a_size_mismatch_or_an_unreadable_file_skips_the_series(tmp_path):
     items = header_edit(tmp_path, lambda i, ds: setattr(ds, 'Rows', 4))  # all headers agree, the pixels do not
     assert ser.read_series(items) is None

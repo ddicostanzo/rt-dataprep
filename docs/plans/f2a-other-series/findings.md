@@ -97,3 +97,10 @@ report-write OSError replaces ConvertAborted (CLI message still path-free). Defe
   placement (its extra files and rows go before this loop; a row's `files` already ends with series.csv).
 - Gotchas: convert_plan's case folder now holds no series.csv after a direct call. tests/test_series.py (task-01) also called
   convert_plan, so it was restated too (3 calls, same assertions). A failed series.csv write is still the patient-level REASON_IO_ERROR.
+
+## review-2
+BLOCKING (fixed by orchestrator): a zero or negative PixelSpacing passed check_volume and SetSpacing raised out of
+read_series; now refused in the check, with zero/negative-spacing and all-duplicate-position tests (the latter also
+pins the step guard). WARNING: the single-slice guard is only pinned via a NaN path. NOTE: task-05 edited
+tests/test_series.py outside its declared files (needed by the convert_plan signature change; logged, not a DAG
+change); misc unreadable count re-scans the folder.

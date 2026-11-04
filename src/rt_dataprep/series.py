@@ -64,7 +64,8 @@ def _sorted_volume(slices):
             and abs(np.dot(row, column)) <= ORTHO_ATOL):
         return None
     pixel_spacing = np.asarray([_pixel_spacing(ds) for ds in heads])
-    if not (np.allclose(pixel_spacing, pixel_spacing[0], rtol=0, atol=SERIES_ATOL_MM)
+    if not ((pixel_spacing > 0).all()  # SetSpacing raises on a zero or negative spacing
+            and np.allclose(pixel_spacing, pixel_spacing[0], rtol=0, atol=SERIES_ATOL_MM)
             and len({(int(ds.Rows), int(ds.Columns)) for ds in heads}) == 1
             and len({str(ds.FrameOfReferenceUID) for ds in heads}) == 1):
         return None
