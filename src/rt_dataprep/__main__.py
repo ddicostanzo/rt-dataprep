@@ -3,7 +3,7 @@ import dataclasses
 import logging
 
 from rt_dataprep.convert import REASON_INTERNAL, REASON_OUTSIDE_ORG, ConvertAborted, convert
-from rt_dataprep.organize import organize
+from rt_dataprep.organize import REASON_OUTSIDE_SRC, organize
 from rt_dataprep.preprocess import (
     LEGACY_RNT,
     REASON_NO_STEPS,
@@ -43,7 +43,7 @@ def main(argv=None):
         else:
             organize(args.src, args.out)
     except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug and propagates
-        if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS):
+        if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_OUTSIDE_SRC):
             raise
         parser.exit(1, f'rt_dataprep: {exc}\n')
     except ConvertAborted:  # the report is written; the text is fixed, nothing of the original reaches the terminal

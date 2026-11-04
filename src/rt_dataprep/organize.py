@@ -23,6 +23,8 @@ REASON_MIXED_IDS = 'source folder holds more than one PatientID'
 REASON_NO_DICOM = 'source folder holds no readable DICOM file'
 REASON_OUTSIDE_ROOT = 'output folder resolves outside the output root'
 REASON_IO_ERROR = 'file system error while reading or copying; nothing kept for this patient'
+REASON_OUTSIDE_SRC = 'output root is the source root or inside it'
+REASON_NO_SOP_UID = 'a DICOM file has no SOPInstanceUID'
 
 
 @dataclass
@@ -42,6 +44,8 @@ class OrganizeReport:
 
 def organize(src_root, out_root, *, exclude_models=('Acuity',)):
     src_root, out_root = Path(src_root), Path(out_root)
+    if out_root.resolve().is_relative_to(src_root.resolve()):  # before any mkdir: it would be walked as a patient folder
+        raise ValueError(REASON_OUTSIDE_SRC)
     out_root.mkdir(parents=True, exist_ok=True)
     claimed = set()  # casefolded output names taken in this run: a case-insensitive filesystem would merge them
     rows = []
@@ -73,6 +77,8 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
         reason = REASON_MIXED_IDS if ids else REASON_NO_DICOM
         return PatientRow(sanitize_path_component(folder.name), 0, 0, unreadable, OUTCOME_REFUSED, reason)
     name = sanitize_path_component(ids.pop())
+    if any('SOPInstanceUID' not in ds for _, ds in headers):  # type 1, and grouping keys on it: dropping the file could drop a dose
+        return PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NO_SOP_UID)
     if name.casefold() in claimed:  # two folders, one output name: refuse, never merge
         return PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NAME_CLAIMED)
     claimed.add(name.casefold())
@@ -125,8 +131,11 @@ def _group(headers, exclude_models):
     study_of = lambda ds: str(ds.get('StudyInstanceUID', ''))  # noqa: E731
     excluded = {study_of(ds) for _, ds in headers if any(m in str(ds.get('ManufacturerModelName', '')) for m in exclude_models)}
     excluded.add('')  # a file with no study cannot be matched to a case
-    pool = [(p, ds) for p, ds in headers
-            if study_of(ds) not in excluded and not (ds.get('Modality') == 'CT' and 'LOCALIZER' in ds.get('ImageType', []))]
+    first = {}  # one instance in two sub-folders is used once, from the first path; the copy goes to misc_files
+    for path, ds in headers:
+        first.setdefault(ds.SOPInstanceUID, path)
+    pool = [(p, ds) for p, ds in headers if first[ds.SOPInstanceUID] == p
+            and study_of(ds) not in excluded and not (ds.get('Modality') == 'CT' and 'LOCALIZER' in ds.get('ImageType', []))]
 
     by_study, ct_series = defaultdict(list), defaultdict(list)
     for path, ds in pool:
