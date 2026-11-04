@@ -670,3 +670,45 @@ def test_reasons_hold_no_separator_digit_run_or_uid():
 
 def test_convert_exposes_crash_site():
     assert callable(conv.crash_site) and not hasattr(conv, '_crash_site')
+
+
+def test_matches_torchio(tmp_path):
+    """A2.6: the SimpleITK chain equals torchio 1.2.1 Resample -> rescale -> Resample -> CropOrPad on a synthetic CT (rescale on)."""
+    tio = pytest.importorskip('torchio')
+    # native 11x9x7, anisotropic: 1.5 mm gives 8x6x9, 1.25 mm gives 9x7x10; new_shape (14, 4, 13) pads x by 3+2, crops y by 2+1, pads z by 2+1
+    rng = np.random.default_rng(7)
+    ct = make_image(rng.uniform(-1000, 1000, (7, 9, 11)), spacing=(1.2, 1.0, 2.0), origin=(-5.0, 3.0, 40.0))
+    mask_array = np.zeros((7, 9, 11), np.uint8)
+    mask_array[2:5, 3:7, 4:9] = 1
+    mask_array[3, 4, 5] = 2
+    mask = sitk.Cast(make_image(mask_array, spacing=ct.GetSpacing(), origin=ct.GetOrigin()), sitk.sitkUInt8)
+    sitk.WriteImage(ct, str(tmp_path / 'ct.nii.gz'))
+    sitk.WriteImage(mask, str(tmp_path / 'mask.nii.gz'))
+    steps = dataclasses.replace(LEGACY_RNT, new_spacing=(1.5, 1.5, 1.5), new_shape=(14, 4, 13))
+
+    final = pre.process_ct(pre.read_image(tmp_path / 'ct.nii.gz'), steps)
+    mine_mask = pre.process_mask(pre.read_image(tmp_path / 'mask.nii.gz'), final, steps)
+    sitk.WriteImage(final, str(tmp_path / 'mine_ct.nii.gz'))
+    sitk.WriteImage(mine_mask, str(tmp_path / 'mine_mask.nii.gz'))
+
+    subject = tio.Subject(ct=tio.ScalarImage(tmp_path / 'ct.nii.gz'))
+    subject = tio.Resample((1.5, 1.5, 1.5), antialias=False)(subject)
+    subject['ct'].set_data((subject['ct'].data + 1024) / 4096)  # the rescale step, between the two resamples as in legacy
+    subject = tio.Resample((1.25, 1.25, 1.25), antialias=False)(subject)
+    pad = float(subject['ct'].data.min())  # the minimum of the CT entering reshape
+    subject = tio.CropOrPad((14, 4, 13), padding_mode=pad)(subject)
+    subject['ct'].save(tmp_path / 'tio_ct.nii.gz')
+    tio_final = tio.ScalarImage(tmp_path / 'tio_ct.nii.gz')  # the final CT image, the mask's reference grid
+    mask_subject = tio.Subject(mask=tio.LabelMap(tmp_path / 'mask.nii.gz'))
+    mask_subject = tio.Resample(target=tio_final, antialias=False)(mask_subject)  # no CropOrPad on the mask
+    mask_subject['mask'].save(tmp_path / 'tio_mask.nii.gz')
+
+    mine, theirs = (sitk.ReadImage(str(tmp_path / name)) for name in ('mine_ct.nii.gz', 'tio_ct.nii.gz'))
+    assert mine.GetSize() == theirs.GetSize() == (14, 4, 13)
+    assert mine.GetSpacing() == pytest.approx(theirs.GetSpacing(), abs=1e-6)
+    assert mine.GetOrigin() == pytest.approx(theirs.GetOrigin(), abs=1e-4)
+    assert np.abs(sitk.GetArrayFromImage(mine) - sitk.GetArrayFromImage(theirs)).max() < 1e-4
+    mine_labels, tio_labels = (sitk.ReadImage(str(tmp_path / name)) for name in ('mine_mask.nii.gz', 'tio_mask.nii.gz'))
+    assert mine_labels.GetSize() == tio_labels.GetSize() == mine.GetSize()
+    assert np.array_equal(sitk.GetArrayFromImage(mine_labels), sitk.GetArrayFromImage(tio_labels).astype(np.uint8))
+    assert sitk.GetArrayFromImage(mine_labels).any()

@@ -87,3 +87,17 @@ Deferred (not fixed here):
 - WARNING (deferred): `rmtree(out_dir, ignore_errors=True)` failing silently would let a refused plan's partial
   files be renamed into place while the report says refused.
 - NOTEs: the CT-first sort is untested (F2a writes the CT first); out_root mkdir/report open OSError names the root.
+
+## task-04
+
+Files: `tests/test_preprocess.py` (+`test_matches_torchio`), `README.md` (never-commit list names `preprocess_report.csv`).
+
+A2.6 torchio run, for the PR body:
+- Command: `uv run --with torchio==1.2.1 --group dev pytest -q --tb=short tests/test_preprocess.py` (no 3.12 fallback needed: torch resolved on 3.13)
+- Python: 3.13.16
+- Result: `59 passed in 5.14s` (the A2.6 test ran, not skipped). Normal suite: `325 passed, 1 skipped`.
+- The test runs with the rescale step on: `(x + 1024) / 4096` is applied between the two torchio resamples, so it covers the
+  preset's order. Native 11x9x7 at (1.2, 1.0, 2.0) mm; new_spacing 1.5 and final 1.25 mm; new_shape (14, 4, 13) pads x by 3+2,
+  crops y by 2+1 and pads z by 2+1, so the ceil/floor split is exercised. Swapping start and end in `crop_or_pad` makes it fail
+  (origin x -6.5 vs -7.75), so it does pin the split.
+- torchio side: only public API (`Subject`, `ScalarImage`, `LabelMap`, `Resample(..., antialias=False)`, `CropOrPad`, `set_data`, `save`).
