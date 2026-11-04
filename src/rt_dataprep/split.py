@@ -110,14 +110,16 @@ def split(manifest_path, *, test_size, val_size, seed, external=None):
     if external is not None:
         check_disjoint(obj, external)
     path, text = manifest_path.with_name(SPLITS_NAME), json.dumps(obj, indent=1, sort_keys=True) + '\n'
-    if not path.exists():
-        _write_new(path, text)
-    found = path.read_text(encoding='utf-8')
-    for _ in range(20):  # empty only while another run's O_EXCL reservation is not yet renamed over: a valid splits.json never is
-        if found:
+    for attempt in range(21):  # empty only while another run's O_EXCL reservation is not yet renamed over; missing once that run released it after a failed rename
+        if not path.exists():
+            _write_new(path, text)
+        try:
+            found = path.read_text(encoding='utf-8')
+        except FileNotFoundError:  # released between exists() and the read: the next pass writes it
+            found = ''
+        if found or attempt == 20:
             break
         time.sleep(0.05)  # shortcut: still empty after 1 s (a run killed holding the reservation) is refused as before; upgrade with a stale-reservation sweep
-        found = path.read_text(encoding='utf-8')
     if found != text:
         raise ValueError(REASON_EXISTS)
     log.info('split: %s patients, %s cases', '/'.join(str(len(obj[name])) for name in SPLIT_NAMES),

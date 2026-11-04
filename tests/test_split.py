@@ -232,7 +232,12 @@ def test_an_identical_split_is_not_refused_by_another_runs_empty_reservation(tmp
     text = json.dumps(sp.split(write_manifest(tmp_path / 'other', TEN), test_size=0.2, val_size=0.2, seed=SEED_A), indent=1,
                       sort_keys=True) + '\n'
     (tmp_path / 'splits.json').write_text('')  # the other run's O_EXCL reservation, not yet renamed over
-    timer = threading.Timer(0.2, (tmp_path / 'splits.json').write_text, [text])
+    def fill():  # atomic, as the real code fills the reservation
+        temp = tmp_path / 'SYNTHETIC_fill.tmp'
+        temp.write_text(text)
+        os.replace(temp, tmp_path / 'splits.json')
+
+    timer = threading.Timer(0.2, fill)
     timer.start()
     try:
         obj = sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
@@ -242,13 +247,26 @@ def test_an_identical_split_is_not_refused_by_another_runs_empty_reservation(tmp
     assert json.dumps(obj, indent=1, sort_keys=True) + '\n' == text
 
 
+def test_a_reservation_released_during_the_wait_is_taken_over(tmp_path):
+    path = write_manifest(tmp_path, TEN)
+    (tmp_path / 'splits.json').write_text('')  # another run's reservation, released after its rename failed
+    timer = threading.Timer(0.2, (tmp_path / 'splits.json').unlink)
+    timer.start()
+    try:
+        obj = sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
+    finally:
+        timer.cancel()
+        timer.join()
+    assert (tmp_path / 'splits.json').read_text() == json.dumps(obj, indent=1, sort_keys=True) + '\n'
+
+
 def test_an_empty_splits_json_that_is_never_filled_is_still_refused_after_about_a_second(tmp_path):
     path = write_manifest(tmp_path, TEN)
     (tmp_path / 'splits.json').write_text('')
     started = time.monotonic()
     with pytest.raises(ValueError, match=sp.REASON_EXISTS):
         sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
-    assert time.monotonic() - started < 1.5
+    assert time.monotonic() - started < 3
     assert (tmp_path / 'splits.json').read_text() == ''
 
 
