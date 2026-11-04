@@ -77,3 +77,13 @@ Gotchas:
 Deferred (not fixed here):
 - Two series.csv rows naming one file write the same output twice. A series.csv with extra columns fails in `write_series_csv`
   (ValueError -> REASON_INTERNAL abort). Both only arise from a hand-edited series.csv.
+
+## review-2
+- No BLOCKING. 19 of 24 mutants killed (scratch copy; run `uv run --group dev python -m pytest` there, since a copied
+  .venv/bin/pytest shebang points at the original repo).
+- WARNING (deferred): the low-side REASON_CROP bound is barely tested (`< -1.5` survives); only the high side has a
+  near-boundary case.
+- WARNING (deferred): symlinked patient/plan folders and series.csv are followed (read only).
+- WARNING (deferred): `rmtree(out_dir, ignore_errors=True)` failing silently would let a refused plan's partial
+  files be renamed into place while the report says refused.
+- NOTEs: the CT-first sort is untested (F2a writes the CT first); out_root mkdir/report open OSError names the root.
