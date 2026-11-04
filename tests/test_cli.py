@@ -45,3 +45,26 @@ def test_oserror_exits_1_with_a_path_free_message(tmp_path, org):
     result = run_convert(org, blocker / 'out')  # the output root cannot be made
     assert result.returncode == 1
     assert result.stderr == 'rt_dataprep: file system error on the source or output root\n' and result.stdout == ''
+
+
+# Runs the entry module as __main__ with build_masks patched to raise; argv comes after -c, so no path is embedded.
+CRASH = """
+import runpy, sys
+from rt_dataprep import masks
+def boom(*args, **kwargs):
+    raise TypeError('1.2.3.4.5')
+masks.build_masks = boom
+sys.argv = ['rt_dataprep', 'convert', sys.argv[1], sys.argv[2]]
+runpy.run_module('rt_dataprep', run_name='__main__')
+"""
+
+
+def test_an_unexpected_error_exits_1_and_the_last_stderr_line_is_the_fixed_text(tmp_path, org):
+    out = tmp_path / 'out'
+    result = subprocess.run([sys.executable, '-c', CRASH, str(org), str(out)], capture_output=True, text=True)
+    assert result.returncode == 1
+    lines = result.stderr.splitlines()
+    assert lines[-1] == f'rt_dataprep: {conv.REASON_INTERNAL}' and result.stdout == ''
+    assert [line for line in lines if '1.2.3.4.5' in line or str(tmp_path) in line] == []  # log lines stay, minus the secrets
+    with open(out / conv.REPORT_NAME, newline='') as handle:
+        assert [(r['outcome'], r['reason']) for r in csv.DictReader(handle)] == [(conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]

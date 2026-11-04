@@ -13,6 +13,8 @@ import logging
 import os
 import re
 import shutil
+import sys
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -56,6 +58,12 @@ REASON_DOSE_TYPE = 'DoseType is not PHYSICAL'
 REASON_DOSE_GRID = 'the RTDOSE frame offsets are not uniform or differ from NumberOfFrames'
 REASON_DOSE_FRAME = 'the RTDOSE FrameOfReferenceUID differs from the planning CT'
 REASON_DOSE_UNREADABLE = 'an RTDOSE is unreadable or lacks a required tag'
+REASON_INTERNAL = 'an unexpected error stopped the conversion; the report lists what was finished'
+PACKAGE_DIR = Path(__file__).parent
+
+
+class ConvertAborted(Exception):
+    """A patient hit an unexpected error: the report is written, the run stops. str() is exactly REASON_INTERNAL."""
 
 
 @dataclass
@@ -89,13 +97,19 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',)):
     if out_root.resolve().is_relative_to(org_root.resolve()):  # before any mkdir: nothing is written into the input
         raise ValueError(REASON_OUTSIDE_ORG)
     out_root.mkdir(parents=True, exist_ok=True)
-    rows = []
+    rows, aborted = [], False
     for folder in sorted(p for p in org_root.iterdir() if p.is_dir() and not p.name.startswith('.')):
         try:
             rows += _convert_patient(folder, out_root)
         except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
             rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_IO_ERROR))
             log.warning('convert: %s', REASON_IO_ERROR)
+        except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
+            module, line = _crash_site(sys.exc_info()[2])
+            rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_INTERNAL))
+            log.error('convert: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
+            aborted = True
+            break
     with open(out_root / REPORT_NAME, 'w', newline='') as handle:
         writer = csv.writer(handle)
         writer.writerow(['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'])
@@ -103,7 +117,18 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',)):
     log.info('convert: %d report rows, %d plans converted, %d refused, %d skipped', len(rows),
              sum(r.outcome == OUTCOME_CONVERTED for r in rows), sum(r.outcome == OUTCOME_REFUSED for r in rows),
              sum(r.outcome == OUTCOME_SKIPPED for r in rows))
+    if aborted:  # raised here, after the except blocks: nothing of the original is chained
+        raise ConvertAborted(REASON_INTERNAL)
     return ConvertReport(rows)
+
+
+def _crash_site(tb):
+    """(module name, line) of the innermost rt_dataprep frame of `tb`; the file name only selects it and is never formatted."""
+    site = ('unknown', 0)
+    for frame, lineno in traceback.walk_tb(tb):
+        if Path(frame.f_code.co_filename).parent == PACKAGE_DIR:
+            site = (frame.f_globals['__name__'], lineno)
+    return site
 
 
 def _convert_patient(folder, out_root):
@@ -147,7 +172,8 @@ def convert_plan(plan_dir, case_dir):
     Convert one plan folder into `case_dir`, which must not exist; returns a PlanResult.
 
     A refusal raises CaseRefused(fixed reason) and leaves no `case_dir` behind. A header that lacks a tag the path reads
-    refuses with REASON_MISSING_TAG. An OSError on the output side propagates: it is the patient's, not the plan's.
+    refuses with REASON_MISSING_TAG (_header_call). Any other error, an OSError on the output side included, propagates:
+    it is the patient's, not the plan's.
     """
     plan_dir, case_dir = Path(plan_dir), Path(case_dir)
     existed = case_dir.exists()
@@ -156,8 +182,6 @@ def convert_plan(plan_dir, case_dir):
         result = _convert_plan(plan_dir, case_dir)
     except CaseRefused as exc:
         reason = str(exc)
-    except (AttributeError, KeyError, IndexError, TypeError, ValueError):  # a missing tag or an odd value; not quoted
-        reason = REASON_MISSING_TAG
     if reason is not None:  # raised here, after the except blocks: nothing of the original is chained
         if not existed:
             shutil.rmtree(case_dir, ignore_errors=True)
@@ -165,17 +189,32 @@ def convert_plan(plan_dir, case_dir):
     return result
 
 
+def _header_call(fn, *args, **kwargs):
+    """fn(*args, **kwargs) for a header-only step: a missing tag or odd value (#33) is CaseRefused(REASON_MISSING_TAG)."""
+    failed, result = False, None
+    try:
+        result = fn(*args, **kwargs)
+    except (AttributeError, KeyError, IndexError, TypeError, ValueError):  # not quoted
+        failed = True
+    if failed:  # raised here, after the except block: nothing of the original is chained
+        raise CaseRefused(REASON_MISSING_TAG)
+    return result
+
+
 def _convert_plan(plan_dir, case_dir):
     headers = _read_headers(plan_dir)
-    plan, struct, ct_slices, series_uid = _assemble(headers)
-    _check_volume(ct_slices)
-    _check_contour_images(struct, series_uid, ct_slices)
+    plan, struct, ct_slices, series_uid = _header_call(_assemble, headers)
+    _header_call(_check_volume, ct_slices)
+    _header_call(_check_contour_images, struct, series_uid, ct_slices)
+    ct_frame_uid, struct_series_uid = _header_call(lambda: (str(ct_slices[0][1].FrameOfReferenceUID), str(struct.SeriesInstanceUID)))
     ct = _read_ct([p for p, _ in ct_slices], ct_slices[0][1])
-    dose, dose_heads = _read_dose_sum(headers, plan, str(ct_slices[0][1].FrameOfReferenceUID), ct)
-    rois = masks.classify(struct, plan, str(ct_slices[0][1].FrameOfReferenceUID), taken=(CT_NAME, DOSE_NAME))
+    used = _header_call(_dose_candidates, headers, plan)
+    offsets = [_header_call(_check_dose_header, ds, ct_frame_uid) for _, ds in used]  # every used dose is checked before any is read
+    dose, dose_heads = _read_dose_sum(used, offsets, ct)
+    rois = _header_call(masks.classify, struct, plan, ct_frame_uid, taken=(CT_NAME, DOSE_NAME))
     struct_path = next(p for p, ds in headers if ds is struct)
     # The scratch folder of DicomRTTool goes in the patient's partial folder: a stale partial's cleanup removes it too.
-    mask_images = masks.build_masks(rois.kept, [p for p, _ in ct_slices], struct_path, str(struct.SeriesInstanceUID),
+    mask_images = masks.build_masks(rois.kept, [p for p, _ in ct_slices], struct_path, struct_series_uid,
                                     series_uid, ct, case_dir.parent, ORIGIN_ATOL_MM, DIRECTION_ATOL)
     # Everything that can refuse has run: only now does the plan folder appear.
     case_dir.mkdir(parents=True)
@@ -190,7 +229,7 @@ def _convert_plan(plan_dir, case_dir):
     for name, points, _ in rois.applicators:
         masks.write_applicator(points, case_dir / name)
         files.append(name)
-    write_series_csv(_series_rows(plan, struct, ct_slices[0][1], dose_heads, rois, files), case_dir / SERIES_NAME)
+    write_series_csv(_header_call(_series_rows, plan, struct, ct_slices[0][1], dose_heads, rois, files), case_dir / SERIES_NAME)
     return PlanResult(files, series_uid)
 
 
@@ -357,10 +396,8 @@ def _read_dose(path, offsets, ct):
     return quiet_call(read, REASON_DOSE_UNREADABLE)
 
 
-def _read_dose_sum(headers, plan, ct_frame_uid, ct):
+def _read_dose_sum(used, offsets, ct):
     """(the plan dose on the CT grid in Gy as float32, the headers of the RTDOSEs summed); (None, []) without an RTDOSE."""
-    used = _dose_candidates(headers, plan)
-    offsets = [_check_dose_header(ds, ct_frame_uid) for _, ds in used]  # every used dose is checked before any is read
     images = [_read_dose(path, off, ct) for (path, _), off in zip(used, offsets, strict=True)]
     if not images:
         return None, []

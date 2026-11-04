@@ -25,3 +25,12 @@ Plan: `docs/plans/f2a-other-series/plan.json`. Read both before exploring. Appen
 - PHI: fixed REASON_ constants; no path, ID, UID, date or description in logs or exception text; synthetic IDs
   without digits or underscores.
 - Tests: `uv run --group dev pytest -q --tb=short`; lint: `uv run --group dev ruff check .`
+
+## task-01
+- Files: convert.py (REASON_INTERNAL, ConvertAborted, _header_call, _crash_site, per-call tag catch, _read_dose_sum split into
+  candidates + header checks + pixel sum), __main__.py (ConvertAborted branch), tests/test_series.py (new), tests/test_cli.py.
+- convert_plan no longer has the broad except; no existing test needed changing (168 of 169 pass).
+- ruff B009 flags getattr with a constant name; the gate bans the dotted form, so those lines carry noqa: B009.
+- Criterion 7 was amended by the user (the CLI's basicConfig puts the crash-site log line and the summary line on stderr):
+  stdout empty, stderr's last line exactly 'rt_dataprep: ' + REASON_INTERNAL, no stderr line holds the exception message,
+  a UID or a path. The log level and the summary line are unchanged; the CLI test asserts the amended wording.
