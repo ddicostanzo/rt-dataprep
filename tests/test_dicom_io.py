@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import warnings
 from pathlib import Path
 
@@ -13,7 +14,7 @@ import SimpleITK as sitk
 
 import synthetic_dicom as sd
 from rt_dataprep import dicom_io
-from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_header, sanitize_path_component
+from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_header, read_header_core, read_pooled, sanitize_path_component
 
 
 def test_package_init_has_no_imports():
@@ -348,3 +349,87 @@ def test_a_failed_latest_report_copy_leaves_no_hidden_temp(tmp_path, monkeypatch
     with pytest.raises(OSError):
         dicom_io.write_report(tmp_path, 'r.csv', ['a'], [['1']])
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith('.')] == []
+
+
+def test_read_header_core_error_has_no_context(tmp_path):
+    bad = tmp_path / 'notes.dcm'
+    bad.write_text('SYNTHETIC_ not a dicom file')
+    for path in (bad, tmp_path / 'absent.dcm'):
+        with pytest.raises(OSError) as err:
+            read_header_core(path)
+        assert str(err.value) == dicom_io.REASON_UNREADABLE
+        assert _chain(err.value) == (None, None)
+
+
+def _quiet_state():
+    return (pydicom.config.settings.reading_validation_mode, logging.getLogger('pydicom').disabled, list(warnings.filters))
+
+
+def _invalid_value_files(folder, count=16):
+    for i in range(count):
+        sd.write_rtdose(folder / f'dose{i:02d}.dcm', [[[1]]], invalid_values=(i == 7))
+    return sorted(folder.glob('*.dcm'))
+
+
+def test_read_pooled_is_silent_under_threads_and_restores_state(tmp_path, capfd, caplog):
+    paths = _invalid_value_files(tmp_path)
+    with warnings.catch_warnings(record=True) as control, caplog.at_level(logging.DEBUG):  # control: warns unquieted
+        warnings.simplefilter('always')
+        for element in pydicom.dcmread(paths[7], stop_before_pixels=True).iterall():
+            _ = element.value
+    assert control or caplog.records
+    caplog.clear()
+    capfd.readouterr()
+    before = _quiet_state()
+    with warnings.catch_warnings(record=True) as caught, caplog.at_level(logging.DEBUG):
+        warnings.simplefilter('always')
+        inside = _quiet_state()
+        headers = read_pooled(read_header_core, paths, 4)
+        after = _quiet_state()
+    out = capfd.readouterr()
+    assert len(headers) == 16 and all(isinstance(h, pydicom.Dataset) for h in headers)
+    assert caught == [] and caplog.records == [] and (out.out, out.err) == ('', '')
+    assert after == inside  # filters compared inside the recording block, where they were set
+    assert _quiet_state() == before
+
+
+def test_read_pooled_returns_input_order(tmp_path, monkeypatch):
+    paths = [tmp_path / f'p{i}.dcm' for i in range(8)]
+
+    def core(path):
+        time.sleep(0.05 * (len(paths) - paths.index(path)))  # earlier paths finish last
+        return path
+
+    monkeypatch.setattr(dicom_io, 'read_header_core', core)
+    assert read_pooled(lambda path: dicom_io.read_header_core(path), paths, 4) == paths
+
+
+def test_read_pooled_one_worker_is_one_thread(tmp_path, monkeypatch):
+    threads = set()
+
+    def core(path):
+        threads.add(threading.get_ident())
+        return path
+
+    monkeypatch.setattr(dicom_io, 'read_header_core', core)
+    paths = [tmp_path / f'p{i}.dcm' for i in range(5)]
+    assert read_pooled(lambda path: dicom_io.read_header_core(path), paths, 1) == paths
+    assert len(threads) == 1 and threads != {threading.get_ident()}
+
+
+def test_read_pooled_ctrl_c_cancels_queued_steps_and_restores_state(tmp_path, monkeypatch):
+    paths = [tmp_path / f'p{i:02d}.dcm' for i in range(50)]
+    calls = []
+
+    def core(path):
+        calls.append(path)
+        if path == paths[0]:
+            raise KeyboardInterrupt
+        time.sleep(0.5)  # structural margin: the queue is cancelled long before these finish
+
+    monkeypatch.setattr(dicom_io, 'read_header_core', core)
+    before = _quiet_state()
+    with pytest.raises(KeyboardInterrupt):
+        read_pooled(lambda path: dicom_io.read_header_core(path), paths, 4)
+    assert len(calls) <= 2 * 4 and paths[-1] not in calls
+    assert _quiet_state() == before
