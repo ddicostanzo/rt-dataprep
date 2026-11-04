@@ -1205,3 +1205,37 @@ def test_salvaging_a_study_tag_prints_and_logs_nothing_of_its_value(tree, capfd,
     captured = capfd.readouterr()
     texts = [captured.out, captured.err, caplog.text, *(str(w.message) for w in recwarn.list)]
     assert [t for t in texts if 'SECRET' in t] == []
+
+
+def test_a_misc_series_with_a_blank_patient_id_slice_is_skipped_not_written_short(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    mr = put(org / PID / 'misc_files', prefix='a')
+    ds = pydicom.dcmread(mr['paths'][-1])
+    ds.PatientID = ''
+    ds.save_as(mr['paths'][-1])
+    rows = conv.convert(org, out).rows
+    assert images_uids(out) == set()
+    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1
+
+
+def test_a_plan_whose_planning_ct_end_slice_sits_in_misc_with_a_blank_id_is_refused(tree):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    last = Path(plan['ct']['paths'][-1])
+    struct = pydicom.dcmread(plan['folder'] / 'struct.dcm')  # the slice list leaves the end slice out: its loss passes the CT checks
+    sop = str(pydicom.dcmread(last, stop_before_pixels=True).SOPInstanceUID)
+    for frame in struct.ReferencedFrameOfReferenceSequence:
+        for study in frame.RTReferencedStudySequence:
+            for series in study.RTReferencedSeriesSequence:
+                series.ContourImageSequence = [i for i in series.ContourImageSequence if str(i.ReferencedSOPInstanceUID) != sop]
+    struct.save_as(plan['folder'] / 'struct.dcm')
+    ds = pydicom.dcmread(last)
+    ds.PatientID = ''
+    (org / PID / 'misc_files').mkdir()
+    ds.save_as(org / PID / 'misc_files' / last.name)
+    last.unlink()
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows if r.folder == 'plan_1'] == [
+        ('plan_1', 'refused', conv.REASON_CT_SLICE_MISSING)]
+    assert not (out / PID / 'plan_1').exists()

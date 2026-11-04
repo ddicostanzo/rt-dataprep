@@ -21,10 +21,11 @@ REASON_NAME_CLAIMED = 'output folder name already used by an earlier patient fol
 REASON_MIXED_IDS = 'source folder holds more than one PatientID'
 REASON_NO_DICOM = 'source folder holds no readable DICOM file'
 REASON_NO_ID = 'source folder holds no file with a PatientID'
+REASON_SPLIT_SERIES = 'a series holds files with and without a PatientID'
 REASON_OUTSIDE_ROOT = 'output folder resolves outside the output root'
 REASON_IO_ERROR = 'file system error while reading or copying; nothing kept for this patient'
 REASON_OUTSIDE_SRC = 'output root is the source root or inside it'
-REASON_NO_SOP_UID = 'a DICOM file has no SOPInstanceUID'
+REASON_NO_SOP_UID = 'a DICOM file has no or an empty SOPInstanceUID'
 _CT_DATES = ('SeriesDate', 'StudyDate', 'AcquisitionDate', 'ContentDate')  # fx order: first non-blank wins
 
 
@@ -75,15 +76,18 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
             bad.append(path)
     unreadable = len(bad)
     # A file with a blank PatientID is the folder's but never placed in a plan: it is copied to misc_files (#12).
-    blank = [path for path, ds in headers if not str(ds.get('PatientID', '')).strip()]
+    blank = [(path, ds) for path, ds in headers if not str(ds.get('PatientID', '')).strip()]
     headers = [(path, ds) for path, ds in headers if str(ds.get('PatientID', '')).strip()]
     ids = {str(ds.get('PatientID', '')) for _, ds in headers}
     if len(ids) != 1:  # never pick one of several ids: that would file one patient's data under another
         reason = REASON_MIXED_IDS if ids else REASON_NO_ID if blank else REASON_NO_DICOM
         return PatientRow(sanitize_path_component(folder.name), 0, 0, unreadable, OUTCOME_REFUSED, reason)
     name = sanitize_path_component(ids.pop())
-    if any('SOPInstanceUID' not in ds for _, ds in headers):  # type 1, and grouping keys on it: dropping the file could drop a dose
+    if any(not str(ds.get('SOPInstanceUID', '')).strip() for _, ds in headers):  # type 1; grouping and dedup key on it
         return PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NO_SOP_UID)
+    series_of = lambda items: {str(ds.get('SeriesInstanceUID', '')) for _, ds in items} - {''}  # noqa: E731
+    if series_of(blank) & series_of(headers):  # a series split between blank and real ids would be placed short
+        return PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_SPLIT_SERIES)
     if name.casefold() in claimed:  # two folders, one output name: refuse, never merge
         return PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NAME_CLAIMED)
     claimed.add(name.casefold())
@@ -93,7 +97,7 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
     if target.exists():
         return PatientRow(name, 0, 0, unreadable, OUTCOME_SKIPPED, REASON_EXISTS)
     cases, misc = _group(headers, exclude_models)
-    misc += blank + bad
+    misc += [path for path, _ in blank] + bad
     # Build under a hidden name and rename at the end: a run that dies part-way leaves no folder that a later run
     # would skip as already done.
     partial = out_root / f'.{name}.partial'
