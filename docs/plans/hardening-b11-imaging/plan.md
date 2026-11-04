@@ -38,4 +38,5 @@ In `preprocess_series`, after rescale is turned off for a non-CT series, no step
 - [ ] Test: rescale-only steps on a study with MR: its row is refused with REASON_NO_STEPS and no MR file is written; a CT series in the same study is preprocessed.
 
 ## Deferred
-- The double parse of a refused study's series.csv in manifest (T4 note).
+- The double parse of a refused study's series.csv in manifest (T4 note): #119.
+- Review: a specific reason for the rescale-only MR/PT refusal (#117); a test where only the first study read fails (#118).
