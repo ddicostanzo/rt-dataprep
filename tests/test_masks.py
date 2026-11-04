@@ -11,6 +11,8 @@ import SimpleITK as sitk
 import synthetic_dicom as sd
 from DicomRTTool import DicomReaderWriter
 
+from test_convert import run_plan
+
 from rt_dataprep import convert as conv
 from rt_dataprep import masks
 from rt_dataprep.dicom_io import CaseRefused
@@ -45,7 +47,7 @@ def make_plan(tmp_path, rois, channels=None):
 def run(tmp_path, folder):
     """(PlanResult, case folder) of convert_plan; the case folder sits in tmp_path/out, the stand-in for a partial folder."""
     case = tmp_path / 'out' / 'plan_1'
-    return conv.convert_plan(folder, case), case
+    return run_plan(folder, case), case
 
 
 def leftovers(tmp_path):
@@ -55,7 +57,7 @@ def leftovers(tmp_path):
 def refused(tmp_path, folder):
     case = tmp_path / 'out' / 'plan_1'
     with pytest.raises(CaseRefused) as caught:
-        conv.convert_plan(folder, case)
+        run_plan(folder, case)
     assert not case.exists() and leftovers(tmp_path) == []
     return str(caught.value)
 
@@ -128,7 +130,8 @@ def test_a2_2_cube_gives_a_binary_mask_on_the_ct_grid(tmp_path):
     np.testing.assert_array_equal(values, expected(z, y, x))  # and in the right place on every axis
     assert (mask.GetSize(), mask.GetOrigin(), mask.GetSpacing(), mask.GetDirection()) == (
         ct.GetSize(), ct.GetOrigin(), ct.GetSpacing(), ct.GetDirection())
-    assert sorted(p.name for p in case.iterdir()) == ['planning_ct.nii.gz', 'ptv1a.nii.gz', 'series.csv']
+    assert sorted(p.name for p in case.iterdir()) == ['planning_ct.nii.gz', 'ptv1a.nii.gz']  # series.csv: the patient level's
+    assert [r['file'] for r in result.series_rows] == result.files
 
 
 def test_a2_2_through_convert_writes_the_mask_into_the_plan_folder(tmp_path):
@@ -234,7 +237,8 @@ def test_point_empty_and_dose_rois_produce_no_file_and_the_plan_converts(tmp_pat
     folder = make_plan(tmp_path, rois)
     result, case = run(tmp_path, folder)
     assert result.files == ['planning_ct.nii.gz', 'kept.nii.gz']
-    assert sorted(p.name for p in case.iterdir()) == ['kept.nii.gz', 'planning_ct.nii.gz', 'series.csv']
+    assert sorted(p.name for p in case.iterdir()) == ['kept.nii.gz', 'planning_ct.nii.gz']  # series.csv: the patient level's
+    assert [r['file'] for r in result.series_rows] == result.files
 
 
 def test_dicomrttool_gets_exactly_the_kept_names(tmp_path, monkeypatch):
@@ -421,7 +425,8 @@ def test_a2_3_brachy_channel_is_written_as_gzip_text_named_from_the_plan_channel
         with gzip.open(case / name, 'rt') as handle:
             assert handle.readline().split() == [f'{v:.4f}' for v in expected_points[0]]  # '%.4f' text
         np.testing.assert_allclose(np.loadtxt(case / name), expected_points, rtol=0, atol=1e-4)  # in contour order
-    assert sorted(p.name for p in case.iterdir()) == ['Ring1.nii.gz', 'Tandem2.nii.gz', 'planning_ct.nii.gz', 'series.csv']
+    assert sorted(p.name for p in case.iterdir()) == ['Ring1.nii.gz', 'Tandem2.nii.gz', 'planning_ct.nii.gz']  # series.csv: the patient level's
+    assert [r['file'] for r in result.series_rows] == result.files
 
 
 @pytest.mark.parametrize('kind,interpreted', [('channel', 'ORGAN'), ('channel', None), ('channel', 'BRACHY_CHANNEL')])

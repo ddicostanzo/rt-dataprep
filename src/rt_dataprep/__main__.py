@@ -1,7 +1,7 @@
 import argparse
 import logging
 
-from rt_dataprep.convert import REASON_OUTSIDE_ORG, convert
+from rt_dataprep.convert import REASON_INTERNAL, REASON_OUTSIDE_ORG, ConvertAborted, convert
 from rt_dataprep.organize import organize
 
 
@@ -25,6 +25,8 @@ def main(argv=None):
         if str(exc) != REASON_OUTSIDE_ORG:
             raise
         parser.exit(1, f'rt_dataprep: {REASON_OUTSIDE_ORG}\n')
+    except ConvertAborted:  # the report is written; the text is fixed, nothing of the original reaches the terminal
+        parser.exit(1, f'rt_dataprep: {REASON_INTERNAL}\n')
     except OSError:  # the message names a path, which can hold a patient id
         parser.exit(1, 'rt_dataprep: file system error on the source or output root\n')
 

@@ -3,7 +3,8 @@ Turn an organized tree (<patient>/plan_<n>/) into NIfTI on the native CT grid, o
 
 Per plan: RTPLAN -> RTSTRUCT -> the one CT series it references -> planning_ct.nii.gz (float32 HU), and the plan's RTDOSE
 as dose.nii.gz (Gy, linearly resampled onto the CT grid). Masks and applicators (masks.py) are written into the same
-folder; series.csv is written last, one row per file. The organized tree is only read. Log lines and exception messages
+folder. Every other CT/MR/PT series of the patient (series.py) is written, each read once, into the plan folders it is registered
+to, else into <patient>/images/. series.csv is written last, one row per file. The organized tree is only read. Log lines and exception messages
 carry counts and the fixed REASON_ constants only, never a PatientID, folder name, date, path or UID. convert_report.csv in
 the output root is the one place the folder names appear; the series.csv files hold the UIDs, dates and descriptions. Every third-party read runs inside dicom_io's quiet wrapper.
 """
@@ -13,6 +14,8 @@ import logging
 import os
 import re
 import shutil
+import sys
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,7 +24,9 @@ import pydicom
 import SimpleITK as sitk
 
 from rt_dataprep import masks
+from rt_dataprep import series as ser
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_header
+from rt_dataprep.series import DIRECTION_ATOL
 
 log = logging.getLogger(__name__)
 
@@ -32,13 +37,14 @@ SERIES_COLUMNS = ['file', 'kind', 'modality', 'series_description', 'series_inst
                   'rtplan_label', 'rtplan_date', 'fractions_planned']
 OUTCOME_CONVERTED, OUTCOME_SKIPPED, OUTCOME_REFUSED = 'converted', 'skipped', 'refused'
 ORIGIN_ATOL_MM = 1e-3  # slice-spacing uniformity and duplicate positions (rnt gauge_rr.py)
-DIRECTION_ATOL = 1e-6  # image orientation equality (rnt gauge_rr.py)
 OFFSET_TOL_MM = 1e-3  # uniformity of the RTDOSE frame offsets (rnt rtdose.py)
 SUMMATIONS = ('PLAN', 'FRACTION', 'BEAM')
+PLAN_COLUMNS = ('rtplan_uid', 'rtplan_label', 'rtplan_date', 'fractions_planned')
 
 REASON_OUTSIDE_ORG = 'output root is the organized root or inside it'
 REASON_EXISTS = 'output folder already exists'
 REASON_NO_PLANS = 'patient folder holds no plan folder'
+REASON_NO_IMAGES = 'every other series went into a plan folder or was skipped; images/ was not written'
 REASON_IO_ERROR = 'file system error while reading or writing; nothing kept for this patient'
 REASON_WRITE = 'an output file could not be written'
 REASON_FILE_UNREADABLE = 'a DICOM file in the plan folder is unreadable'
@@ -56,6 +62,13 @@ REASON_DOSE_TYPE = 'DoseType is not PHYSICAL'
 REASON_DOSE_GRID = 'the RTDOSE frame offsets are not uniform or differ from NumberOfFrames'
 REASON_DOSE_FRAME = 'the RTDOSE FrameOfReferenceUID differs from the planning CT'
 REASON_DOSE_UNREADABLE = 'an RTDOSE is unreadable or lacks a required tag'
+REASON_INTERNAL = 'an unexpected error stopped the conversion; the report lists what was finished'
+IMAGES_NAME = 'images'
+PACKAGE_DIR = Path(__file__).parent
+
+
+class ConvertAborted(Exception):
+    """A patient hit an unexpected error: the report is written, the run stops. str() is exactly REASON_INTERNAL."""
 
 
 @dataclass
@@ -77,42 +90,71 @@ class ConvertReport:
 class PlanResult:
     files: list  # the data files written into the case folder, in write order; series.csv, written last, is not in it
     ct_series_uid: str
+    series_rows: list  # dicts of SERIES_COLUMNS for the plan's series.csv, which the patient level writes last
 
 
 def convert(org_root, out_root, *, exclude_models=('Acuity',)):
     """
     Convert every <patient>/plan_<n>/ under org_root into out_root/<patient>/plan_<n>/ and write convert_report.csv.
 
-    exclude_models is for the other-series placement of the next PR; the per-plan path does not use it.
+    exclude_models: a study that holds a file whose ManufacturerModelName contains one of these is left out of the other series.
     """
     org_root, out_root = Path(org_root), Path(out_root)
     if out_root.resolve().is_relative_to(org_root.resolve()):  # before any mkdir: nothing is written into the input
         raise ValueError(REASON_OUTSIDE_ORG)
     out_root.mkdir(parents=True, exist_ok=True)
-    rows = []
+    rows, aborted = [], False
     for folder in sorted(p for p in org_root.iterdir() if p.is_dir() and not p.name.startswith('.')):
         try:
-            rows += _convert_patient(folder, out_root)
+            rows += _convert_patient(folder, out_root, exclude_models)
         except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
             rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_IO_ERROR))
             log.warning('convert: %s', REASON_IO_ERROR)
+        except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
+            module, line = _crash_site(sys.exc_info()[2])
+            rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_INTERNAL))
+            log.error('convert: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
+            aborted = True
+            break
     with open(out_root / REPORT_NAME, 'w', newline='') as handle:
         writer = csv.writer(handle)
         writer.writerow(['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'])
         writer.writerows([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows)
-    log.info('convert: %d report rows, %d plans converted, %d refused, %d skipped', len(rows),
-             sum(r.outcome == OUTCOME_CONVERTED for r in rows), sum(r.outcome == OUTCOME_REFUSED for r in rows),
-             sum(r.outcome == OUTCOME_SKIPPED for r in rows))
+    plan_rows = [r for r in rows if r.folder not in ('', IMAGES_NAME)]
+    patient_rows = [r for r in rows if r.folder == '']
+    log.info('convert: %d plan rows (%d converted, %d refused, %d skipped), %d images rows, %d patient rows (%d refused, %d skipped)',
+             len(plan_rows), *(sum(r.outcome == o for r in plan_rows) for o in (OUTCOME_CONVERTED, OUTCOME_REFUSED, OUTCOME_SKIPPED)),
+             sum(r.folder == IMAGES_NAME for r in rows), len(patient_rows),
+             *(sum(r.outcome == o for r in patient_rows) for o in (OUTCOME_REFUSED, OUTCOME_SKIPPED)))
+    if aborted:  # raised here, after the except blocks: nothing of the original is chained
+        raise ConvertAborted(REASON_INTERNAL)
     return ConvertReport(rows)
 
 
-def _convert_patient(folder, out_root):
+def _crash_site(tb):
+    """(module name, line) of the innermost rt_dataprep frame of `tb`; the file name only selects it and is never formatted."""
+    site = ('unknown', 0)
+    for frame, lineno in traceback.walk_tb(tb):
+        if Path(frame.f_code.co_filename).parent == PACKAGE_DIR:
+            site = (frame.f_globals['__name__'], lineno)
+    return site
+
+
+def _convert_patient(folder, out_root, exclude_models):
     target = out_root / folder.name
     if target.exists():
         return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_EXISTS)]
     plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(r'plan_\d+', p.name)),
                    key=lambda p: int(p.name[len('plan_'):]))
-    if not plans:
+    # Headers are read once per patient. An unreadable file in misc_files/ is not a series and is ignored: only its count
+    # reaches the log.
+    plan_headers = [read_folder_headers(plan_dir) for plan_dir in plans]
+    misc_dir = folder / 'misc_files'
+    misc_headers, misc_unreadable = read_folder_headers(misc_dir) if misc_dir.is_dir() else ([], False)
+    if misc_unreadable:
+        log.info('convert: %d unreadable files in misc_files', sum(p.is_file() for p in misc_dir.iterdir()) - len(misc_headers))
+    headers = [item for found, _ in plan_headers for item in found] + misc_headers  # folder order: plan_<n> by n, then misc_files
+    if not plans and not ser.candidates(headers, exclude_models)[0]:
         return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_NO_PLANS)]
     # Built under a hidden name and renamed at the end: a run that dies part-way leaves no folder that a later run would
     # skip as done. The flag, not an except block, decides the cleanup, so any failure (and Ctrl-C) removes the partial.
@@ -121,7 +163,18 @@ def _convert_patient(folder, out_root):
     rows, done = [], False
     try:
         partial.mkdir()
-        rows = [_convert_one(plan_dir, partial) for plan_dir in plans]
+        outcomes = [_convert_one(plan_dir, found, unreadable, partial)
+                    for plan_dir, (found, unreadable) in zip(plans, plan_headers, strict=True)]
+        rows = [row for row, _ in outcomes]
+        # After every plan has its outcome: which CTs are planning CTs, and which plans a series is registered to, depend on it.
+        # A plan refused for a lost or unreadable file may hold a CT missing an end slice, which still passes the volume check.
+        short = {plan_dir for plan_dir, (row, _) in zip(plans, outcomes, strict=True)
+                 if row.reason in (REASON_FILE_UNREADABLE, REASON_CT_SLICE_MISSING)}
+        images_row = _place_series(folder.name, headers, exclude_models, outcomes, partial, short)
+        rows += [images_row] if images_row else []
+        for row, result in outcomes:  # series.csv of each converted plan folder goes in last
+            if result is not None:
+                write_series_csv(result.series_rows, partial / row.folder / SERIES_NAME)
         partial.rename(target)  # an empty partial (every plan refused) is renamed too: the patient has its outcome
         done = True
     finally:
@@ -130,34 +183,90 @@ def _convert_patient(folder, out_root):
     return rows
 
 
-def _convert_one(plan_dir, partial):
+def _place_series(patient, headers, exclude_models, outcomes, partial, short=frozenset()):
+    """
+    Write every other series of the patient into the converted plan folders it is registered to, else into images/, each
+    series read once. Adds the series files and rows to the plan rows and results; writes images/series.csv. Returns the
+    images ConvertRow, None when the patient has no candidate series. Nothing here catches: a bad header is a None from
+    series.py, anything else is the patient's REASON_INTERNAL. A series with a file in a folder of `short` (refused plan
+    folders that may have lost a slice) is skipped and counted.
+    """
+    found, regs, by_sop = ser.candidates(headers, exclude_models)
+    converted = [(row, result, result.series_rows[0]) for row, result in outcomes if result is not None]  # row 0 is the CT row
+    planning = {result.ct_series_uid for _, result, _ in converted}
+    found = [slices for uid, slices in found if uid not in planning]
+    if not found:
+        return None
+    checked = [None if any(path.parent in short for path, _ in slices) else ser.check_volume(slices) for slices in found]
+    skipped = checked.count(None)
+    order = lambda ordered: tuple(_tag(ordered[0][1], tag) for tag in ('SeriesDate', 'SeriesTime', 'SeriesInstanceUID'))  # noqa: E731
+    counts, written = {}, {}  # (folder, modality) -> last k; folder -> [(modality, k, series.csv row)]
+    for ordered in sorted((o for o in checked if o is not None), key=order):
+        first = ordered[0][1]
+        modality, frame = str(first.Modality), str(first.FrameOfReferenceUID)
+        targets = []
+        for row, _, ct_row in converted:
+            registered, text = ser.registration(ct_row['frame_of_reference_uid'], frame, regs, by_sop)
+            if registered:
+                targets.append((row.folder, text, {c: ct_row[c] for c in PLAN_COLUMNS}))
+        image = ser.read_series(ordered)
+        if image is None:
+            skipped += 1
+            continue
+        for folder_name, text, plan_columns in targets or [(IMAGES_NAME, '', dict.fromkeys(PLAN_COLUMNS, ''))]:
+            k = counts[folder_name, modality] = counts.get((folder_name, modality), 0) + 1
+            name = f'series_{modality}_{k}.nii.gz'
+            (partial / folder_name).mkdir(exist_ok=True)
+            write_atomic(image, partial / folder_name / name)
+            written.setdefault(folder_name, []).append((modality, k, dict(
+                file=name, kind='series', modality=modality, roi_name='', dose_summation_type='', reg_matrix=text,
+                frame_of_reference_uid=frame, **plan_columns,
+                **{column: _tag(first, tag) for column, tag in (
+                    ('series_description', 'SeriesDescription'), ('series_instance_uid', 'SeriesInstanceUID'),
+                    ('study_instance_uid', 'StudyInstanceUID'), ('series_date', 'SeriesDate'))})))
+    for folder_name in written:  # CT, MR, PT, then k
+        written[folder_name].sort(key=lambda item: (ser.IMAGE_MODALITIES.index(item[0]), item[1]))
+    for row, result, _ in converted:
+        rows = [item[2] for item in written.get(row.folder, [])]
+        result.series_rows.extend(rows)
+        row.files = [*result.files, *(r['file'] for r in rows), SERIES_NAME]
+    if IMAGES_NAME not in written:
+        return ConvertRow(patient, IMAGES_NAME, OUTCOME_SKIPPED, REASON_NO_IMAGES, skipped_series=skipped)
+    rows = [item[2] for item in written[IMAGES_NAME]]
+    write_series_csv(rows, partial / IMAGES_NAME / SERIES_NAME)
+    return ConvertRow(patient, IMAGES_NAME, OUTCOME_CONVERTED, files=[*(r['file'] for r in rows), SERIES_NAME], skipped_series=skipped)
+
+
+def _convert_one(plan_dir, headers, unreadable, partial):
+    """(ConvertRow, PlanResult) of a converted plan, (ConvertRow, None) of a refused one."""
     reason = None
     try:
-        result = convert_plan(plan_dir, partial / plan_dir.name)
+        result = convert_plan(headers, unreadable, partial / plan_dir.name)
     except CaseRefused as exc:
         reason = str(exc)
     if reason is not None:
         log.warning('convert: plan refused: %s', reason)
-        return ConvertRow(plan_dir.parent.name, plan_dir.name, OUTCOME_REFUSED, reason)
-    return ConvertRow(plan_dir.parent.name, plan_dir.name, OUTCOME_CONVERTED, files=[*result.files, SERIES_NAME])
+        return ConvertRow(plan_dir.parent.name, plan_dir.name, OUTCOME_REFUSED, reason), None
+    return ConvertRow(plan_dir.parent.name, plan_dir.name, OUTCOME_CONVERTED, files=[*result.files, SERIES_NAME]), result
 
 
-def convert_plan(plan_dir, case_dir):
+def convert_plan(headers, unreadable, case_dir):
     """
     Convert one plan folder into `case_dir`, which must not exist; returns a PlanResult.
 
-    A refusal raises CaseRefused(fixed reason) and leaves no `case_dir` behind. A header that lacks a tag the path reads
-    refuses with REASON_MISSING_TAG. An OSError on the output side propagates: it is the patient's, not the plan's.
+    `headers` is the plan folder's own [(path, Dataset)] list (not deduplicated by SOP) and `unreadable` says whether any
+    file in it could not be read (see read_folder_headers); this function reads no headers and writes no series.csv: the
+    rows are in the PlanResult. An unreadable file refuses the plan (it may be a CT slice). A refusal raises CaseRefused(fixed reason) and leaves no `case_dir` behind. A header that lacks a tag the path reads
+    refuses with REASON_MISSING_TAG (_header_call). Any other error, an OSError on the output side included, propagates:
+    it is the patient's, not the plan's.
     """
-    plan_dir, case_dir = Path(plan_dir), Path(case_dir)
+    case_dir = Path(case_dir)
     existed = case_dir.exists()
     reason = None
     try:
-        result = _convert_plan(plan_dir, case_dir)
+        result = _convert_plan(headers, unreadable, case_dir)
     except CaseRefused as exc:
         reason = str(exc)
-    except (AttributeError, KeyError, IndexError, TypeError, ValueError):  # a missing tag or an odd value; not quoted
-        reason = REASON_MISSING_TAG
     if reason is not None:  # raised here, after the except blocks: nothing of the original is chained
         if not existed:
             shutil.rmtree(case_dir, ignore_errors=True)
@@ -165,17 +274,33 @@ def convert_plan(plan_dir, case_dir):
     return result
 
 
-def _convert_plan(plan_dir, case_dir):
-    headers = _read_headers(plan_dir)
-    plan, struct, ct_slices, series_uid = _assemble(headers)
-    _check_volume(ct_slices)
-    _check_contour_images(struct, series_uid, ct_slices)
+def _header_call(fn, *args, **kwargs):
+    """fn(*args, **kwargs) for a header-only step: a missing tag or odd value (#33) is CaseRefused(REASON_MISSING_TAG)."""
+    failed, result = False, None
+    try:
+        result = fn(*args, **kwargs)
+    except (AttributeError, KeyError, IndexError, TypeError, ValueError):  # not quoted
+        failed = True
+    if failed:  # raised here, after the except block: nothing of the original is chained
+        raise CaseRefused(REASON_MISSING_TAG)
+    return result
+
+
+def _convert_plan(headers, unreadable, case_dir):
+    if unreadable:
+        raise CaseRefused(REASON_FILE_UNREADABLE)
+    plan, struct, ct_slices, series_uid = _header_call(_assemble, headers)
+    _header_call(_check_volume, ct_slices)
+    _header_call(_check_contour_images, struct, series_uid, ct_slices)
+    ct_frame_uid, struct_series_uid = _header_call(lambda: (str(ct_slices[0][1].FrameOfReferenceUID), str(struct.SeriesInstanceUID)))
     ct = _read_ct([p for p, _ in ct_slices], ct_slices[0][1])
-    dose, dose_heads = _read_dose_sum(headers, plan, str(ct_slices[0][1].FrameOfReferenceUID), ct)
-    rois = masks.classify(struct, plan, str(ct_slices[0][1].FrameOfReferenceUID), taken=(CT_NAME, DOSE_NAME))
+    used = _header_call(_dose_candidates, headers, plan)
+    offsets = [_header_call(_check_dose_header, ds, ct_frame_uid) for _, ds in used]  # every used dose is checked before any is read
+    dose, dose_heads = _read_dose_sum(used, offsets, ct)
+    rois = _header_call(masks.classify, struct, plan, ct_frame_uid, taken=(CT_NAME, DOSE_NAME))
     struct_path = next(p for p, ds in headers if ds is struct)
     # The scratch folder of DicomRTTool goes in the patient's partial folder: a stale partial's cleanup removes it too.
-    mask_images = masks.build_masks(rois.kept, [p for p, _ in ct_slices], struct_path, str(struct.SeriesInstanceUID),
+    mask_images = masks.build_masks(rois.kept, [p for p, _ in ct_slices], struct_path, struct_series_uid,
                                     series_uid, ct, case_dir.parent, ORIGIN_ATOL_MM, DIRECTION_ATOL)
     # Everything that can refuse has run: only now does the plan folder appear.
     case_dir.mkdir(parents=True)
@@ -190,21 +315,19 @@ def _convert_plan(plan_dir, case_dir):
     for name, points, _ in rois.applicators:
         masks.write_applicator(points, case_dir / name)
         files.append(name)
-    write_series_csv(_series_rows(plan, struct, ct_slices[0][1], dose_heads, rois, files), case_dir / SERIES_NAME)
-    return PlanResult(files, series_uid)
+    series_rows = _header_call(_series_rows, plan, struct, ct_slices[0][1], dose_heads, rois, files)
+    return PlanResult(files, series_uid, series_rows)
 
 
-def _read_headers(plan_dir):
-    """[(path, Dataset)] of every file in the plan folder; any unreadable file refuses the plan (it may be a CT slice)."""
+def read_folder_headers(folder):
+    """([(path, Dataset)] of every readable file in `folder`, sorted by path; whether any file was unreadable)."""
     headers, unreadable = [], False
-    for path in sorted(p for p in plan_dir.iterdir() if p.is_file()):
+    for path in sorted(p for p in Path(folder).iterdir() if p.is_file()):
         try:
             headers.append((path, read_header(path)))
         except OSError:
             unreadable = True
-    if unreadable:
-        raise CaseRefused(REASON_FILE_UNREADABLE)
-    return headers
+    return headers, unreadable
 
 
 def _of(headers, modality):
@@ -357,10 +480,8 @@ def _read_dose(path, offsets, ct):
     return quiet_call(read, REASON_DOSE_UNREADABLE)
 
 
-def _read_dose_sum(headers, plan, ct_frame_uid, ct):
+def _read_dose_sum(used, offsets, ct):
     """(the plan dose on the CT grid in Gy as float32, the headers of the RTDOSEs summed); (None, []) without an RTDOSE."""
-    used = _dose_candidates(headers, plan)
-    offsets = [_check_dose_header(ds, ct_frame_uid) for _, ds in used]  # every used dose is checked before any is read
     images = [_read_dose(path, off, ct) for (path, _), off in zip(used, offsets, strict=True)]
     if not images:
         return None, []
