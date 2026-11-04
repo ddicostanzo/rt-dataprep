@@ -509,6 +509,41 @@ def test_an_unreadable_nifti_refuses_for_every_nifti_kind(tmp_path):
         refuse(tmp_path / str(i), pre.REASON_FILE_UNREADABLE, lambda folder, rows, name=name: (folder / name).write_bytes(b'not an image'))
 
 
+
+def rewrite_csv(folder, change):
+    path = folder / 'series.csv'
+    path.write_text(change(path.read_text()))
+
+
+SERIES_CSV_BREAKS = {
+    'missing column': lambda folder, rows: rewrite_csv(folder, lambda text: text.replace('file,kind,', 'file,', 1)),
+    'extra column': lambda folder, rows: rewrite_csv(folder, lambda text: text.replace('\n', ',extra\n', 1)),
+    'long row': lambda folder, rows: rewrite_csv(folder, lambda text: text.rstrip('\n') + ',extra\n'),
+    'short row': lambda folder, rows: rewrite_csv(folder, lambda text: text + 'ptv.nii.gz,mask\n'),
+    'not utf-8': lambda folder, rows: (folder / 'series.csv').write_bytes((folder / 'series.csv').read_bytes() + b'\xff\xfe,mask\n'),
+    'one file twice': lambda folder, rows: save_rows(folder, [*rows, rows[-1]]),
+}
+
+
+@pytest.mark.parametrize('what', list(SERIES_CSV_BREAKS))
+def test_a_malformed_series_csv_refuses_the_plan_only(tmp_path, what):
+    refuse(tmp_path, pre.REASON_SERIES_CSV, SERIES_CSV_BREAKS[what])
+
+
+def test_a_ct_shorter_than_one_output_voxel_refuses_the_plan_only(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted, n=12, spacing=0.05)  # 12 x 0.05 mm = 0.6 mm < 1 mm on every axis
+    write_plan(converted, plan='plan_2')
+    report = pre.preprocess(converted, out, SMALL)
+    assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_TOO_SMALL)
+    assert plan_row(report, folder='plan_2').outcome == 'preprocessed'
+
+
+def test_a_missing_converted_root_writes_no_output_root(tmp_path):
+    with pytest.raises(OSError):
+        pre.preprocess(tmp_path / 'missing', tmp_path / 'out', SMALL)
+    assert not (tmp_path / 'out').exists()
+
 GRID_BREAKS = {
     'size': dict(),
     'origin': dict(origin=(-5.49, -5.5, -5.5)),
