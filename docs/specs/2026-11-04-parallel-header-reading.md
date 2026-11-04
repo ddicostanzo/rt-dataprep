@@ -42,7 +42,8 @@ real export sizes show reading is the bottleneck; nothing has measured that yet.
   - **convert:** "reading" is the `read_folder_headers` calls. "converting" is total minus reading, with salvage reads
     included. "files" counts the headers read (readable files), so `read_folder_headers` keeps its return shape.
   - Each patient function returns its seconds and counts next to its row (no module globals). "total" is the
-    `time.monotonic()` span of the patient loop.
+    `time.monotonic()` span from before the patient loop to just before the timing line, so it covers the report write and
+    the summary line as well as the patient loop.
 
 ## Requirements
 

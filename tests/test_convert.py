@@ -19,6 +19,7 @@ import SimpleITK as sitk
 import synthetic_dicom as sd
 
 from rt_dataprep import convert as conv
+from rt_dataprep import dicom_io
 from rt_dataprep import masks
 from rt_dataprep.organize import organize
 from rt_dataprep.dicom_io import CaseRefused
@@ -1250,3 +1251,39 @@ def test_no_timing_line_on_ctrl_c(tree, caplog, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         conv.convert(org, out)
     assert timing_records(caplog) == []
+
+
+# ---------------------------------------------------------------- hardening B8 (#98): workers reach every read, the dicom_io seam
+
+def test_every_pooled_header_read_gets_the_workers_value(tree, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    make_plan(org / PID / 'plan_2')
+    (org / PID / 'misc_files').mkdir()
+    sd.write_ct_series(org / PID / 'misc_files', np.zeros(SHAPE), patient_id=PID)
+    seen, real = [], conv.read_pooled
+
+    def record(step, paths, workers):
+        seen.append(workers)
+        return real(step, paths, workers)
+
+    monkeypatch.setattr(conv, 'read_pooled', record)
+    conv.convert(org, out, workers=3)
+    assert seen == [3, 3, 3]  # plan_1, plan_2 and misc_files
+
+
+@pytest.mark.parametrize('workers', [1, 4])
+def test_the_header_read_goes_through_the_dicom_io_module_attribute(tree, monkeypatch, workers):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    real = getattr(dicom_io, 'read_header_core')  # noqa: B009
+
+    def fail_plan_file(path):
+        if Path(path).name == 'plan.dcm':
+            raise OSError('SYNTHETIC_unreadable')
+        return real(path)
+
+    monkeypatch.setattr(dicom_io, 'read_header_core', fail_plan_file)
+    rows = conv.convert(org, out, workers=workers).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows if r.folder == 'plan_1'] == [
+        ('plan_1', conv.OUTCOME_REFUSED, conv.REASON_FILE_UNREADABLE)]
