@@ -441,7 +441,10 @@ def _check_volume(ct_slices):
     heads = [ds for _, ds in ct_slices]
     iops = np.asarray([[float(v) for v in ds.ImageOrientationPatient] for ds in heads])
     pixel_spacing = np.asarray([[float(v) for v in ds.PixelSpacing] for ds in heads])
+    rescale = np.asarray([[float(ds.get('RescaleSlope', 1)), float(ds.get('RescaleIntercept', 0))] for ds in heads])
+    # GDCM reads an inf spacing as 1.0 and a non-finite rescale as 1 or 0; allclose takes inf == inf as close.
     ok = (len(heads) >= 2
+          and np.isfinite(pixel_spacing).all() and np.isfinite(rescale).all()
           and np.allclose(iops, iops[0], rtol=0, atol=DIRECTION_ATOL)
           and np.allclose(pixel_spacing, pixel_spacing[0], rtol=0, atol=ORIGIN_ATOL_MM)
           and len({(int(ds.Rows), int(ds.Columns)) for ds in heads}) == 1

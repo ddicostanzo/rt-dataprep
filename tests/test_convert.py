@@ -262,6 +262,24 @@ def test_sheared_ct_is_refused(tree):
     assert row_of(conv.convert(org, out).rows).reason == conv.REASON_CT_NOT_VOLUME
 
 
+NON_FINITE_CT = [(tag, x, scope) for tag in ('PixelSpacing', 'ImagePositionPatient', 'RescaleSlope', 'RescaleIntercept')
+                 for x in (float('nan'), float('inf')) for scope in ('all', 'one')]
+
+
+@pytest.mark.parametrize('tag, x, scope', NON_FINITE_CT, ids=[f'{t}-{x}-{s}' for t, x, s in NON_FINITE_CT])
+def test_ct_with_a_non_finite_header_value_is_refused(tree, tag, x, scope):
+    """GDCM reads an inf PixelSpacing as 1.0 and a non-finite rescale as 1 or 0: the CT would convert with a wrong grid or HU."""
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    paths = plan['ct']['paths'] if scope == 'all' else plan['ct']['paths'][1:2]
+    for path in paths:
+        edit(path, lambda ds: setattr(ds, tag, [x, *ds.get(tag)[1:]] if tag in ('PixelSpacing', 'ImagePositionPatient') else x))
+    assert not np.isfinite(np.ravel(np.asarray(pydicom.dcmread(paths[0], stop_before_pixels=True).get(tag), dtype=float))).all()
+    row = row_of(conv.convert(org, out).rows)
+    assert (row.outcome, row.reason) == (conv.OUTCOME_REFUSED, conv.REASON_CT_NOT_VOLUME)
+    assert not (out / PID / 'plan_1').exists()
+
+
 def test_rtstruct_without_contour_images_refuses_the_plan(tree):
     _, rows, _ = one_plan(tree, contour_images=False)
     assert row_of(rows).reason == conv.REASON_NO_CONTOUR_IMAGES
