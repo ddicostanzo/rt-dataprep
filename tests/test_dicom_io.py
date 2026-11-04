@@ -11,6 +11,7 @@ import pytest
 import SimpleITK as sitk
 
 import synthetic_dicom as sd
+from rt_dataprep import dicom_io
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_header, sanitize_path_component
 
 
@@ -231,3 +232,12 @@ def test_read_header_error_has_no_context(tmp_path):
     with pytest.raises(OSError) as err:
         read_header(path)
     assert _chain(err.value) == (None, None)
+
+
+def test_a_failed_latest_report_copy_leaves_no_hidden_temp(tmp_path, monkeypatch):
+    def fail(*args):
+        raise OSError('SYNTHETIC_PATH')
+    monkeypatch.setattr(dicom_io.os, 'replace', fail)
+    with pytest.raises(OSError):
+        dicom_io.write_report(tmp_path, 'r.csv', ['a'], [['1']])
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith('.')] == []
