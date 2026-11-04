@@ -24,3 +24,15 @@ Append under `## <task-id>`; append only.
 - Gotcha: `warnings.filters` inside a `catch_warnings` differs from outside it; the test compares the filters inside the
   recording block, and the mode and logger flag after it.
 - `write_rtdose(..., invalid_values=True)` gives the invalid-value file (a PN over 64 chars warns on value access).
+
+## review-group-1
+
+No blocking findings; all task-01 criteria met. WARNING (deferred, already in spec Deferred): a second Ctrl-C during
+the shutdown join restores the quiet state while workers still read. NOTEs for the next tasks:
+- read_pooled raises the first step failure in input order, so the organize and convert steps must catch the core's
+  OSError per path themselves (one bad file must never end the folder read).
+- future.result() re-raises exactly what the step raised: any step exception that can escape must stay path-free in
+  how callers report it (organize/convert report fixed REASON_ text only, never str(exc)).
+- Criterion "workers resolve read_header_core as a module attribute" is met by how steps are built: tasks 02/03 steps
+  must call dicom_io.read_header_core through the module.
+- read_pooled does not validate workers; the CLI (task-04) enforces >= 1.
