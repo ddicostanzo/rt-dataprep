@@ -526,6 +526,26 @@ def test_ctrl_c_still_writes_the_report_of_what_was_done(tree, monkeypatch, work
     assert not [p for p in out.iterdir() if p.name.endswith('.partial')]
 
 
+def test_ctrl_c_during_the_copy_leaves_no_partial_folder(tree, monkeypatch):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    planning_study(src / 'SYNTHETIC_SECOND' / 'a', pid='SYNTHETIC_SECOND')
+    real, copied = org.shutil.copy2, []
+
+    def interrupt(source, target):
+        if 'SYNTHETIC_SECOND' in str(source):
+            copied.append(source)
+            if len(copied) == 2:  # part-way through the second patient's copy
+                raise KeyboardInterrupt
+        return real(source, target)
+
+    monkeypatch.setattr(org.shutil, 'copy2', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        organize(src, out)
+    assert not [p for p in out.iterdir() if p.name.endswith('.partial')]
+    assert (out / PID).is_dir() and not (out / 'SYNTHETIC_SECOND').exists()
+
+
 def test_workers_1_and_4_give_identical_rows_and_copied_trees(tree, tmp_path):
     src, out = tree
     planning_study(src / PID / 'a', slices=6)

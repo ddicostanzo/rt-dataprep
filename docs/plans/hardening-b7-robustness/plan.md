@@ -34,6 +34,10 @@ When rebuilding a non-`SystemExit` `BaseException` bare, only call the construct
 - [ ] `--workers` of `1_0`, `+3`, `٣` (Arabic-Indic 3), ` 3`, `65`, `1000000` are usage errors naming `--workers`; `64` is accepted.
 - [ ] Existing `--workers` CLI tests pass (update only the parametrized bad values list and any asserted error text).
 
+### T5 — organize: Ctrl-C during the copy leaves no `.partial` (found by B8)
+`_organize_patient`'s copy block removes the hidden partial folder on any `BaseException`, not only `OSError`.
+- [ ] `test_ctrl_c_during_the_copy_leaves_no_partial_folder`: `shutil.copy2` raising `KeyboardInterrupt` part-way through the second patient leaves no `.partial` and no second patient folder.
+
 ## Done
 Full suite and ruff green. Report: per task, the red-before/green-after result, files changed, and test count.
 
