@@ -1,0 +1,220 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "#33 narrow the tag catch; REASON_INTERNAL crash path with report flush",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "src/rt_dataprep/__main__.py",
+        "tests/test_series.py",
+        "tests/test_cli.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_series.py": "create",
+        "tests/test_cli.py": "modify"
+      },
+      "test_approach": "Red first in the new tests/test_series.py: a two-patient synthetic tree where masks.build_masks itself (outside quiet_call, so the error is not turned into a refusal) is monkeypatched for the second patient to raise TypeError carrying a UID-like synthetic string; a plan whose RTPLAN lacks a required tag. CLI test: a subprocess runs 'python -c' that monkeypatches rt_dataprep.masks.build_masks to raise TypeError, sets sys.argv, then calls runpy.run_module('rt_dataprep', run_name='__main__'); the entry module is never imported by its dotted name. Then run the full suite (157 at e789e5a). The UID-like string in the TypeError message keeps digit runs short (e.g. 1.2.3.4.5), reusing the A2.10 test pattern in tests/test_convert.py.",
+      "criteria": [
+        "B1 (#33): a required tag missing from a plan's header still refuses that plan with REASON_MISSING_TAG. One small helper runs a call and, after its except block exits, converts AttributeError, KeyError, IndexError, TypeError or ValueError into CaseRefused(REASON_MISSING_TAG). It wraps each header-only call individually: _assemble, _check_volume, _check_contour_images, the dose candidate selection and each _check_dose_header call (split _read_dose_sum so header checks and pixel reads are separate), masks.classify, the series.csv row building, and one wrapped call that reads the bare FrameOfReferenceUID / SeriesInstanceUID values now read inline. _read_ct, _read_dose, build_masks and every write are not wrapped",
+        "REASON_INTERNAL is a fixed constant in convert.py; convert() raises a new ConvertAborted(Exception) (not a subclass of ValueError, OSError or CaseRefused) whose str is exactly REASON_INTERNAL",
+        "B1: an exception raised outside the tag catch on the second of two patients leaves the first patient's rows and a REASON_INTERNAL patient row for the second in convert_report.csv; the second patient's plan rows are dropped and it has no output or partial folder",
+        "B1: convert() then raises an error with fixed text, raised after the except block exits (a flag), whose str, __cause__ and __context__ hold no part of the original message; capfd captures none of it",
+        "B1: a log record names the exception class (TypeError) and the innermost rt_dataprep frame as module name and line number, with no file path and no message or arguments",
+        "KeyboardInterrupt and SystemExit are not caught by the internal-error path: no REASON_INTERNAL row, and PR 1's flag-based partial cleanup still runs",
+        "The CLI catches ConvertAborted and exits 1 with stderr exactly 'rt_dataprep: ' + REASON_INTERNAL + newline and empty stdout, like its OSError branch",
+        "The full suite passes; any existing test that now raises is a PR 1 bug fixed in this task, and the catch is never widened again to make it pass",
+        "The traceback is walked via sys.exc_info()[2] and traceback.walk_tb; the module name comes from the frame's f_globals['__name__'] and the line from the walk's lineno; the frame filename only selects the innermost rt_dataprep frame and is never formatted; tests read the chain with getattr(err, '__cause__') and getattr(err, '__context__')",
+        "Guardrail (commit gate): no added line puts mrn/patient_id next to a run of 6-10 digits and no added line has a dotted name whose last part starts with an underscore; at most 5 staged files per commit",
+        "At patient level the except for unexpected exceptions comes after except OSError, so an output-side OSError still gives REASON_IO_ERROR, not REASON_INTERNAL"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "Synthetic fixtures: REG RegistrationSequence, non-axial/jittered/PT series",
+      "depends_on": [],
+      "files": [
+        "tests/synthetic_dicom.py",
+        "tests/test_synthetic_dicom.py"
+      ],
+      "file_ops": {
+        "tests/synthetic_dicom.py": "modify",
+        "tests/test_synthetic_dicom.py": "modify"
+      },
+      "test_approach": "Round-trip tests in tests/test_synthetic_dicom.py: read each new fixture back with pydicom and assert the written tags; the existing fixture tests and every existing caller stay green unchanged.",
+      "criteria": [
+        "write_reg gains optional keyword arguments only (existing callers, including tests/test_organize.py, are untouched): a RegistrationSequence of items, each with an optional FrameOfReferenceUID, an optional ReferencedImageSequence of SOP UIDs, and a MatrixRegistrationSequence holding a MatrixSequence of one or more (FrameOfReferenceTransformationMatrixType, 16 values) entries; plus the REG's own FrameOfReferenceUID",
+        "The fixture builds matrices from the standard's wording (item frame -> REG frame, M11..M14 first), not from the spec's reg_matrix formula",
+        "write_ct_series gains optional keyword arguments only: image orientation (e.g. sagittal), explicit per-slice positions (jitter, a missing slice, duplicates), modality PT (PET Image Storage) and per-slice RescaleSlope/RescaleIntercept; defaults reproduce today's output byte-for-byte in tag values",
+        "write_ct_series also gains number_of_frames=None (sets NumberOfFrames when given) and pixel_spacing=True (False omits PixelSpacing) as optional keywords",
+        "Synthetic IDs in new code contain no digits or underscores; tests/test_organize.py and tests/test_dicom_io.py are not edited",
+        "Guardrail (commit gate): no added line puts mrn/patient_id next to a run of 6-10 digits and no added line has a dotted name whose last part starts with an underscore"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "series.py: generic volume check and geometry-owning series read",
+      "depends_on": [
+        "task-01",
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/series.py",
+        "tests/test_series.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/series.py": "create",
+        "tests/test_series.py": "modify"
+      },
+      "test_approach": "Unit tests on series.py with fixture series written to tmp_path (red first): sagittal MR, two-echo MR, multi-frame file, missing middle slice, no PixelSpacing, off-orthonormal oblique MR, 0.005 mm jitter, PT with per-slice slopes.",
+      "criteria": [
+        "The volume check allows any orientation and requires: single-frame files (NumberOfFrames absent or 1); one ImageOrientationPatient within DIRECTION_ATOL with unit-length, orthogonal row and column cosines within ORTHO_ATOL (row and column are normalized before the direction is built); one image size, one PixelSpacing within SERIES_ATOL_MM, one FrameOfReferenceUID; at least two slices; files sorted ascending by position . (row x column cosine); step = (last - first)/(n - 1) along the normal with step > SERIES_ATOL_MM; every position within SERIES_ATOL_MM (= 0.01 mm) of first + k*step, sideways included",
+        "A missing or malformed tag in the volume check makes the series skipped (a skip result, not an exception); no exception escapes the check for a bad header",
+        "B2: a sagittal MR is read with direction (row cosine, column cosine, normal as columns), origin = first position and spacing (PixelSpacing, step) all set from the validated headers and equal to them; a two-echo MR, a multi-frame file, a series with a missing middle slice, a series lacking PixelSpacing and an oblique MR whose cosines are off-orthonormal by 1e-3 are each skipped; a series whose positions jitter by 0.005 mm is read",
+        "Only Execute runs inside quiet_call (float32 output pixel type set before Execute); the size check (columns, rows, n) and the geometry setting run outside it; a size mismatch or a read failure skips the series",
+        "B5: a PT series with a different RescaleSlope on every slice reads as stored x RescaleSlope + RescaleIntercept in float32, checked voxelwise",
+        "B8 (read part): reading a series with truncated pixel data skips it with nothing captured by capfd, log records or warnings that holds the synthetic id, the tmp path or a UID",
+        "Vault guardrails followed: pixel arrays are copied with GetArrayFromImage, never a view of a temporary (simpleitk-array-view-of-temporary-image-reads-freed-memory); every third-party read is inside quiet_call (third-party-loader-errors-and-warnings-embed-phi-paths)",
+        "The planning CT path in convert.py is unchanged",
+        "Guardrail (commit gate): no added line puts mrn/patient_id next to a run of 6-10 digits and no added line has a dotted name whose last part starts with an underscore; at most 5 staged files per commit",
+        "series.py imports nothing from convert.py: it defines SERIES_ATOL_MM = 0.01, ORTHO_ATOL = 1e-4 and its own DIRECTION_ATOL = 1e-6; convert.py is not edited in this task",
+        "If TDD shows SimpleITK does not apply each slice's own RescaleSlope, the PT read falls back to per-slice pydicom pixel reads inside quiet_call; B5 is never weakened",
+        "A series whose cosines are off unit length or orthogonality by 1e-6 (DS rounding) is read; one off by 1e-3 is skipped"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "series.py: REG parsing and reg_matrix",
+      "depends_on": [
+        "task-03"
+      ],
+      "files": [
+        "src/rt_dataprep/series.py",
+        "tests/test_series.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/series.py": "modify",
+        "tests/test_series.py": "modify"
+      },
+      "test_approach": "Unit tests on the registration lookup with REG fixtures (red first): MR frame +10 mm in x of the CT frame, REG in the CT frame and REG in the MR frame, a named MR-frame point mapped to its known CT-frame coordinates; bad matrices; duplicate items; items resolved via ReferencedImageSequence.",
+      "criteria": [
+        "A2.4 (matrix part): for a REG in the CT frame and for one in the MR frame, reg_matrix maps a named MR-frame point to its known CT-frame coordinates within 1e-6; the same frame gives 'identity'; the text is 16 values row-major, space-separated, %.10g",
+        "A series on the planning CT's frame gets 'identity' whatever any REG holds; REG lookup runs only for a series on another frame",
+        "Registration is symmetric: a REG whose own FrameOfReferenceUID is the CT's (or the series') frame has an implied identity item for that frame when it omits one",
+        "A REG qualifies for a (CT frame, series frame) pair when it has an item (real or implied) for each frame, whatever its matrices hold; the first qualifying REG by SOPInstanceUID (string order) is used, with no fallback to a later REG; only REGs not in an excluded study are used",
+        "B3: an item matrix is used only when its MatrixSequence holds exactly one entry of type RIGID with 16 values, last row 0 0 0 1 within 1e-6, and a 3x3 part R with max|R^T R - I| <= 1e-4 and det R > 0; a non-RIGID type, a matrix scaled by 1.1, an item with two matrices, or a REG with two items for the CT frame gives an empty reg_matrix while the series still counts as registered",
+        "B9: an item without FrameOfReferenceUID takes the one frame shared by those of its ReferencedImageSequence SOPs present among the patient's readable headers (excluded studies and localizers included, absent SOPs ignored); listing only SOPs not in the patient's files, or SOPs on two frames, gives the item no frame",
+        "A study-level link with no frame match does not register a series; deformable REGs (no RegistrationSequence) never qualify",
+        "A malformed REG tag makes that REG not qualify; no exception escapes REG parsing for a bad header",
+        "Guardrail (commit gate): no added line puts mrn/patient_id next to a run of 6-10 digits and no added line has a dotted name whose last part starts with an underscore; at most 5 staged files per commit"
+      ]
+    },
+    {
+      "id": "task-05",
+      "title": "convert_plan takes its headers; series.csv rows move out of the plan path",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_convert.py",
+        "tests/test_masks.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_convert.py": "modify",
+        "tests/test_masks.py": "modify"
+      },
+      "test_approach": "Behaviour-preserving refactor: restate the tests that call convert_plan or assert it writes series.csv against the new signature; convert() end-to-end outputs (files, series.csv rows, report) are unchanged for every existing tree.",
+      "criteria": [
+        "convert_plan takes the plan folder's own [(path, Dataset)] list (not deduplicated by SOP) and whether any file in it was unreadable, and reads no headers itself; an unreadable flag still refuses the plan with REASON_FILE_UNREADABLE",
+        "Headers of every plan_<n>/ and of misc_files/ are read once per patient at patient level; an unreadable file in misc_files/ is ignored and only its count reaches the log",
+        "_convert_plan no longer writes series.csv; PlanResult carries the plan's series.csv rows; convert writes each plan folder's series.csv once, last, through the atomic writer, and every plan report row's files end with series.csv",
+        "Existing tests in tests/test_convert.py and tests/test_masks.py that call convert_plan or assert series.csv is written by it are restated against the new signature, without weakening any assertion; the full suite passes",
+        "tests/test_organize.py and tests/test_dicom_io.py are not edited",
+        "Guardrail (commit gate): no added line puts mrn/patient_id next to a run of 6-10 digits and no added line has a dotted name whose last part starts with an underscore; at most 5 staged files per commit"
+      ]
+    },
+    {
+      "id": "task-06",
+      "title": "Other-series placement, images/, plan-less patients, report rows",
+      "depends_on": [
+        "task-04",
+        "task-05"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "src/rt_dataprep/series.py",
+        "tests/test_series.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "src/rt_dataprep/series.py": "modify",
+        "tests/test_series.py": "modify"
+      },
+      "test_approach": "End-to-end convert() tests on synthetic organized trees in tests/test_series.py (red first), one per criterion; assertions read the NIfTI files back and parse series.csv and convert_report.csv.",
+      "criteria": [
+        "convert.py imports DIRECTION_ATOL from series.py (one definition, value 1e-6 unchanged) and uses series.py's helpers; series.py never imports convert.py",
+        "Candidates: Modality CT, MR or PT; SOP copies deduplicated to the first path in folder order (plan_<n> by numeric n, then misc_files/) before grouping by SeriesInstanceUID; not the planning CT of a converted plan; study not excluded (a study is excluded when any of the patient's files in it has a ManufacturerModelName containing an excluded model, case-sensitive substring; a file with no StudyInstanceUID is excluded); files whose ImageType list contains LOCALIZER dropped one by one; files with no SeriesInstanceUID or Modality dropped and not counted; placement runs after every plan of the patient has its outcome",
+        "A2.4: an MR registered to the planning CT's frame by a REG leaves planning_ct.nii.gz, dose and masks unchanged and is written into the plan folder as series_MR_1.nii.gz on its own grid; its series.csv row carries kind series, its SeriesDescription, UIDs, frame, date, the plan columns and the reg_matrix; an MR whose study a REG names but whose frame it does not goes to images/",
+        "A2.4b: two CT series in one study on different frames with no REG: the one the RTSTRUCT references is planning_ct.nii.gz, and the other is <patient>/images/series_CT_1.nii.gz",
+        "A2.4c: an MR registered to two plans' CTs is written into both plan folders; an MR in misc_files/ with no registration is written once to images/; a refused plan's CT, on a frame different from every converted plan's CT frame (the fixture ensures it), goes to images/; a patient with only misc_files/ gets images/; an org tree holding .<patient>.partial/ does not convert it",
+        "k counts from 1 per folder and modality, assigned only among series actually written to that folder (no gaps; a skipped series takes no k), in order of (SeriesDate, SeriesTime, SeriesInstanceUID) of each series' first sorted slice, '' when absent; series in images/ have plan columns and reg_matrix empty",
+        "B4: an MR in a study that holds an excluded-model file, and an MR localizer, are not written anywhere and are not counted as skipped",
+        "B6: a series present in two plan folders and misc_files/ is read once and written once per destination, not once per copy",
+        "B7: a plan row lists its series files before series.csv; a patient with at least one candidate gets one images row (converted with its files ending series.csv when images/ was written, else skipped with REASON_NO_IMAGES); skipped_series on that row counts every skipped series of the patient once; plan rows keep 0; a patient with no candidates gets no images row; a patient with neither plans nor candidates keeps the PR 1 REASON_NO_PLANS row and gets no output folder; a plan-less patient whose candidates all fail gets an empty output folder, so a rerun skips it",
+        "B8: an unreadable series in misc_files/ is skipped with nothing captured by capfd, log records or warnings that holds the synthetic id, the tmp path or a UID; no log line or exception in series placement carries a UID, path, date or description",
+        "The closing convert log line counts images rows separately from plan rows, e.g. 'convert: %d plan rows (%d converted, %d refused, %d skipped), %d images rows' plus the patient-level counts",
+        "A2.11 still holds: the organized tree is byte-identical after a run and a rerun reports every patient as skipped",
+        "Row and file order: a patient's report rows are its plan rows in numeric plan_<n> order, then its images row; in a row's files and in each series.csv, series files come after the plan's data files, ordered by modality (CT, MR, PT) then k, and series.csv comes last in the row's files",
+        "A sagittal MR on the planning CT's frame lands in the plan folder with reg_matrix 'identity'; the NIfTI read back has direction, origin and spacing equal to the headers",
+        "A TypeError raised from series placement (monkeypatched) gives a REASON_INTERNAL patient row and ConvertAborted, as in task-01",
+        "Guardrail (commit gate): no added line puts mrn/patient_id next to a run of 6-10 digits and no added line has a dotted name whose last part starts with an underscore; at most 5 staged files per commit",
+        "A placement-path unexpected-exception except comes after except OSError at patient level (REASON_IO_ERROR rows keep their reason)"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01",
+      "task-02"
+    ],
+    [
+      "task-03",
+      "task-05"
+    ],
+    [
+      "task-04"
+    ],
+    [
+      "task-06"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-03",
+    "spec": "docs/specs/2026-11-03-f2a-pr2-other-series.md",
+    "authority_spec": "docs/specs/2026-11-03-f2a-convert.md",
+    "profile": "project-profile.yml",
+    "scope": "PR 2 of F2a (authority spec Delivery) plus #33",
+    "merge": "full /dev auto-merge after one clean review round (user decision 2026-11-03; lifts the handoff's don't-merge guardrail for this run)",
+    "vault_guardrails": [
+      "pydicom-validates-lazily-on-first-tag-access",
+      "third-party-loader-errors-and-warnings-embed-phi-paths",
+      "simpleitk-array-view-of-temporary-image-reads-freed-memory",
+      "record-completion-at-outcome-not-intent",
+      "dicomrttool-6-api-and-mclahe-deps"
+    ],
+    "pr_notes": [
+      "Closes #33",
+      "Hardening issues to file: split multi-echo/DWI and multi-frame series; SUV for PT; quiet_call broad except masks bugs in quieted closures; deformable REG pre-deformation matrix"
+    ],
+    "commit_gate_landmines": [
+      "tests/test_organize.py:24 and tests/test_dicom_io.py:85 trip the MRN rule if edited: neither file is edited in this PR",
+      "Never write a dotted name whose last part starts with an underscore (module dot _name, package dot __main__) on an added line in any file type, docs and JSON included; drive the CLI with a subprocess running 'python -m rt_dataprep', never by importing the package's main module",
+      "At most 5 staged files per commit (findings.md counts)"
+    ]
+  }
+}
