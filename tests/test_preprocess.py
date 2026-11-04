@@ -480,7 +480,7 @@ def test_a_patient_without_a_plan_folder_with_a_series_csv_is_skipped_and_writes
     (converted / 'SYNTHETICPTA' / 'plan_1').mkdir()
     report = pre.preprocess(converted, out, SMALL)
     assert [(r.patient, r.folder, r.outcome, r.reason, r.files) for r in report.rows] == [
-        ('SYNTHETICPTA', '', 'skipped', pre.REASON_NO_PLANS, [])]
+        ('SYNTHETICPTA', '', 'skipped', pre.REASON_NO_CASES, [])]
     assert listing(out) == ['preprocess_report.csv']
 
 
@@ -814,10 +814,11 @@ def test_no_log_line_carries_a_path_a_folder_name_or_a_series_value(tmp_path, mo
 
 def test_reasons_hold_no_separator_digit_run_or_uid():
     reasons = {name: value for name, value in vars(pre).items() if name.startswith('REASON_')}
-    assert {'REASON_OUTSIDE_INPUT', 'REASON_NO_STEPS', 'REASON_EXISTS', 'REASON_NO_PLANS', 'REASON_NO_CT', 'REASON_DOSE_COUNT',
+    assert {'REASON_OUTSIDE_INPUT', 'REASON_NO_STEPS', 'REASON_EXISTS', 'REASON_NO_CASES', 'REASON_NO_CT', 'REASON_DOSE_COUNT',
             'REASON_KIND', 'REASON_FILE_MISSING', 'REASON_FILE_UNREADABLE', 'REASON_GRID', 'REASON_CROP', 'REASON_IO_ERROR',
             'REASON_INTERNAL'} <= set(reasons)
     assert len(set(reasons.values())) == len(reasons)
+    assert 'REASON_NO_PLANS' not in reasons
     for value in reasons.values():
         assert not re.search(r'[/\\]|\d{3,}|\d+(\.\d+){2,}', value)
 
@@ -1015,3 +1016,260 @@ def test_check_study_rows_logs_nothing_with_identifiers(tmp_path, caplog):
         reason = refused_with(folder)
     assert reason == pre.REASON_STUDY_MODALITY and not caplog.records
     assert 'SYNTHETICSTUDYFOLDER' not in reason and str(tmp_path) not in reason
+
+
+# ---- task-05: study folders, one series at a time. Series are written straight to NIfTI; one test runs convert on synthetic DICOM. ----
+
+VALUE_OF = {'CT': -500.0, 'MR': 300.0, 'PT': 5.0}
+STUDY_CT = 'reshape_resample_rescale_initialresample_series_CT_1.nii.gz'
+STUDY_MR = 'reshape_resample_initialresample_series_MR_1.nii.gz'  # no rescale prefix: the HU rescale is for CT only
+
+
+def write_study_tree(root, patient='SYNTHETICPTA', study='study_1', series=(('CT', 1), ('MR', 1)), n=8, spacing=1.0):
+    """<root>/<patient>/<study>/ as convert writes it: series_<MOD>_<k>.nii.gz (a ramp on a constant) and series.csv. Returns the folder."""
+    folder = root / patient / study
+    folder.mkdir(parents=True)
+    rows = []
+    for modality, k in series:
+        ramp = np.linspace(0, 10, n ** 3).reshape(n, n, n) + VALUE_OF[modality]
+        sitk.WriteImage(make_image(ramp, **grid(n, spacing)), str(folder / f'series_{modality}_{k}.nii.gz'))
+        rows.append(series_row(f'series_{modality}_{k}.nii.gz', 'series', modality=modality, series_instance_uid=f'SYNTHETICUID{modality}{k}'))
+    save_rows(folder, rows)
+    return folder
+
+
+def imaging_rows(report, patient='SYNTHETICPTA'):
+    return [(r.folder, r.outcome, r.reason, r.files) for r in report.rows if r.patient == patient and r.folder.startswith('study_')]
+
+
+def test_a_study_ct_gets_the_ct_prefixes_and_mr_and_pt_the_geometric_ones(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_study_tree(converted, series=(('CT', 1), ('MR', 1), ('MR', 2), ('PT', 1)))
+    before = state(converted)
+    report = pre.preprocess(converted, out, SMALL)
+    names = [STUDY_CT, STUDY_MR, STUDY_MR.replace('MR_1', 'MR_2'), STUDY_MR.replace('MR_1', 'PT_1')]
+    assert imaging_rows(report) == [
+        ('study_1/series_CT_1', 'preprocessed', '', [names[0], 'series.csv']),
+        ('study_1/series_MR_1', 'preprocessed', '', [names[1]]),
+        ('study_1/series_MR_2', 'preprocessed', '', [names[2]]),
+        ('study_1/series_PT_1', 'preprocessed', '', [names[3]])]
+    study = out / 'SYNTHETICPTA' / 'study_1'
+    assert sorted(p.name for p in study.iterdir()) == sorted([*names, 'series.csv'])
+    assert [r['file'] for r in conv_rows(study)] == names
+    assert {r['kind'] for r in conv_rows(study)} == {'series'} and conv_rows(study)[0]['series_instance_uid'] == 'SYNTHETICUIDCT1'
+    assert all(sitk.ReadImage(str(study / name)).GetSize() == (10, 10, 10) for name in names)
+    assert state(converted) == before
+
+
+def conv_rows(folder):
+    with open(folder / 'series.csv', newline='', encoding='utf-8') as handle:
+        return list(csv.DictReader(handle))
+
+
+def test_mr_and_pt_intensities_are_not_rescaled_and_ct_is(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_study_tree(converted, series=(('CT', 1), ('MR', 1), ('PT', 1)))
+    steps = PreprocessSteps(resample=True, rescale=True)  # a resample to the grid it already has keeps the voxels
+    pre.preprocess(converted, out, steps)
+    study = out / 'SYNTHETICPTA' / 'study_1'
+    assert sorted(p.name for p in study.iterdir()) == ['initialresample_series_MR_1.nii.gz', 'initialresample_series_PT_1.nii.gz',
+                                                       'rescale_initialresample_series_CT_1.nii.gz', 'series.csv']
+    for modality in ('MR', 'PT'):
+        got = sitk.GetArrayFromImage(sitk.ReadImage(str(study / f'initialresample_series_{modality}_1.nii.gz')))
+        native = sitk.GetArrayFromImage(sitk.ReadImage(str(converted / 'SYNTHETICPTA' / 'study_1' / f'series_{modality}_1.nii.gz')))
+        np.testing.assert_allclose(got, native, atol=1e-4)
+    ct = sitk.GetArrayFromImage(sitk.ReadImage(str(study / 'rescale_initialresample_series_CT_1.nii.gz')))
+    native = sitk.GetArrayFromImage(sitk.ReadImage(str(converted / 'SYNTHETICPTA' / 'study_1' / 'series_CT_1.nii.gz')))
+    np.testing.assert_allclose(ct, (native + 1024) / 4096, atol=1e-4)
+
+
+def test_rescale_alone_leaves_an_mr_under_its_own_name(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_study_tree(converted)
+    pre.preprocess(converted, out, PreprocessSteps(rescale=True))
+    study = out / 'SYNTHETICPTA' / 'study_1'
+    assert sorted(p.name for p in study.iterdir()) == ['rescale_series_CT_1.nii.gz', 'series.csv', 'series_MR_1.nii.gz']
+    assert [r['file'] for r in conv_rows(study)] == ['rescale_series_CT_1.nii.gz', 'series_MR_1.nii.gz']
+    assert float(sitk.GetArrayFromImage(sitk.ReadImage(str(study / 'series_MR_1.nii.gz'))).min()) == pytest.approx(VALUE_OF['MR'])
+
+
+def two_bad_series(converted):
+    """study_1: CT_1 fine, MR_1 too small, MR_2 unreadable bytes, PT_1 fine."""
+    folder = write_study_tree(converted, series=(('CT', 1), ('MR', 1), ('MR', 2), ('PT', 1)))
+    sitk.WriteImage(make_image(np.ones((3, 3, 3)), spacing=(0.3,) * 3), str(folder / 'series_MR_1.nii.gz'))  # 0.9 mm per axis
+    (folder / 'series_MR_2.nii.gz').write_bytes(b'not an image')
+    return folder
+
+
+def test_a_too_small_and_an_unreadable_series_are_refused_on_their_own_rows(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    two_bad_series(converted)
+    report = pre.preprocess(converted, out, SMALL)
+    pt = STUDY_MR.replace('MR_1', 'PT_1')
+    assert imaging_rows(report) == [
+        ('study_1/series_CT_1', 'preprocessed', '', [STUDY_CT, 'series.csv']),
+        ('study_1/series_MR_1', 'refused', pre.REASON_TOO_SMALL, []),
+        ('study_1/series_MR_2', 'refused', pre.REASON_FILE_UNREADABLE, []),
+        ('study_1/series_PT_1', 'preprocessed', '', [pt])]
+    study = out / 'SYNTHETICPTA' / 'study_1'
+    assert sorted(p.name for p in study.iterdir()) == sorted([STUDY_CT, pt, 'series.csv'])  # no MR file, no leftover temp file
+    assert [r['file'] for r in conv_rows(study)] == [STUDY_CT, pt]
+
+
+def test_a_pixel_read_failure_refuses_that_series_only(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_study_tree(converted, series=(('CT', 1), ('MR', 1), ('PT', 1)))
+    real = pre.read_image
+
+    def read(path):
+        if path.name == 'series_MR_1.nii.gz':
+            raise CaseRefused(pre.REASON_FILE_UNREADABLE)  # the header read fine, the pixels did not
+        return real(path)
+    monkeypatch.setattr(pre, 'read_image', read)
+    report = pre.preprocess(converted, out, SMALL)
+    assert [(f, o, r) for f, o, r, _ in imaging_rows(report)] == [
+        ('study_1/series_CT_1', 'preprocessed', ''), ('study_1/series_MR_1', 'refused', pre.REASON_FILE_UNREADABLE), ('study_1/series_PT_1', 'preprocessed', '')]
+    assert [r['modality'] for r in conv_rows(out / 'SYNTHETICPTA' / 'study_1')] == ['CT', 'PT']
+    assert not list((out / 'SYNTHETICPTA' / 'study_1').glob('*MR*'))
+
+
+def test_a_study_with_every_series_refused_leaves_no_study_folder_and_the_next_study_is_written(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder = write_study_tree(converted, series=(('MR', 1), ('PT', 1)))
+    (folder / 'series_MR_1.nii.gz').write_bytes(b'not an image')
+    sitk.WriteImage(make_image(np.ones((3, 3, 3)), spacing=(0.3,) * 3), str(folder / 'series_PT_1.nii.gz'))
+    write_study_tree(converted, study='study_2', series=(('MR', 1),))
+    report = pre.preprocess(converted, out, SMALL)
+    assert [(f, o, r) for f, o, r, _ in imaging_rows(report)] == [
+        ('study_1/series_MR_1', 'refused', pre.REASON_FILE_UNREADABLE), ('study_1/series_PT_1', 'refused', pre.REASON_TOO_SMALL),
+        ('study_2/series_MR_1', 'preprocessed', '')]
+    assert sorted(p.name for p in (out / 'SYNTHETICPTA').iterdir()) == ['study_2']
+    assert [r for r in report.rows if r.folder == ''] == []
+
+
+def test_a_study_refused_by_check_study_rows_is_one_row_and_writes_nothing(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder = write_study_tree(converted)
+    (folder / 'series_MR_1.nii.gz').unlink()
+    write_study_tree(converted, study='study_2', series=(('PT', 1),))
+    report = pre.preprocess(converted, out, SMALL)
+    assert imaging_rows(report) == [
+        ('study_1', 'refused', pre.REASON_FILE_MISSING, []), ('study_2/series_PT_1', 'preprocessed', '', [STUDY_MR.replace('MR_1', 'PT_1'), 'series.csv'])]
+    assert sorted(p.name for p in (out / 'SYNTHETICPTA').iterdir()) == ['study_2']
+
+
+def test_plans_come_first_and_studies_follow_in_numeric_order(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_study_tree(converted, study='study_10', series=(('MR', 1),))
+    write_study_tree(converted, study='study_2', series=(('MR', 1),))
+    write_plan(converted)
+    (converted / 'SYNTHETICPTA' / 'study_3').mkdir()  # no series.csv
+    (converted / 'SYNTHETICPTA' / 'study_x').mkdir()
+    (converted / 'SYNTHETICPTA' / '.study_0').mkdir()
+    (converted / 'SYNTHETICPTA' / 'images').mkdir()
+    report = pre.preprocess(converted, out, SMALL)
+    assert [(r.folder, r.outcome) for r in report.rows] == [
+        ('plan_1', 'preprocessed'), ('study_2/series_MR_1', 'preprocessed'), ('study_10/series_MR_1', 'preprocessed')]
+    assert sorted(p.name for p in (out / 'SYNTHETICPTA').iterdir()) == ['plan_1', 'study_10', 'study_2']
+    assert (out / 'SYNTHETICPTA' / 'plan_1' / CT_FILE).is_file()
+
+
+def test_a_patient_with_neither_plans_nor_studies_is_skipped_with_no_cases(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    (converted / 'SYNTHETICPTA' / 'study_1').mkdir(parents=True)  # no series.csv
+    report = pre.preprocess(converted, out, SMALL)
+    assert [(r.folder, r.outcome, r.reason) for r in report.rows] == [('', 'skipped', pre.REASON_NO_CASES)]
+    assert listing(out) == ['preprocess_report.csv']
+
+
+def test_an_oserror_in_a_study_series_refuses_the_patient_and_removes_the_partial(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_study_tree(converted)
+    write_study_tree(converted, patient='SYNTHETICPTB')
+    real = conv.write_atomic
+
+    def write(image, path):
+        if path.name == STUDY_MR and 'SYNTHETICPTA' in str(path):
+            raise OSError(conv.REASON_WRITE)
+        real(image, path)
+    monkeypatch.setattr(conv, 'write_atomic', write)
+    report = pre.preprocess(converted, out, SMALL)
+    assert [(r.patient, r.folder, r.outcome, r.reason) for r in report.rows] == [
+        ('SYNTHETICPTA', '', 'refused', pre.REASON_IO_ERROR), ('SYNTHETICPTB', 'study_1/series_CT_1', 'preprocessed', ''),
+        ('SYNTHETICPTB', 'study_1/series_MR_1', 'preprocessed', '')]
+    assert listing(out) == ['SYNTHETICPTB', 'preprocess_report.csv']
+
+
+def test_an_internal_error_in_a_study_series_aborts_the_run_and_removes_the_partial(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_study_tree(converted)
+    write_study_tree(converted, patient='SYNTHETICPTB')
+    real = pre.resample_to
+    calls = []
+
+    def boom(image, spacing):
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError('SYNTHETICPTA')
+        return real(image, spacing)  # the CT passes, the MR fails
+    monkeypatch.setattr(pre, 'resample_to', boom)
+    with pytest.raises(pre.PreprocessAborted) as caught:
+        pre.preprocess(converted, out, SMALL)
+    assert str(caught.value) == pre.REASON_INTERNAL
+    chain = ''.join(traceback.format_exception(caught.value))
+    assert 'direct cause' not in chain and 'During handling' not in chain
+    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='')]
+    assert listing(out) == ['preprocess_report.csv']
+
+
+def test_the_run_log_counts_plan_rows_and_imaging_rows_separately(tmp_path, caplog):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted, patient='SYNTHETICPTB')
+    two_bad_series(converted)
+    (converted / 'SYNTHETICPTC' / 'study_1').mkdir(parents=True)
+    with caplog.at_level('INFO'):
+        pre.preprocess(converted, out, SMALL)
+    messages = [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.preprocess' and r.getMessage().startswith('preprocess: ')]
+    summary = [m for m in messages if 'plan rows' in m]
+    assert summary == ['preprocess: 1 plan rows (1 preprocessed, 0 refused), 4 imaging rows (2 preprocessed, 2 refused), 1 patient rows (0 refused, 1 skipped)']
+
+
+def test_study_refusals_log_only_reasons(tmp_path, caplog):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    two_bad_series(converted)
+    folder = write_study_tree(converted, study='study_2')
+    (folder / 'series_CT_1.nii.gz').unlink()
+    with caplog.at_level('DEBUG'):
+        pre.preprocess(converted, out, SMALL)
+    assert caplog.records and not any(s in caplog.text for s in ('SYNTHETICPT', str(tmp_path), 'study_', 'series_', 'SYNTHETICUID'))
+
+
+def test_manifest_lists_the_same_cases_on_the_converted_and_the_preprocessed_tree(tmp_path):
+    from test_convert import BOX, PID, dose_spec, make_plan
+    from test_series import STUDY_D1, STUDY_D2, STUDY_T1, STUDY_T2, put
+
+    from rt_dataprep import manifest as man
+    org, converted, out = tmp_path / 'org', tmp_path / 'converted', tmp_path / 'out'
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10)], rois=[BOX])
+    misc = org / PID / 'misc_files'
+    put(misc, 'ct', 'CT', study_date=STUDY_D1)
+    mr_a = put(misc, 'mra', 'MR', study_date=STUDY_D2, series_time=STUDY_T1)
+    put(misc, 'mrb', 'MR', study_uid=mr_a['study_uid'], study_date=STUDY_D2, series_time=STUDY_T2)
+    conv.convert(org, converted)
+    steps = dataclasses.replace(SMALL, new_shape=(8, 8, 8))
+    report = pre.preprocess(converted, out, steps)
+    assert [(r.folder, r.outcome) for r in report.rows] == [
+        ('plan_1', 'preprocessed'), ('study_1/series_CT_1', 'preprocessed'), ('study_2/series_MR_1', 'preprocessed'), ('study_2/series_MR_2', 'preprocessed')]
+    assert man.manifest(converted) == (4, 0) and man.manifest(out) == (4, 0)
+
+    def read(root):
+        with open(root / 'manifest.csv', newline='') as handle:
+            return list(csv.DictReader(handle))
+    before, after = read(converted), read(out)
+    assert [r['case_dir'] for r in after] == [r['case_dir'] for r in before]
+    assert [r['case_dir'].split('/', 1)[1] for r in after] == ['plan_1', 'study_1/series_CT_1', 'study_2/series_MR_1', 'study_2/series_MR_2']
+    for kept, done in zip(before[1:], after[1:], strict=True):
+        assert kept['image'] == f"{kept['case_dir'].split('/')[-1]}.nii.gz"
+        assert done['image'] == pre.output_name(kept['image'], steps, ct=kept['modality'] == 'CT')
+        assert (out / PID / done['case_dir'].split('/')[1] / done['image']).is_file()
+    assert [r['image'] for r in after[2:]] == [pre.output_name(f'series_MR_{k}.nii.gz', steps) for k in (1, 2)]
