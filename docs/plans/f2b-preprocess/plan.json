@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "preprocess.py core: PreprocessSteps, torchio-convention grid, crop/pad, rescale, names, resample onto the final CT",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "create",
+        "tests/test_preprocess.py": "create"
+      },
+      "test_approach": "Red first in tests/test_preprocess.py. In-memory SimpleITK images built in the test (or written to tmp_path as NIfTI where float32 spacing matters); no DICOM. Pure functions are tested directly: the reference grid for a target spacing, the centred crop/pad, rescale, the name builder, and the CT pipeline plus dose/mask resampling onto the final CT. Hand-computed expected numbers for the grid and crop/pad cases. Run with `uv run --group dev pytest -q --tb=short tests/test_preprocess.py`, then the full suite (259 at c20eaf5). Preset-based tests use dataclasses.replace(LEGACY_RNT, new_shape=<small>) so no test holds a 701x701x433 volume.",
+      "criteria": [
+        "PreprocessSteps is a frozen dataclass with fields resample, rescale, harmonize_spacing, reshape, legacy_linear_masks (all False by default), new_spacing (1, 1, 1), final_spacing (1.25, 1.25, 1.25) and new_shape (701, 701, 433); the module constant LEGACY_RNT is the --legacy-rnt preset (resample, rescale, harmonize_spacing and reshape True)",
+        "A2.5f grid: for a fixed input grid (size N, spacing s, origin o, direction D) and target spacing s', the reference grid has size n = floor(N*s/s') computed as np.floor in float64 on GetSpacing() values (an axis with N = 1 stays 1), direction D, spacing s', and origin c - D*((n-1)/2*s') with c = o + D*((N-1)*s/2); checked against hand-computed numbers, including a non-identity direction",
+        "A2.5f float32 case: an image with N = 5 and spacing 0.9 written to NIfTI and read back, resampled to s' = 1.5, has n = 2 on each axis (from the stored float32 spacing), not 3",
+        "A2.5f crop/pad: for an odd difference d, ceil(d/2) voxels are cropped or padded at the start of the axis and floor(d/2) at the end; spacing and direction are unchanged and the origin moves by exactly the start voxels; CT padding equals the minimum of the CT entering reshape (after rescale when it is on), dose and mask padding is 0",
+        "A2.5c (unit): with only rescale on, each CT voxel equals (h + 1024) / 4096 within 1e-6 and the CT stays float32",
+        "Steps run in the legacy order initial resample -> rescale -> final spacing -> reshape on the CT only, each resample linear with default value 0; the final CT image held in memory is the single reference grid",
+        "Dose is resampled once from its native image onto the final CT with sitk.Resample(dose, final_ct, sitk.Transform(), sitkLinear, 0, sitkFloat32); masks once with sitkNearestNeighbor and output type sitkUInt8 by default, or sitkLinear and output type sitkFloat32 when legacy_linear_masks",
+        "A2.5d: a dose on the native CT grid (as F2a writes it), linear in x within a box and 0 outside it, under the preset with a small new_shape that keeps the whole box, matches the analytic dose at the final voxel centres within 1e-4 Gy inside the hull of the box's voxel centres, and is exactly 0 at one native voxel or more outside the hull of the nonzero voxel centres",
+        "A2.5b: a fixture with CT spacing 0.9 mm and a cube mask gives, under the preset, a uint8 mask holding only {0, 1}; with legacy_linear_masks the same fixture gives a float32 mask with at least one value strictly between 0 and 1",
+        "A2.5e: a cube mask with native side L in mm of at least 3*max(final_spacing), under the preset, keeps its mm centroid within s'/2 on each axis and its volume within |dV| <= 6*L^2*s' (s' = max(final_spacing)); the test asserts the final spacing differs from the native spacing on every axis, and the same centroid check on a copy of the output mask shifted by one final voxel fails (vault testing/alignment-test-needs-a-displacement-guard)",
+        "Names: prefixes newest step first, each followed by '_', no ahe; with the preset the CT is reshape_resample_rescale_initialresample_planning_ct.nii.gz, dose reshape_resample_initialresample_dose.nii.gz and a mask <roi>.nii.gz becomes reshape_resample_initialresample_<roi>.nii.gz; dose and masks carry only geometric prefixes, and with no geometric step their names are unchanged",
+        "Guardrail (vault python/simpleitk-array-view-of-temporary-image-reads-freed-memory): no sitk.GetArrayViewFromImage is taken of an unnamed temporary image",
+        "Guardrail (vault python/torchio-croporpad-pads-labelmaps-with-padding-mode): dose and mask padding is 0 and never the CT pad value; a test asserts both on a padded case",
+        "Guardrail (vault medical-imaging/simpleitk-series-reader-and-nifti-writer-geometry-heuristics): every output image keeps the input CT's direction exactly (no re-derived direction)",
+        "Third-party calls: NIfTI reads use dicom_io.quiet_call(..., REASON_FILE_UNREADABLE); NIfTI writes go through convert.write_atomic (its OSError(REASON_WRITE) becomes a patient REASON_IO_ERROR row in task-02); every compute call (Resample, crop/pad, rescale, array conversion) uses dicom_io.quiet_call(..., REASON_INTERNAL), and the plan-level `except CaseRefused` in task-02 re-raises when str(exc) == REASON_INTERNAL, so it ends in PreprocessAborted"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "preprocess(): tree walk, series.csv-driven inputs, layout, failure table, report, partial/rename",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "src/rt_dataprep/convert.py",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_preprocess.py": "modify"
+      },
+      "test_approach": "Red first. A test helper writes a synthetic converted tree into tmp_path: <patient>/plan_<n>/ with planning_ct.nii.gz, dose.nii.gz, mask files, an applicator text file and a series.csv using convert.SERIES_COLUMNS and the kinds ct/dose/mask/applicator/series, plus an images/ folder. Synthetic patient IDs have no digits or underscores (e.g. SYNTHETICPTA). One test per failure-table row. Full suite after. Preset tests use dataclasses.replace(LEGACY_RNT, new_shape=<small>); no test pads to 701x701x433.",
+      "criteria": [
+        "preprocess(converted_root, out_root, steps) walks <converted>/<patient>/plan_<n>/ folders holding a series.csv, skips images/ and hidden folders, writes <out>/<patient>/plan_<n>/ and preprocess_report.csv (columns patient, folder, outcome, reason, files) under out_root, and returns a PreprocessReport",
+        "Inputs come only from series.csv kind: ct, dose, mask, applicator; series rows are dropped; any other kind refuses the plan with REASON_KIND",
+        "Path safety: each series.csv file value must equal the name of a regular file directly in the plan folder (membership in that folder's listing); a value holding a path separator or '..' counts as missing, giving REASON_FILE_MISSING; a test uses a '../' row and asserts nothing outside the plan folder is read or written",
+        "A2.5a: on a synthetic converted plan with a dose, two masks and an applicator, the preset writes exactly the prefixed CT, dose and two masks, the applicator byte-equal to the input under its own name, and series.csv; the CT size is new_shape and spacing final_spacing; every NIfTI output is geometry-equal (size, origin, spacing, direction) to the written CT",
+        "A2.5c (tree): with only rescale on, the CT is rescale_planning_ct.nii.gz and dose and masks are byte-equal copies under their native names",
+        "A2.5g: the written series.csv has one row per kept file with file renamed to the new name and every other column unchanged, and no series rows",
+        "A2.5h failure table: out_root equal to or inside converted_root raises ValueError(REASON_OUTSIDE_INPUT) before any write; no step on raises ValueError(REASON_NO_STEPS) before any write; an existing <out>/<patient> gives a skipped patient row REASON_EXISTS; a patient with no plan folder holding a series.csv gives a skipped patient row REASON_NO_PLANS and writes nothing; zero or several ct rows refuse the plan REASON_NO_CT; several dose rows REASON_DOSE_COUNT; a row naming a missing file REASON_FILE_MISSING; an unreadable NIfTI REASON_FILE_UNREADABLE; a dose or mask whose size differs, or whose origin/spacing/direction differ beyond convert.ORIGIN_ATOL_MM / series.DIRECTION_ATOL, from the native CT REASON_GRID",
+        "A2.5h: an OSError while writing gives a refused patient row REASON_IO_ERROR and removes the partial; any other exception adds a row with preprocess's own REASON_INTERNAL, flushes the report and raises PreprocessAborted (str is exactly REASON_INTERNAL, not a subclass of ValueError or OSError), raised after the except block so nothing is chained",
+        "Each patient is built under out_root/.<patient>.partial (a stale one removed first) and renamed into place; a refused plan leaves sibling plans in place; a patient whose plans were all refused is still renamed, and a rerun skips it with REASON_EXISTS",
+        "Masks are read, resampled, written and released one at a time (only the CT, one mask and its output are held at once)",
+        "convert.py renames _crash_site to crash_site with its caller updated and no behaviour change; series.csv is written with convert.write_series_csv and applicators copied with shutil.copyfile into the partial; _atomic is not renamed; no added line accesses an underscore-prefixed attribute of another module",
+        "A2.5h PHI: every REASON_ constant in preprocess.py matches no path separator, digit run of 3 or more, or UID pattern; no log line or exception formats a path, patient folder name or series.csv value",
+        "Check before write: every row of a plan is validated (kind, file presence, and size/origin/spacing/direction read with sitk.ImageFileReader.ReadImageInformation) before the first write of that plan; any plan refusal removes that plan's partial output, so a refused plan leaves no plan_<n> folder in the output; a test refuses on the last mask and asserts the folder is absent",
+        "A2.5i: if a native dose or mask voxel with a nonzero value has its centre outside the final CT grid's buffer (continuous index outside [-0.5, n-0.5) on some axis), or a native mask with voxels comes out with none, the plan is refused with REASON_CROP and leaves no plan_<n> folder; tests: a dose and a mask cut off by a small new_shape, and a one-voxel mask that nearest neighbour empties",
+        "Report format: one row per plan with folder plan_<n> and outcome 'preprocessed' or 'refused'; a patient row (folder '') only for skipped, or for refused with REASON_IO_ERROR or REASON_INTERNAL, which drops that patient's plan rows as convert does; files is the output names joined by ';' in write order with series.csv last; PreprocessReport has a rows attribute",
+        "No-step rule: a PreprocessSteps with none of resample, rescale, harmonize_spacing, reshape on raises ValueError(REASON_NO_STEPS), even with legacy_linear_masks on; with only rescale on, legacy_linear_masks has no effect (masks copied byte-equal); REASON_OUTSIDE_INPUT is checked before REASON_NO_STEPS",
+        "A compute failure (a resample monkeypatched to raise) gives a REASON_INTERNAL patient row, a flushed report and PreprocessAborted; the mechanism is that the plan-level `except CaseRefused` re-raises when str(exc) == REASON_INTERNAL and refuses the plan for every other reason"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "CLI preprocess subcommand, gitignore/profile, phase1 pointer",
+      "depends_on": [
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/__main__.py",
+        "tests/test_cli.py",
+        ".gitignore",
+        "project-profile.yml",
+        "docs/plans/2026-11-03-rt-dataprep/phase1.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_cli.py": "modify",
+        ".gitignore": "modify",
+        "project-profile.yml": "modify",
+        "docs/plans/2026-11-03-rt-dataprep/phase1.md": "modify"
+      },
+      "test_approach": "Subprocess tests in tests/test_cli.py, following its existing pattern (python -m rt_dataprep ..., and runpy for the crash case), on a synthetic converted tree from the task-02 helper. __main__ imports preprocess's REASON_INTERNAL under an alias. The preset run uses test_cli.py's runpy pattern: python -c monkeypatches rt_dataprep.preprocess.LEGACY_RNT to dataclasses.replace(LEGACY_RNT, new_shape=<small>), sets sys.argv, then runpy.run_module('rt_dataprep', run_name='__main__'); no test pads to 701x701x433.",
+      "criteria": [
+        "`python -m rt_dataprep preprocess <converted> <out> --legacy-rnt` runs end to end on a synthetic converted tree, writes the preset names and preprocess_report.csv, and exits 0; --legacy-linear-masks sets legacy_linear_masks",
+        "Without --legacy-rnt the CLI exits 1 with exactly 'rt_dataprep: ' + REASON_NO_STEPS; an out root inside the converted root exits 1 with REASON_OUTSIDE_INPUT; PreprocessAborted exits 1 with the fixed REASON_INTERNAL text; OSError exits 1 with the existing path-free message; no stderr line holds a path",
+        ".gitignore lists preprocess_report.csv, and the project-profile.yml phi rule names preprocess_report.csv alongside the other reports",
+        "phase1.md F2 points to docs/specs/2026-11-03-f2b-preprocess.md, and its parity command reads convert followed by preprocess --legacy-rnt --legacy-linear-masks instead of convert --flat --legacy-rnt",
+        "The preprocess subcommand's help text says --legacy-rnt is required for any output"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "A2.6 torchio cross-check (skipped unless torchio) and the one verified run",
+      "depends_on": [
+        "task-02"
+      ],
+      "files": [
+        "tests/test_preprocess.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "tests/test_preprocess.py": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "One test using pytest.importorskip('torchio'). A synthetic CT and mask are written to NIfTI in tmp_path. The torchio chain runs on them and its results are written to NIfTI; both sides are read back with SimpleITK for the comparison, so both see the same float32 geometry rounding. The test skips in the normal suite. It is then run once with `uv run --with torchio==1.2.1 --group dev pytest -q --tb=short tests/test_preprocess.py`, falling back to `uv run --python 3.12 --with torchio==1.2.1 --group dev pytest -q --tb=short tests/test_preprocess.py` if torch does not resolve on 3.13.",
+      "criteria": [
+        "A2.6: SimpleITK initial resample, final spacing and crop/pad of a synthetic CT match torchio 1.2.1 Resample(new_spacing) -> Resample(final_spacing) -> CropOrPad(new_shape, padding_mode=<min of the CT entering reshape>) within 1e-4 in voxel values, with equal size and spacing and origin within 1e-4 mm; the torchio calls pass antialias=False explicitly",
+        "A2.6 masks: the SimpleITK mask equals torchio's single Resample(target=<torchio final CT image>) of the native mask as a LabelMap (no CropOrPad on the mask), voxel for voxel",
+        "The test uses pytest.importorskip('torchio') and is skipped in the normal suite; torch and torchio are not added to pyproject.toml or uv.lock",
+        "The one torchio run passes, and its exact command, Python version and result line are recorded in findings.md under task-04 for the PR body",
+        "README.md's never-commit list names preprocess_report.csv"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ],
+    [
+      "task-03",
+      "task-04"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-03",
+    "spec": "docs/specs/2026-11-03-f2b-preprocess.md",
+    "profile": "project-profile.yml",
+    "target": "main",
+    "base": "c20eaf5",
+    "deferred": "See the spec's Deferred section; peak memory on real data is filed as a hardening issue at PR time"
+  }
+}

@@ -12,7 +12,7 @@ execution:
 compliance:
   - name: phi
     rules:
-      - "No PatientID, name, date of birth or path in log lines or exception messages. Under the output root, organize_report.csv / convert_report.csv carry the sanitized id, and per-folder series.csv files carry per-file metadata (sanitized id, dates, plan label, SeriesDescription, UIDs); none of these is ever committed."
+      - "No PatientID, name, date of birth or path in log lines or exception messages. Under the output root, organize_report.csv / convert_report.csv / preprocess_report.csv carry the sanitized id, and per-folder series.csv files carry per-file metadata (sanitized id, dates, plan label, SeriesDescription, UIDs); none of these is ever committed."
       - "Reports and logs are written under the output root only, never the working directory."
       - "Test data is synthetic, generated at test time; no .dcm or imaging files are committed."
   - name: data-safety
