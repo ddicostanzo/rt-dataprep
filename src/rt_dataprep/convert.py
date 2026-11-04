@@ -275,8 +275,8 @@ def convert_plan(headers, unreadable, case_dir):
     except CaseRefused as exc:
         reason = str(exc)
     if reason is not None:  # raised here, after the except blocks: nothing of the original is chained
-        if not existed:
-            shutil.rmtree(case_dir, ignore_errors=True)
+        if not existed and case_dir.exists():  # a failure is an OSError, the patient's: a refused plan's files must never be renamed into place
+            shutil.rmtree(case_dir)
         raise CaseRefused(reason)
     return result
 

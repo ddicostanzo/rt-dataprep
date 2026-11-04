@@ -434,6 +434,17 @@ def test_the_same_frame_is_identity_and_no_reg_is_looked_at(world):
     assert ser.registration(world.ct_frame, world.ct_frame, [world.reg(world.items(rigid(), rigid(), ))], {}) == (True, 'identity')
 
 
+@pytest.mark.parametrize('series_frame', ['', 'SYNTHETICFRAME'])
+def test_a_ct_without_a_frame_registers_nothing(world, series_frame):
+    assert ser.registration('', series_frame, [world.reg(world.items(rigid(), rigid()))], world.lookup) == (False, '')
+
+
+def test_a_computed_zero_prints_as_0(world):
+    turn = [[np.cos(np.pi / 2), -np.sin(np.pi / 2), 0], [np.sin(np.pi / 2), np.cos(np.pi / 2), 0], [0, 0, 1]]  # cos is 6e-17
+    _, text = world.registration([world.reg(world.items(rigid(), rigid(rotation=turn)))])
+    assert text == '0 -1 0 0 1 0 0 0 0 0 1 0 0 0 0 1'
+
+
 @pytest.mark.parametrize('own, kept', [('ct', 'mr'), ('mr', 'ct')])
 def test_a_reg_in_one_of_the_two_frames_has_an_implied_identity_item_for_it(world, own, kept):
     if kept == 'mr':
