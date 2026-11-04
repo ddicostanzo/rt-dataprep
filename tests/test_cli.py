@@ -304,3 +304,44 @@ def test_split_without_a_manifest_exits_1_with_the_path_free_message(tree, capfd
     out = capfd.readouterr()
     assert out.out == '' and out.err.splitlines()[-1] == 'rt_dataprep: file system error on the source or output root'
     assert str(tree) not in out.err
+
+
+# --workers on organize and convert: the names __main__ imports are patched to record their kwargs.
+@pytest.fixture
+def calls(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, 'organize', lambda *args, **kwargs: seen.append(('organize', args, kwargs)))
+    monkeypatch.setattr(cli, 'convert', lambda *args, **kwargs: seen.append(('convert', args, kwargs)))
+    return seen
+
+
+@pytest.mark.parametrize('command', ['organize', 'convert'])
+@pytest.mark.parametrize('flag, workers', [([], 1), (['--workers', '3'], 3)])
+def test_workers_reaches_organize_and_convert_and_defaults_to_one(command, flag, workers, calls):
+    cli.main([command, 'a', 'b', *flag])
+    assert calls == [(command, ('a', 'b'), {'workers': workers})]
+
+
+@pytest.mark.parametrize('command', ['organize', 'convert'])
+@pytest.mark.parametrize('value', ['0', '-1', 'x', '1.5'])
+def test_workers_below_one_or_not_an_integer_is_a_usage_error(command, value, calls, capfd):
+    with pytest.raises(SystemExit) as exc:
+        cli.main([command, 'a', 'b', '--workers', value])
+    assert exc.value.code == 2 and calls == []
+    assert '--workers' in capfd.readouterr().err
+
+
+@pytest.mark.parametrize('argv', [['preprocess', 'a', 'b'], ['manifest', 'a'], ['split', 'a', '--test-size', '0', '--val-size', '0', '--seed', '0']])
+def test_no_other_subcommand_takes_workers(argv, calls, capfd):
+    with pytest.raises(SystemExit) as exc:
+        cli.main([*argv, '--workers', '2'])
+    assert exc.value.code == 2 and calls == []
+    capfd.readouterr()
+
+
+@pytest.mark.parametrize('command', ['organize', 'convert'])
+def test_workers_help_says_threads_and_same_output(command, capfd):
+    with pytest.raises(SystemExit):
+        cli.main([command, '--help'])
+    text = ' '.join(capfd.readouterr().out.split())
+    assert 'number of threads reading headers; output is the same for any value' in text

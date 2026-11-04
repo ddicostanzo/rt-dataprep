@@ -20,6 +20,17 @@ from rt_dataprep.split import REASON_COLUMNS, REASON_EXISTS, REASON_NO_TRAIN, RE
 
 
 PREPROCESS_HELP = 'resample, rescale and crop/pad a converted tree into a separate output tree; --legacy-rnt is required for any output'
+WORKERS_HELP = 'number of threads reading headers; output is the same for any value'
+
+
+def positive_int(text):
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError('must be an integer of at least 1')
+    return value
 
 
 def main(argv=None):
@@ -28,9 +39,11 @@ def main(argv=None):
     sub = commands.add_parser('organize', help='sort an export tree into <patient>/plan_<n>/ folders, one per RTPLAN')
     sub.add_argument('src', help='export root, one folder per patient')
     sub.add_argument('out', help='output root')
+    sub.add_argument('--workers', type=positive_int, default=1, help=WORKERS_HELP)
     sub = commands.add_parser('convert', help='turn an organized tree into NIfTI files on the native CT grid, one folder per plan')
     sub.add_argument('org', help='organized root, from the organize command')
     sub.add_argument('out', help='output root, outside the organized root')
+    sub.add_argument('--workers', type=positive_int, default=1, help=WORKERS_HELP)
     sub = commands.add_parser('preprocess', help=PREPROCESS_HELP, description=PREPROCESS_HELP)
     sub.add_argument('converted', help='converted root, from the convert command')
     sub.add_argument('out', help='output root, outside the converted root')
@@ -48,7 +61,7 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format='%(message)s')
     try:
         if args.command == 'convert':
-            convert(args.org, args.out)
+            convert(args.org, args.out, workers=args.workers)
         elif args.command == 'preprocess':
             steps = LEGACY_RNT if args.legacy_rnt else PreprocessSteps()
             preprocess(args.converted, args.out, dataclasses.replace(steps, legacy_linear_masks=args.legacy_linear_masks))
@@ -60,7 +73,7 @@ def main(argv=None):
             for name in SPLIT_NAMES:  # counts only, never the ids
                 print(f'{name}: {len(splits[name])} patients, {sum(map(len, splits[name].values()))} cases')
         else:
-            organize(args.src, args.out)
+            organize(args.src, args.out, workers=args.workers)
     except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug, reported as below
         if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_OUTSIDE_SRC,
                             REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS):

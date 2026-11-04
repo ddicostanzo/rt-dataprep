@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,9 +25,9 @@ import pydicom
 import SimpleITK as sitk
 from pydicom.datadict import tag_for_keyword
 
-from rt_dataprep import masks
+from rt_dataprep import dicom_io, masks
 from rt_dataprep import series as ser
-from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_header, write_report
+from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_pooled, write_report
 from rt_dataprep.series import DIRECTION_ATOL
 
 log = logging.getLogger(__name__)
@@ -95,11 +96,12 @@ class PlanResult:
     series_rows: list  # dicts of SERIES_COLUMNS for the plan's series.csv, which the patient level writes last
 
 
-def convert(org_root, out_root, *, exclude_models=('Acuity',)):
+def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1):
     """
     Convert every <patient>/plan_<n>/ under org_root into out_root/<patient>/plan_<n>/ and write convert_report.csv.
 
     exclude_models: a study that holds a file whose ManufacturerModelName contains one of these is left out of the other series.
+    workers: threads that read the headers of one folder; the output is the same for any value.
     """
     org_root, out_root = Path(org_root), Path(out_root)
     if out_root.resolve().is_relative_to(org_root.resolve()):  # before any mkdir: nothing is written into the input
@@ -107,10 +109,15 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',)):
     folders = sorted(p for p in org_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
     rows, aborted = [], False
+    reading = 0.0  # seconds and header files of the patients that finished; a refused or aborted patient adds none
+    files = 0
+    started = time.monotonic()
     try:
         for folder in folders:
             try:
-                rows += _convert_patient(folder, out_root, exclude_models)
+                found, read_s, read_files = _convert_patient(folder, out_root, exclude_models, workers)
+                rows += found
+                reading, files = reading + read_s, files + read_files
             except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
                 rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_IO_ERROR))
                 log.warning('convert: %s', REASON_IO_ERROR)
@@ -129,6 +136,8 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',)):
              len(plan_rows), *(sum(r.outcome == o for r in plan_rows) for o in (OUTCOME_CONVERTED, OUTCOME_REFUSED, OUTCOME_SKIPPED)),
              sum(r.folder == IMAGES_NAME for r in rows), len(patient_rows),
              *(sum(r.outcome == o for r in patient_rows) for o in (OUTCOME_REFUSED, OUTCOME_SKIPPED)))
+    total = time.monotonic() - started
+    log.info('convert: %.1f s total, %.1f s reading, %.1f s converting, %d files, workers %d', total, reading, total - reading, files, workers)
     if aborted:  # raised here, after the except blocks: nothing of the original is chained
         raise ConvertAborted(REASON_INTERNAL)
     return ConvertReport(rows)
@@ -146,17 +155,21 @@ def crash_site(tb):
     return site
 
 
-def _convert_patient(folder, out_root, exclude_models):
+def _convert_patient(folder, out_root, exclude_models, workers):
+    """(rows, reading seconds, header files read); a raise means the patient adds neither of the last two."""
     target = out_root / folder.name
     if target.exists():
-        return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_EXISTS)]
+        return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_EXISTS)], 0.0, 0
     plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(PLAN_FOLDER, p.name)),
                    key=lambda p: (int(p.name.split('_')[1]), p.name))  # plan_1 and fx_1: a fixed order
     # Headers are read once per patient. An unreadable file in misc_files/ is not a series and is ignored: only its count
     # reaches the log.
-    plan_headers = [read_folder_headers(plan_dir) for plan_dir in plans]
+    read_started = time.monotonic()
+    plan_headers = [read_folder_headers(plan_dir, workers=workers) for plan_dir in plans]
     misc_dir = folder / 'misc_files'
-    misc_headers, misc_unreadable = read_folder_headers(misc_dir) if misc_dir.is_dir() else ([], False)
+    misc_headers, misc_unreadable = read_folder_headers(misc_dir, workers=workers) if misc_dir.is_dir() else ([], False)
+    reading = time.monotonic() - read_started
+    files = sum(len(found) for found, _ in plan_headers) + len(misc_headers)  # a value: misc_headers is filtered below
     # An unreadable misc file may be a lost slice of any series of its study: those are skipped (#36). Its study is read
     # with force=True; when even that fails, every misc-only series of the patient is skipped.
     misc_taint = set(), False
@@ -175,7 +188,7 @@ def _convert_patient(folder, out_root, exclude_models):
     series_of = lambda items: {u for ds in items if (u := _tag(ds, 'SeriesInstanceUID')).strip()}  # noqa: E731
     split = series_of(ds for ds in blank if pair(ds) not in present) & series_of(ds for _, ds in headers)
     if not plans and not ser.candidates(headers, exclude_models)[0]:
-        return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_NO_PLANS)]
+        return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_NO_PLANS)], reading, files
     # Built under a hidden name and renamed at the end: a run that dies part-way leaves no folder that a later run would
     # skip as done. The flag, not an except block, decides the cleanup, so any failure (and Ctrl-C) removes the partial.
     partial = out_root / f'.{folder.name}.partial'
@@ -207,7 +220,7 @@ def _convert_patient(folder, out_root, exclude_models):
     finally:
         if not done:
             shutil.rmtree(partial, ignore_errors=True)
-    return rows
+    return rows, reading, files
 
 
 def _salvage_study(path):
@@ -394,15 +407,19 @@ def _convert_plan(headers, unreadable, case_dir):
     return PlanResult(files, series_uid, series_rows)
 
 
-def read_folder_headers(folder):
+def read_folder_headers(folder, workers=1):
     """([(path, Dataset)] of every readable file in `folder`, sorted by path; whether any file was unreadable)."""
-    headers, unreadable = [], False
-    for path in sorted(p for p in Path(folder).iterdir() if p.is_file()):
-        try:
-            headers.append((path, read_header(path)))
-        except OSError:
-            unreadable = True
-    return headers, unreadable
+    results = read_pooled(_read_one, sorted(p for p in Path(folder).iterdir() if p.is_file()), workers)
+    headers = [(path, ds) for path, ds in results if ds is not None]
+    return headers, len(headers) < len(results)
+
+
+def _read_one(path):
+    """(path, header), or (path, None) when the file is unreadable: one bad file never ends the folder read."""
+    try:
+        return path, dicom_io.read_header_core(path)  # via the module: a test patches this seam
+    except OSError:
+        return path, None
 
 
 def _of(headers, modality):

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pydicom
@@ -123,23 +124,40 @@ def quiet_call(fn, reason):
     return result
 
 
-def read_header(path):
+def read_header_core(path):
     """
     The Dataset at `path` without pixel data; any failure raises OSError(REASON_UNREADABLE) with no path or value in it.
 
-    pydicom converts (and validates) a tag's value on first access, not at dcmread, so every element is converted here,
-    inside the quiet block: later reads of the returned dataset hit cached values and stay silent.
+    pydicom converts (and validates) a tag's value on first access, not at dcmread, so every element is converted here:
+    the caller holds the quiet block, and later reads of the returned dataset hit cached values and stay silent.
     """
     try:
-        with _pydicom_quiet():
-            ds = pydicom.dcmread(path, stop_before_pixels=True)
-            for element in ds.iterall():
-                _ = element.value  # the access is the point: it converts and caches
-            return ds
+        ds = pydicom.dcmread(path, stop_before_pixels=True)
+        for element in ds.iterall():
+            _ = element.value  # the access is the point: it converts and caches
+        return ds
     except Exception:  # InvalidDicomError, truncated file, missing file: all one fixed reason
         pass
     # Raised here, after the except block: inside it, __context__ would carry the original (path-bearing) exception.
     raise OSError(REASON_UNREADABLE)
+
+
+def read_header(path):
+    """read_header_core inside its own quiet block."""
+    with _pydicom_quiet():
+        return read_header_core(path)
+
+
+def read_pooled(step, paths, workers):
+    """`step(path)` for every path on `workers` threads (>= 1), results in input order; the first failure raises."""
+    # Assumes a GIL build of CPython, nothing else running in the process while the block is held (the quiet state is
+    # process-global), and that quiet_call never runs inside a worker (it swaps fds 1/2 and is not thread-safe).
+    with _pydicom_quiet():
+        executor = ThreadPoolExecutor(workers)
+        try:
+            return [future.result() for future in [executor.submit(step, path) for path in paths]]
+        finally:
+            executor.shutdown(cancel_futures=True)  # queued steps never start; running ones finish inside the block
 
 
 # Ported from DICOM_Transport src/common.py. Everything outside this set becomes "_".
