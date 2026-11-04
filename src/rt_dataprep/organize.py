@@ -67,12 +67,13 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',)):
 
 
 def _organize_patient(folder, out_root, claimed, exclude_models):
-    headers, unreadable = [], 0
+    headers, bad = [], []  # bad: has the preamble but read_header fails; copied to misc_files (#13)
     for path in sorted(p for p in folder.rglob('*') if _has_preamble(p)):
         try:
             headers.append((path, read_header(path)))
         except OSError:
-            unreadable += 1
+            bad.append(path)
+    unreadable = len(bad)
     # A file with a blank PatientID is the folder's but never placed in a plan: it is copied to misc_files (#12).
     blank = [path for path, ds in headers if not str(ds.get('PatientID', '')).strip()]
     headers = [(path, ds) for path, ds in headers if str(ds.get('PatientID', '')).strip()]
@@ -92,7 +93,7 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
     if target.exists():
         return PatientRow(name, 0, 0, unreadable, OUTCOME_SKIPPED, REASON_EXISTS)
     cases, misc = _group(headers, exclude_models)
-    misc += blank
+    misc += blank + bad
     # Build under a hidden name and rename at the end: a run that dies part-way leaves no folder that a later run
     # would skip as already done.
     partial = out_root / f'.{name}.partial'

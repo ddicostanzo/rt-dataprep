@@ -449,3 +449,14 @@ def test_ct_without_any_date_is_the_last_plan(tree):
     redate_ct(undated, SeriesDate=None)
     organize(src, out)
     assert plan_ct_series(out) == [{dated['ct']['series_uid']}, {undated['ct']['series_uid']}]
+
+
+def test_unreadable_dicom_is_copied_to_misc_files(tree):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    (src / PID / 'a' / 'cut.dcm').write_bytes(TRUNCATED)
+    report = organize(src, out)
+    assert (out / PID / 'misc_files' / 'cut.dcm').read_bytes() == TRUNCATED
+    assert [f.name for f in (out / PID / 'misc_files').iterdir()] == ['cut.dcm']
+    assert [(r.plans, r.misc, r.unreadable) for r in report.rows] == [(1, 1, 1)]
+    assert rows(out)[0]['misc_count'] == rows(out)[0]['unreadable_count'] == '1'
