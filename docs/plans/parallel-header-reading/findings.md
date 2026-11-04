@@ -90,3 +90,11 @@ Deferred (file as hardening at the review round):
   the report rows are equal. Two fresh conversions are byte-identical (the NIfTI files, series.csv and the reports), so no comparison was loosened.
 - The test can fail: it asserts 2 organize rows, 2 converted rows, 6 NIfTI files in the converted tree and .dcm files in the organized tree before comparing.
 - The equivalence test passed before the CLI change, as expected: it calls the library kwarg, which tasks 02 and 03 added. Only the CLI tests were red first.
+
+## review-loop-pass-1
+
+One round: Opus bug review of the full diff (integration seams included), an Opus spec-axis review against plan.json
+(group 3 given full attention, standing in for its wave review), and Codex (completed on 1d88762, no findings).
+BLOCKING: none, so no fixes and no verification pass. Deferred and filed: #97 (second Ctrl-C during the shutdown join),
+#98 (test gaps: workers forwarding, convert core seam, organize timing placement and Ctrl-C, trivial .partial assertion,
+spec 'total' wording), #99 (--workers upper bound, positive_int looseness).
