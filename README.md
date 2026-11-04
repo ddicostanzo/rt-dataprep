@@ -22,7 +22,8 @@ uv run --group dev python -m compileall -q src
 
 This tool reads real patient data, so:
 
-- Never commit patient data: no `.dcm`, imaging, `organize_report.csv`, `convert_report.csv` or `preprocess_report.csv`. Tests build synthetic
+- Never commit patient data: no `.dcm`, imaging, `organize_report.csv`, `convert_report.csv` or `preprocess_report.csv`, nor
+  their dated per-run copies (`<name>_<UTC time>.csv`; each run keeps one, and the fixed name is the latest). Tests build synthetic
   DICOM in `tmp_path` at run time and every identifier starts with `SYNTHETIC_`.
 - No PatientID, name, date of birth, date or path in a log line, exception message or report text. Refusal reasons are
   fixed string constants. The reports in the output root are the only place a sanitized patient id appears.
