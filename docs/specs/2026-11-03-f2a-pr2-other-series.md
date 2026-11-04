@@ -77,6 +77,9 @@ Facts found in the code that shape PR 2:
 - **Candidates:** Modality CT, MR or PT; `SeriesInstanceUID` is not the planning CT of a converted plan; study not
   excluded. Files with `LOCALIZER` in `ImageType` (any modality) are dropped one by one, as organize does; the rest
   of their series is still a candidate. A refused plan's CT is a candidate.
+  Exception (user, wave review 4): a series with a file in a plan folder refused with `REASON_FILE_UNREADABLE` or
+  `REASON_CT_SLICE_MISSING` is skipped and counted, since it may have lost an end slice that the volume check cannot
+  see. `misc_files/` keeps the ignore rule (a hardening issue tracks the same risk there).
 - **Registration is symmetric.** A REG whose own `FrameOfReferenceUID` is the CT's (or the series') frame counts as
   having an identity item for that frame when it omits one. Only REGs of the patient (any folder, deduplicated by
   SOP, not in an excluded study) are used. A REG **qualifies** for a (CT frame, series frame) pair when it has an

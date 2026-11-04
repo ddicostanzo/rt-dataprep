@@ -163,3 +163,11 @@ frame_none test label overstates; %.10g may print -0.
   A refused plan whose CT lost an end slice to an unreadable file still passes check_volume and goes to images/ one slice short
   (deferred: hardening). The reg-copy test needs copies that differ (first copy does not qualify), else dedup is unobservable.
   Mutation-checked: no SOP dedup, no REG excluded-study filter, a k gap after a failed read, and no localizer filter each fail a test.
+
+## review-4
+BLOCKING (fixed by orchestrator, user-confirmed scope): a refused plan's CT known to be short (REASON_CT_SLICE_MISSING,
+or REASON_FILE_UNREADABLE when the unreadable file was an end slice) went to images/ one slice short. Now any series
+with a file in such a refused plan folder is skipped and counted; two tests. Same risk in misc_files/ left as the spec
+says, per the user: hardening issue. NOTE (deferred): candidates() reads ManufacturerModelName/StudyInstanceUID/
+SOPInstanceUID/Modality without the tag catch; no test for a series registered to a refused plan only, or a PT with an
+identity frame in images/.

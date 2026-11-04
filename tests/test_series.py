@@ -907,3 +907,23 @@ def test_an_oserror_writing_a_series_is_still_an_io_error_row(tree, monkeypatch)
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', conv.OUTCOME_REFUSED, conv.REASON_IO_ERROR)]
     assert [p.name for p in out.iterdir()] == [conv.REPORT_NAME]
+
+
+# ---------------------------------------------------------------- review: a CT known to be short never reaches images/
+
+@pytest.mark.parametrize('damage', ['end-slice-deleted', 'unreadable-slice'])
+def test_a_refused_plans_ct_that_may_be_short_is_skipped_not_written_to_images(tmp_path, damage):
+    org, out = tmp_path / 'org', tmp_path / 'out'
+    plan = make_plan(org / PID / 'plan_1')
+    last = Path(plan['ct']['paths'][-1])
+    if damage == 'end-slice-deleted':
+        last.unlink()  # refused with REASON_CT_SLICE_MISSING; the rest is still one uniform volume
+    else:
+        last.write_bytes(b'not a dicom file')  # refused with REASON_FILE_UNREADABLE; the rest is still one volume
+    rows = conv.convert(org, out).rows
+    plan_row = next(r for r in rows if r.folder == 'plan_1')
+    images_row = next(r for r in rows if r.folder == conv.IMAGES_NAME)
+    assert plan_row.outcome == conv.OUTCOME_REFUSED
+    assert (images_row.outcome, images_row.reason, images_row.skipped_series) == (
+        conv.OUTCOME_SKIPPED, conv.REASON_NO_IMAGES, 1)
+    assert not (out / PID / conv.IMAGES_NAME).exists()

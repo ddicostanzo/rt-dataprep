@@ -167,7 +167,10 @@ def _convert_patient(folder, out_root, exclude_models):
                     for plan_dir, (found, unreadable) in zip(plans, plan_headers, strict=True)]
         rows = [row for row, _ in outcomes]
         # After every plan has its outcome: which CTs are planning CTs, and which plans a series is registered to, depend on it.
-        images_row = _place_series(folder.name, headers, exclude_models, outcomes, partial)
+        # A plan refused for a lost or unreadable file may hold a CT missing an end slice, which still passes the volume check.
+        short = {plan_dir for plan_dir, (row, _) in zip(plans, outcomes, strict=True)
+                 if row.reason in (REASON_FILE_UNREADABLE, REASON_CT_SLICE_MISSING)}
+        images_row = _place_series(folder.name, headers, exclude_models, outcomes, partial, short)
         rows += [images_row] if images_row else []
         for row, result in outcomes:  # series.csv of each converted plan folder goes in last
             if result is not None:
@@ -180,12 +183,13 @@ def _convert_patient(folder, out_root, exclude_models):
     return rows
 
 
-def _place_series(patient, headers, exclude_models, outcomes, partial):
+def _place_series(patient, headers, exclude_models, outcomes, partial, short=frozenset()):
     """
     Write every other series of the patient into the converted plan folders it is registered to, else into images/, each
     series read once. Adds the series files and rows to the plan rows and results; writes images/series.csv. Returns the
     images ConvertRow, None when the patient has no candidate series. Nothing here catches: a bad header is a None from
-    series.py, anything else is the patient's REASON_INTERNAL.
+    series.py, anything else is the patient's REASON_INTERNAL. A series with a file in a folder of `short` (refused plan
+    folders that may have lost a slice) is skipped and counted.
     """
     found, regs, by_sop = ser.candidates(headers, exclude_models)
     converted = [(row, result, result.series_rows[0]) for row, result in outcomes if result is not None]  # row 0 is the CT row
@@ -193,7 +197,7 @@ def _place_series(patient, headers, exclude_models, outcomes, partial):
     found = [slices for uid, slices in found if uid not in planning]
     if not found:
         return None
-    checked = [ser.check_volume(slices) for slices in found]
+    checked = [None if any(path.parent in short for path, _ in slices) else ser.check_volume(slices) for slices in found]
     skipped = checked.count(None)
     order = lambda ordered: tuple(_tag(ordered[0][1], tag) for tag in ('SeriesDate', 'SeriesTime', 'SeriesInstanceUID'))  # noqa: E731
     counts, written = {}, {}  # (folder, modality) -> last k; folder -> [(modality, k, series.csv row)]
