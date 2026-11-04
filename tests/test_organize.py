@@ -13,6 +13,7 @@ import pydicom
 import pytest
 import synthetic_dicom as sd
 
+from rt_dataprep import dicom_io
 from rt_dataprep import organize as org
 from rt_dataprep.organize import organize
 
@@ -452,11 +453,12 @@ def test_ct_without_any_date_is_the_last_plan(tree):
     assert plan_ct_series(out) == [{dated['ct']['series_uid']}, {undated['ct']['series_uid']}]
 
 
-def test_unreadable_dicom_is_copied_to_misc_files(tree):
+@pytest.mark.parametrize('workers', [1, 4])
+def test_unreadable_dicom_is_copied_to_misc_files(tree, workers):
     src, out = tree
     planning_study(src / PID / 'a')
     (src / PID / 'a' / 'cut.dcm').write_bytes(TRUNCATED)
-    report = organize(src, out)
+    report = organize(src, out, workers=workers)
     assert (out / PID / 'misc_files' / 'cut.dcm').read_bytes() == TRUNCATED
     assert [f.name for f in (out / PID / 'misc_files').iterdir()] == ['cut.dcm']
     assert [(r.plans, r.misc, r.unreadable) for r in report.rows] == [(1, 1, 1)]
@@ -504,22 +506,78 @@ def test_empty_sop_instance_uids_refuse_the_patient(tree):
     assert (rows(out)[0]['outcome'], rows(out)[0]['reason']) == ('refused', org.REASON_NO_SOP_UID)
 
 
-def test_ctrl_c_still_writes_the_report_of_what_was_done(tree, monkeypatch):
+@pytest.mark.parametrize('workers', [1, 4])
+def test_ctrl_c_still_writes_the_report_of_what_was_done(tree, monkeypatch, workers):
     src, out = tree
     planning_study(src / PID / 'a')
     planning_study(src / 'SYNTHETIC_SECOND' / 'a', pid='SYNTHETIC_SECOND')
-    real = org.read_header
+    real = getattr(dicom_io, 'read_header_core')  # noqa: B009
 
     def interrupt(path):
         if 'SYNTHETIC_SECOND' in str(path):
             raise KeyboardInterrupt
         return real(path)
 
-    monkeypatch.setattr(org, 'read_header', interrupt)
+    monkeypatch.setattr(dicom_io, 'read_header_core', interrupt)
     with pytest.raises(KeyboardInterrupt):
-        organize(src, out)
+        organize(src, out, workers=workers)
     with open(out / org.REPORT_NAME, newline='') as handle:
         assert [row['outcome'] for row in csv.DictReader(handle)] == [org.OUTCOME_ORGANIZED]
+    assert not [p for p in out.iterdir() if p.name.endswith('.partial')]
+
+
+def test_workers_1_and_4_give_identical_rows_and_copied_trees(tree, tmp_path):
+    src, out = tree
+    planning_study(src / PID / 'a', slices=6)
+    (src / PID / 'a' / 'cut.dcm').write_bytes(TRUNCATED)
+    (src / PID / 'a' / 'notes.txt').write_text('not dicom')
+    planning_study(src / 'SYNTHETIC_SECOND' / 'a', pid='SYNTHETIC_SECOND')
+    reports = [organize(src, tmp_path / f'out{n}', workers=n) for n in (1, 4)]
+    assert reports[0].rows == reports[1].rows and reports[0].rows[0].unreadable == 1
+    assert snapshot(tmp_path / 'out1' / PID) == snapshot(tmp_path / 'out4' / PID)
+    assert snapshot(tmp_path / 'out1' / 'SYNTHETIC_SECOND') == snapshot(tmp_path / 'out4' / 'SYNTHETIC_SECOND')
+    assert [r.outcome for r in reports[1].rows] == [org.OUTCOME_ORGANIZED] * 2
+
+
+def test_a_preamble_oserror_refuses_that_patient_only_with_workers_4(tree, monkeypatch):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    planning_study(src / 'SYNTHETIC_SECOND' / 'a', pid='SYNTHETIC_SECOND')
+    real = getattr(org, '_has_preamble')  # noqa: B009
+
+    def flaky(path):
+        if 'SYNTHETIC_SECOND' in str(path) and path.name.startswith('plan'):
+            raise OSError(f'permission denied {path}')
+        return real(path)
+
+    monkeypatch.setattr(org, '_has_preamble', flaky)
+    report = organize(src, out, workers=4)
+    assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_ORGANIZED, ''), (org.OUTCOME_REFUSED, org.REASON_IO_ERROR)]
+    assert (out / PID / 'plan_1').is_dir() and not (out / 'SYNTHETIC_SECOND').exists()
+    assert not [p for p in out.iterdir() if p.name.endswith('.partial')]
+
+
+TIMING = re.compile(r'organize: (\d+\.\d) s total, (\d+\.\d) s reading, (\d+\.\d) s copying, (\d+) files, workers (\d+)')
+
+
+def test_one_timing_line_per_run_with_only_numbers_and_fixed_words(tree, caplog, monkeypatch):
+    src, out = tree
+    planning_study(src / PID / 'a')  # 3 CT + struct + plan + dose = 6 files
+    planning_study(src / 'SYNTHETIC_SECOND' / 'a', pid='SYNTHETIC_SECOND')
+    real = getattr(org, '_has_preamble')  # noqa: B009
+
+    def flaky(path):
+        if 'SYNTHETIC_SECOND' in str(path):
+            raise OSError('x')
+        return real(path)
+
+    monkeypatch.setattr(org, '_has_preamble', flaky)
+    with caplog.at_level(logging.INFO):
+        organize(src, out, workers=2)
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith('organize:') and ' s total' in r.getMessage()]
+    assert len(lines) == 1 and TIMING.fullmatch(lines[0])
+    assert TIMING.fullmatch(lines[0]).group(4, 5) == ('6', '2')  # the refused patient adds no files
+    assert 'SYNTHETIC' not in lines[0] and '/' not in lines[0]
 
 
 def test_same_day_fallback_dates_are_ordered_by_their_own_time(tree):
@@ -532,11 +590,12 @@ def test_same_day_fallback_dates_are_ordered_by_their_own_time(tree):
     assert plan_ct_series(out) == [{early['ct']['series_uid']}, {late['ct']['series_uid']}]
 
 
-def test_a_folder_of_only_non_dicom_files_is_no_dicom_with_nothing_unreadable(tree):
+@pytest.mark.parametrize('workers', [1, 4])
+def test_a_folder_of_only_non_dicom_files_is_no_dicom_with_nothing_unreadable(tree, workers):
     src, out = tree
     mk(src / PID)
     (src / PID / 'notes.txt').write_text('not dicom')
-    row = organize(src, out).rows[0]
+    row = organize(src, out, workers=workers).rows[0]
     assert (row.outcome, row.reason, row.unreadable) == (org.OUTCOME_REFUSED, org.REASON_NO_DICOM, 0)
 
 

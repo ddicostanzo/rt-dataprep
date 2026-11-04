@@ -36,3 +36,17 @@ the shutdown join restores the quiet state while workers still read. NOTEs for t
 - Criterion "workers resolve read_header_core as a module attribute" is met by how steps are built: tasks 02/03 steps
   must call dicom_io.read_header_core through the module.
 - read_pooled does not validate workers; the CLI (task-04) enforces >= 1.
+
+## task-02
+
+- organize pools one private step per path (named read_one): preamble check, then `dicom_io.read_header_core` through the
+  module; it returns None (non-DICOM), (path, None) (core OSError, i.e. a bad file) or (path, header). The walk is listed
+  and sorted before `read_pooled`, so headers and bad paths keep sorted order for any workers.
+- The preamble OSError is not caught in the step: `future.result()` re-raises it in input order, the patient function
+  raises, and organize refuses the patient as REASON_IO_ERROR as before (test runs it with workers 4).
+- `_organize_patient` returns (row, reading s, copying s, files walked) through a local `done` closure on every return
+  after the read; a raise (walk, preamble, copy OSError) adds nothing. "copying" starts at the partial-folder rmtree.
+- Timing line is logged right after the summary, so it is skipped on Ctrl-C like the summary. Test of the line refuses a
+  patient by preamble OSError and checks the files count excludes it (6 of 12 files, workers 2).
+- Ctrl-C with workers 4: a worker's KeyboardInterrupt is stored on its future and re-raised by `result()`; no .partial
+  folder is left because the interrupt happens in the read, before any copy.
