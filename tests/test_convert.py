@@ -280,6 +280,20 @@ def test_ct_with_a_non_finite_header_value_is_refused(tree, tag, x, scope):
     assert not (out / PID / 'plan_1').exists()
 
 
+@pytest.mark.parametrize('tag', ['RescaleSlope', 'RescaleIntercept'])
+@pytest.mark.parametrize('value', [None, [1, 2]], ids=['empty', 'two-values'])
+def test_ct_with_an_empty_or_multi_valued_rescale_is_refused_as_missing_tag(tree, tag, value):
+    """Both tags are Type 1, single-valued; GDCM would fall back to slope 1 / intercept 0."""
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    path = plan['ct']['paths'][1]
+    edit(path, lambda ds: setattr(ds, tag, value))
+    assert len(pydicom.dcmread(path, stop_before_pixels=True)[tag].value or []) != 1
+    row = row_of(conv.convert(org, out).rows)
+    assert (row.outcome, row.reason) == (conv.OUTCOME_REFUSED, conv.REASON_MISSING_TAG)
+    assert not (out / PID / 'plan_1').exists()
+
+
 def test_rtstruct_without_contour_images_refuses_the_plan(tree):
     _, rows, _ = one_plan(tree, contour_images=False)
     assert row_of(rows).reason == conv.REASON_NO_CONTOUR_IMAGES
