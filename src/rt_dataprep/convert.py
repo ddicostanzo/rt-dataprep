@@ -150,12 +150,13 @@ def _convert_patient(folder, out_root, exclude_models):
     if target.exists():
         return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_EXISTS)]
     plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(PLAN_FOLDER, p.name)),
-                   key=lambda p: int(p.name.split('_')[1]))
+                   key=lambda p: (int(p.name.split('_')[1]), p.name))  # plan_1 and fx_1: a fixed order
     # Headers are read once per patient. An unreadable file in misc_files/ is not a series and is ignored: only its count
     # reaches the log.
     plan_headers = [read_folder_headers(plan_dir) for plan_dir in plans]
     misc_dir = folder / 'misc_files'
     misc_headers, misc_unreadable = read_folder_headers(misc_dir) if misc_dir.is_dir() else ([], False)
+    misc_headers = [(p, ds) for p, ds in misc_headers if str(ds.get('PatientID', '')).strip()]  # blank id: kept, never placed (#12)
     if misc_unreadable:
         log.info('convert: %d unreadable files in misc_files', sum(p.is_file() for p in misc_dir.iterdir()) - len(misc_headers))
     headers = [item for found, _ in plan_headers for item in found] + misc_headers  # folder order: plan_<n> by n, then misc_files

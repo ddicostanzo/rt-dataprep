@@ -1123,3 +1123,16 @@ def test_a_single_slice_is_skipped_by_its_own_guard_before_any_geometry_is_read(
     assert ser.check_volume(items[:1]) is None and ser.check_volume([]) is None
     with pytest.raises(AssertionError):  # the spy is live: two slices do reach the geometry
         ser.check_volume(items[:2])
+
+
+def test_a_blank_patient_id_series_in_misc_files_is_never_placed(tree):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    mr = put(org / PID / 'misc_files', frame_uid=plan['ct']['frame_uid'])  # an MR on the plan's frame
+    for path in mr['paths']:  # organize put it in misc_files because its PatientID is blank
+        ds = pydicom.dcmread(path)
+        ds.PatientID = ''
+        ds.save_as(path)
+    conv.convert(org, out)
+    assert len(csv_at(out / PID / 'plan_1')) == 1  # the planning CT row only
+    assert not (out / PID / conv.IMAGES_NAME).exists()

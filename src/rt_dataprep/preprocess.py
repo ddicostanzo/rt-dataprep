@@ -230,7 +230,7 @@ def preprocess_patient(folder, out_root, steps):
     if target.exists():
         return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_EXISTS)]
     plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(conv.PLAN_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()),
-                   key=lambda p: int(p.name.split('_')[1]))
+                   key=lambda p: (int(p.name.split('_')[1]), p.name))  # plan_1 and fx_1: a fixed order
     if not plans:
         return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_NO_PLANS)]
     # Built under a hidden name and renamed at the end, as convert does: a run that dies part-way leaves no folder that a
