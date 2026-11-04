@@ -1186,3 +1186,22 @@ def test_a_file_dropped_for_a_bad_tag_skips_every_series_of_its_study(tree, monk
     assert images_uids(out) == {other['series_uid']}
     assert sibling['series_uid'] not in images_uids(out)
     assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1  # the sibling; the first was dropped whole
+
+
+def test_salvaging_a_study_tag_prints_and_logs_nothing_of_its_value(tree, capfd, caplog, recwarn):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    misc = org / PID / 'misc_files'
+    series = put(misc, prefix='a')
+    ds = pydicom.dcmread(series['paths'][0])
+    ds.StudyInstanceUID = 'FAKE_NAME^SECRET'  # invalid for VR UI: pydicom warns with the value when it is decoded
+    ds.save_as(misc / 'stray.dcm')
+    (misc / 'stray.dcm').write_bytes((misc / 'stray.dcm').read_bytes()[132:])  # no preamble: unreadable, its tags intact
+    caplog.set_level(logging.DEBUG)
+    caplog.clear()  # writing the value above warned already; only the run counts
+    recwarn.clear()
+    capfd.readouterr()
+    conv.convert(org, out)
+    captured = capfd.readouterr()
+    texts = [captured.out, captured.err, caplog.text, *(str(w.message) for w in recwarn.list)]
+    assert [t for t in texts if 'SECRET' in t] == []

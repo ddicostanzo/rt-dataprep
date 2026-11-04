@@ -204,12 +204,14 @@ def _convert_patient(folder, out_root, exclude_models):
 
 def _salvage_study(path):
     """StudyInstanceUID of an unreadable file, read again with force=True and tags only; None when even that fails (#36)."""
+    def read():  # the value is decoded on first access, so it is read inside the quiet block too: its warning names it
+        ds = pydicom.dcmread(path, force=True, stop_before_pixels=True, specific_tags=['StudyInstanceUID'])
+        return str(ds.get('StudyInstanceUID', ''))
     try:
-        ds = quiet_call(lambda: pydicom.dcmread(path, force=True, stop_before_pixels=True, specific_tags=['StudyInstanceUID']),
-                        REASON_FILE_UNREADABLE)
+        study = quiet_call(read, REASON_FILE_UNREADABLE)
     except CaseRefused:
         return None
-    return str(ds.get('StudyInstanceUID', '')) or None
+    return study or None
 
 
 def _refuse_on_lost_ct(row, result, partial, lost):
