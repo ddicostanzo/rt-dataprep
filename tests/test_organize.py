@@ -460,3 +460,23 @@ def test_unreadable_dicom_is_copied_to_misc_files(tree):
     assert [f.name for f in (out / PID / 'misc_files').iterdir()] == ['cut.dcm']
     assert [(r.plans, r.misc, r.unreadable) for r in report.rows] == [(1, 1, 1)]
     assert rows(out)[0]['misc_count'] == rows(out)[0]['unreadable_count'] == '1'
+
+
+def test_a_series_split_between_blank_and_real_patient_ids_refuses_the_patient(tree):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    blank_id(next((src / PID / 'p').glob('ct*.dcm')))  # one planning CT slice loses its id
+    organize(src, out)
+    assert (rows(out)[0]['outcome'], rows(out)[0]['reason']) == ('refused', org.REASON_SPLIT_SERIES)
+    assert not (out / PID).exists()
+
+
+def test_empty_sop_instance_uids_refuse_the_patient(tree):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    for path in (src / PID / 'p').glob('ct*.dcm'):
+        ds = pydicom.dcmread(path)
+        ds.SOPInstanceUID = ''
+        ds.save_as(path)
+    organize(src, out)
+    assert (rows(out)[0]['outcome'], rows(out)[0]['reason']) == ('refused', org.REASON_NO_SOP_UID)

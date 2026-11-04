@@ -164,8 +164,11 @@ def _convert_patient(folder, out_root, exclude_models):
         studies = [_salvage_study(p) for p in sorted(misc_dir.iterdir()) if p.is_file() and p not in read]
         log.info('convert: %d unreadable files in misc_files', len(studies))
         misc_taint = {s for s in studies if s}, None in studies
+    blank = [ds for _, ds in misc_headers if not str(ds.get('PatientID', '')).strip()]
     misc_headers = [(p, ds) for p, ds in misc_headers if str(ds.get('PatientID', '')).strip()]  # blank id: kept, never placed (#12)
     headers = [item for found, _ in plan_headers for item in found] + misc_headers  # folder order: plan_<n> by n, then misc_files
+    # A series with a blank-id slice in misc_files is short without it: known short, like a slice-missing planning CT.
+    split = {_tag(ds, 'SeriesInstanceUID') for ds in blank} & {_tag(ds, 'SeriesInstanceUID') for _, ds in headers} - {''}
     if not plans and not ser.candidates(headers, exclude_models)[0]:
         return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_NO_PLANS)]
     # Built under a hidden name and renamed at the end: a run that dies part-way leaves no folder that a later run would
@@ -179,7 +182,7 @@ def _convert_patient(folder, out_root, exclude_models):
                     for plan_dir, (found, unreadable) in zip(plans, plan_headers, strict=True)]
         # A slice-missing refusal names its planning CT: short wherever its copies are. Assembly already passed for that plan.
         lost = {_assemble(found)[3] for (found, _), (row, _) in zip(plan_headers, outcomes, strict=True)
-                if row.reason == REASON_CT_SLICE_MISSING}
+                if row.reason == REASON_CT_SLICE_MISSING} | split
         outcomes = [_refuse_on_lost_ct(row, result, partial, lost) for row, result in outcomes]
         rows = [row for row, _ in outcomes]
         # After every plan has its outcome: which CTs are planning CTs, and which plans a series is registered to, depend on it.

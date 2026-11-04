@@ -1205,3 +1205,15 @@ def test_salvaging_a_study_tag_prints_and_logs_nothing_of_its_value(tree, capfd,
     captured = capfd.readouterr()
     texts = [captured.out, captured.err, caplog.text, *(str(w.message) for w in recwarn.list)]
     assert [t for t in texts if 'SECRET' in t] == []
+
+
+def test_a_misc_series_with_a_blank_patient_id_slice_is_skipped_not_written_short(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    mr = put(org / PID / 'misc_files', prefix='a')
+    ds = pydicom.dcmread(mr['paths'][-1])
+    ds.PatientID = ''
+    ds.save_as(mr['paths'][-1])
+    rows = conv.convert(org, out).rows
+    assert images_uids(out) == set()
+    assert next(r for r in rows if r.folder == conv.IMAGES_NAME).skipped_series == 1
