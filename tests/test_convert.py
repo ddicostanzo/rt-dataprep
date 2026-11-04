@@ -763,7 +763,7 @@ def test_series_csv_is_utf8_whatever_the_locale(tmp_path):
               "conv.write_series_csv([row], sys.argv[1])")
     env = {**os.environ, 'LC_ALL': 'C', 'PYTHONCOERCECLOCALE': '0', 'PYTHONUTF8': '0'}  # an ASCII locale
     result = subprocess.run([sys.executable, '-c', script, str(tmp_path / 'series.csv')], env=env, capture_output=True)
-    assert result.returncode == 0
+    assert result.returncode == 0, result.stderr
     assert 'Thorax \u00e9' in (tmp_path / 'series.csv').read_bytes().decode('utf-8')
 
 

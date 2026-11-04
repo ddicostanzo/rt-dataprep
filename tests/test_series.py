@@ -990,3 +990,22 @@ def test_a_slice_missing_planning_ct_is_skipped_even_where_a_converted_sibling_h
     images_row = next(r for r in rows if r.folder == conv.IMAGES_NAME)
     assert (images_row.outcome, images_row.skipped_series) == (conv.OUTCOME_SKIPPED, 1)
     assert len(csv_at(out / PID / 'plan_2')) == 1  # the planning CT row only
+
+
+# ---------------------------------------------------------------- hardening B6 (#53)
+
+def test_itks_out_of_memory_reading_the_planning_ct_aborts_the_run_and_leaves_no_partial_folder(tree, monkeypatch, caplog):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+
+    def execute(self):
+        raise RuntimeError('SYNTHETIC_SOURCE:179:\nFailed to allocate memory for image.')  # ITK's, a RuntimeError
+    monkeypatch.setattr(sitk.ImageSeriesReader, 'Execute', execute)
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(conv.ConvertAborted) as caught:
+        conv.convert(org, out)
+    assert str(caught.value) == conv.REASON_INTERNAL
+    assert [(r['patient'], r['folder'], r['outcome'], r['reason']) for r in report(out)] == [
+        (PID, '', conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
+    assert [p.name for p in out.iterdir()] == [conv.REPORT_NAME]  # no patient folder, no partial
+    assert any('MemoryError' in message for message in caplog.messages) and PID not in caplog.text
