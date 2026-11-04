@@ -48,7 +48,8 @@ def _read(manifest_path):
 
 def _write_new(path, text):
     """Create `path` holding `text` atomically, keeping a `path` that appeared meanwhile: os.link, unlike os.replace, refuses
-    an existing target, so of two concurrent runs only the first writes (#73)."""
+    an existing target, so of two concurrent runs only the first writes (#73). Without hard links, an O_EXCL reservation of
+    `path` gives the same guard (#79)."""
     temp = path.with_name(f'.{os.getpid()}.{uuid.uuid4().hex}.tmp.{path.name}')  # unique per call, threads included (#79)
     failed = False
     try:
@@ -58,8 +59,18 @@ def _write_new(path, text):
                 os.link(temp, path)
             except FileExistsError:
                 pass  # the caller compares it
-            except OSError:  # no hard links on this file system: a plain rename, without the concurrency guard
-                os.replace(temp, path)
+            except OSError:  # no hard links on this file system: reserve path with O_EXCL, then rename over the reservation
+                try:
+                    os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                except FileExistsError:
+                    pass  # another run got there first: the caller compares it
+                else:
+                    try:
+                        os.replace(temp, path)
+                    except OSError:  # names the path
+                        failed = True
+                        with contextlib.suppress(OSError):
+                            path.unlink()  # this run holds the reservation: no empty splits.json may block later runs
         except OSError:  # names the path
             failed = True
     finally:

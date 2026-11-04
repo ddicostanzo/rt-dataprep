@@ -194,6 +194,21 @@ def test_a_concurrent_run_that_writes_first_wins_and_this_one_is_refused(tmp_pat
     assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv', 'splits.json']
 
 
+def test_without_hard_links_a_concurrent_run_that_writes_first_is_kept_and_this_one_is_refused(tmp_path, monkeypatch):
+    path = write_manifest(tmp_path, TEN)
+    other = '{"SYNTHETIC_OTHER_RUN": 1}\n'
+
+    def race(source, target):
+        (tmp_path / 'splits.json').write_text(other)  # the other run lands between the existence check and the write
+        raise PermissionError('SYNTHETIC_PATH')  # no hard links here
+
+    monkeypatch.setattr(os, 'link', race)
+    with pytest.raises(ValueError, match=sp.REASON_EXISTS):
+        sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
+    assert (tmp_path / 'splits.json').read_text() == other
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv', 'splits.json']
+
+
 def test_without_hard_links_the_write_falls_back_to_a_rename(tmp_path, monkeypatch):
     path = write_manifest(tmp_path, TEN)
 
