@@ -265,16 +265,34 @@ def test_a_series_whose_header_cannot_be_read_is_refused_and_its_siblings_are_ke
 
 
 def test_an_unreadable_study_series_csv_is_one_refused_study_and_the_plan_row_is_kept(converted, monkeypatch):
-    real = pre.read_series_csv
+    real = man.read_series_csv
 
     def flaky(folder):
         if folder.name == 'study_2':
             raise OSError('SYNTHETIC_PATH')
         return real(folder)
 
-    monkeypatch.setattr(pre, 'read_series_csv', flaky)
+    monkeypatch.setattr(man, 'read_series_csv', flaky)
     assert man.manifest(converted) == (2, 1)
     assert [r['case_dir'] for r in read(converted)] == [f'{PID}/plan_1', f'{PID}/study_1/series_CT_1']
+
+
+def test_a_study_whose_check_fails_after_series_csv_reads_counts_its_rows_from_that_single_read(converted, monkeypatch):
+    real_read, real_check, reads = man.read_series_csv, man.check_study_rows, []
+
+    def counted(folder):
+        reads.append(folder.name)
+        return real_read(folder)
+
+    def flaky(study, parsed):
+        if study.name == 'study_2':
+            raise OSError('SYNTHETIC_PATH')
+        return real_check(study, parsed)
+
+    monkeypatch.setattr(man, 'read_series_csv', counted)
+    monkeypatch.setattr(man, 'check_study_rows', flaky)
+    assert man.manifest(converted) == (2, 2)  # study_2's two series rows
+    assert reads.count('study_2') == 1
 
 
 def test_only_study_n_folders_with_a_series_csv_are_walked(converted):

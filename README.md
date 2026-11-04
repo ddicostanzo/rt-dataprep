@@ -38,7 +38,7 @@ SYNTHETIC_P1/
 - `manifest` writes one row per plan folder or study series. Four columns come after the first ten: `case_type`
   (`plan` or `imaging`), `modality`, `image` (blank for plans) and `series`: a JSON list of `{"file": ..., "modality": ...}`
   for the plan's aligned series only (identity matrix and on the planning CT's grid; `[]` for imaging rows).
-- `preprocess` resamples each registered MR or PT series of a plan onto the final CT grid and writes it with `identity`.
+- `preprocess` resamples each registered MR, PT or CT series of a plan onto the final CT grid and writes it with `identity`.
   A series it cannot align (unusable matrix, no overlap, unreadable file) is left out and counted in the
   `skipped_series` column of `preprocess_report.csv`.
 - An imaging `case_dir` is a case id, `<patient>/study_<n>/series_<MOD>_<k>`, not a path. Open

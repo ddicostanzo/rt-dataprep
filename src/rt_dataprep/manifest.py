@@ -2,8 +2,8 @@
 manifest.csv of a converted or preprocessed tree (spec: f3-manifest-split): one row per <patient>/<plan folder>/ that holds a series.csv,
 and one per series of each <patient>/study_<n>/ that holds one (imaging-cases spec D9, D14-D16).
 
-Each plan goes through preprocess.check_rows, which validates series.csv and reads the CT header only. A plan it refuses is left
-out and counted. A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.csv rows, and a
+Each plan goes through preprocess.check_rows, which validates series.csv and reads the CT header only; the `series` column then
+reads the header of each identity series. A plan check_rows refuses is left out and counted. A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.csv rows, and a
 series whose header cannot be read is left out and counted on its own. The tree is only read; manifest.csv (and its dated copy) in the root is the one place the patient folder names
 appear. The log line carries counts only.
 """
@@ -16,7 +16,7 @@ import numpy as np
 
 from rt_dataprep import convert as conv
 from rt_dataprep.dicom_io import CaseRefused, write_report
-from rt_dataprep.preprocess import STUDY_FOLDER, check_rows, check_study_rows, read_info, same_grid, series_id, study_refusal_count
+from rt_dataprep.preprocess import STUDY_FOLDER, check_rows, check_study_rows, read_info, read_series_csv, same_grid, series_id, study_refusal_count
 
 log = logging.getLogger(__name__)
 
@@ -32,16 +32,14 @@ def _geometry(size, spacing):
 
 def _study_rows(patient, study):
     """(rows, refused) of one study folder: every series of a valid series.csv whose header reads, else the folder's refusal count."""
-    failed = False
     try:
-        series = check_study_rows(study)
-    except (CaseRefused, OSError):  # an unreadable series.csv refuses the study, not the run
-        failed = True
-    if failed:
-        try:
-            return [], study_refusal_count(study)
-        except OSError:
-            return [], 1
+        parsed = read_series_csv(study)
+    except OSError:  # an unreadable series.csv refuses the study, not the run
+        return [], 1
+    try:
+        series = check_study_rows(study, parsed)
+    except (CaseRefused, OSError):
+        return [], study_refusal_count(parsed[0])
     rows, refused = [], 0
     for row in series:
         try:
