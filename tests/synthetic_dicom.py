@@ -288,7 +288,7 @@ def write_rtstruct_rois(path, ct, rois, contour_images=True, sop_uid=None, **met
       'empty': an ROIContourSequence item with no ContourSequence.
       'channel': points=(N, 3) patient mm; OPEN_NONPLANAR contours of at most 10 points.
     contour_images=False leaves the ContourImageSequence (the slice list) out of the referenced series item.
-    Axial identity-orientation CT only (what write_ct_series writes). Returns its SOPInstanceUID.
+    Axial CT only (what write_ct_series writes; a flipped or feet-first orientation is fine for 'box'). Returns its SOPInstanceUID.
     """
     ds = _dataset(path, pydicom.uid.RTStructureSetStorage, 'RTSTRUCT', sop_uid=sop_uid, frame_uid=ct['frame_uid'], **meta)
     _reference_ct(ds, ct, slices=contour_images)
@@ -308,13 +308,12 @@ def write_rtstruct_rois(path, ct, rois, contour_images=True, sop_uid=None, **met
         kind = roi['kind']
         if kind == 'box':
             (z0, z1), (y0, y1), (x0, x1) = roi['box']
-            x_mm = [float(slice_headers[0].ImagePositionPatient[0]) + i * cols for i in (x0, x1)]
-            y_mm = [float(slice_headers[0].ImagePositionPatient[1]) + i * rows for i in (y0, y1)]
+            iop = np.asarray([float(v) for v in slice_headers[0].ImageOrientationPatient])  # identity unless the CT says so
+            column_axis, row_axis = iop[:3] * float(cols), iop[3:] * float(rows)  # one step along x (columns), one along y (rows)
             items = []
             for k in range(z0, z1 + 1):
-                z = float(slice_headers[k].ImagePositionPatient[2])
-                corners = [(x_mm[0], y_mm[0], z), (x_mm[1], y_mm[0], z),
-                           (x_mm[1], y_mm[1], z), (x_mm[0], y_mm[1], z)]
+                origin = np.asarray([float(v) for v in slice_headers[k].ImagePositionPatient])
+                corners = [tuple(origin + i * column_axis + j * row_axis) for i, j in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
                 item = _contour_item(len(items) + 1, 'CLOSED_PLANAR', corners)
                 item.ContourImageSequence = [_image_reference(ct['sop_uids'][k])]
                 items.append(item)

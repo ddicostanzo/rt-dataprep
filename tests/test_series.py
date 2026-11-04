@@ -14,12 +14,13 @@ import pytest
 import SimpleITK as sitk
 import synthetic_dicom as sd
 from pydicom.dataset import Dataset
-from test_convert import BOX, PID, dose_spec, edit, every_uid, make_plan, run_plan, tree_hashes
+from test_convert import BOX, PID, arr, dose_spec, edit, every_uid, make_plan, run_plan, tree_hashes
 
 from rt_dataprep import convert as conv
 from rt_dataprep import masks
 from rt_dataprep import series as ser
 from rt_dataprep.dicom_io import CaseRefused, read_header
+from rt_dataprep.organize import organize
 
 PID_B = 'SYNTHETICPTB'
 SECRET = '1.2.3.4.5'  # UID-like, in the message of the exception the tests raise
@@ -1017,3 +1018,108 @@ def test_legacy_fx_folders_convert_like_plan_folders(tree):
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome) for r in rows if r.folder.startswith('fx_')] == [('fx_2', 'converted'), ('fx_10', 'converted')]
     assert {'fx_2', 'fx_10'} <= set(listing(out / PID))
+
+
+# ---------------------------------------------------------------- hardening B6 (#53)
+
+def test_itks_out_of_memory_reading_the_planning_ct_aborts_the_run_and_leaves_no_partial_folder(tree, monkeypatch, caplog):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+
+    def execute(self):
+        raise RuntimeError('SYNTHETIC_SOURCE:179:\nFailed to allocate memory for image.')  # ITK's, a RuntimeError
+    monkeypatch.setattr(sitk.ImageSeriesReader, 'Execute', execute)
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(conv.ConvertAborted) as caught:
+        conv.convert(org, out)
+    assert str(caught.value) == conv.REASON_INTERNAL
+    assert [(r['patient'], r['folder'], r['outcome'], r['reason']) for r in report(out)] == [
+        (PID, '', conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
+    assert listing(out) == [conv.REPORT_NAME]  # no patient folder, no partial
+    assert any('MemoryError' in message for message in caplog.messages) and PID not in caplog.text
+
+
+# ---------------------------------------------------------------- hardening B6 (#21): an RTSTRUCT in a study of its own
+
+@pytest.mark.parametrize('registered', [False, True])
+def test_an_rtstruct_study_that_also_holds_another_series_still_converts_and_the_series_is_placed_by_registration(
+        tmp_path, registered):
+    src, org, out = tmp_path / 'src', tmp_path / 'org', tmp_path / 'out'
+    folder = src / PID / 'p'
+    folder.mkdir(parents=True)
+    ct = sd.write_ct_series(folder, np.zeros((4, 5, 6), int), patient_id=PID)
+    struct_study = pydicom.uid.generate_uid()  # the RTSTRUCT was exported in a study of its own ...
+    struct = sd.write_rtstruct_rois(folder / 'struct.dcm', ct, [BOX], patient_id=PID, study_uid=struct_study)
+    sd.write_rtplan(folder / 'plan.dcm', struct, np.zeros((2, 3)), patient_id=PID, study_uid=ct['study_uid'])
+    mr = put(src / PID / 'mr', study_uid=struct_study)  # ... which holds an MR series too, on a frame of its own
+    if registered:
+        reg_for(folder / 'reg.dcm', ct, mr)
+    organize(src, org)
+    rows = conv.convert(org, out).rows
+    assert (rows[0].folder, rows[0].outcome, rows[0].reason) == ('plan_1', 'converted', '')
+    assert arr(out / PID / 'plan_1' / 'liver.nii.gz').sum() == 27
+    if registered:
+        assert files_of(rows, 'plan_1') == ['planning_ct.nii.gz', 'liver.nii.gz', 'series_MR_1.nii.gz', 'series.csv']
+        assert [(r.folder, r.outcome, r.reason) for r in rows[1:]] == [('images', 'skipped', conv.REASON_NO_IMAGES)]
+        assert csv_at(out / PID / 'plan_1')[-1]['reg_matrix'] == '1 0 0 10 0 1 0 0 0 0 1 0 0 0 0 1'
+    else:
+        assert files_of(rows, 'plan_1') == ['planning_ct.nii.gz', 'liver.nii.gz', 'series.csv']
+        assert [(r.folder, r.outcome, r.files) for r in rows[1:]] == [('images', 'converted', ['series_MR_1.nii.gz', 'series.csv'])]
+        assert csv_at(out / PID / 'images')[0]['reg_matrix'] == ''
+
+
+# ---------------------------------------------------------------- hardening B6 (#42, subset): tolerance boundaries
+
+@pytest.mark.parametrize('axis', [2, 0], ids=['along-the-normal', 'sideways'])
+@pytest.mark.parametrize('deviation, kept', [(0.009, True), (0.011, False)])
+def test_a_slice_position_just_under_series_atol_is_kept_and_just_over_is_skipped(tmp_path, axis, deviation, kept):
+    positions = [[0, 0, 0], [0, 0, 2], [0, 0, 4], [0, 0, 6]]
+    positions[1][axis] += deviation  # one slice off its place on the line
+    _, items = make_series(tmp_path, **spaced(positions=positions))
+    assert (ser.check_volume(items) is not None) is kept
+    assert (ser.read_series(items) is not None) is kept
+
+
+def last_row(last_row_value, index):
+    row = [0, 0, 0, 1]
+    row[index] += last_row_value
+    return [(RIGID, [*sd.transformation_matrix(translation=(10, 0, 0))[:12], *row])]
+
+
+@pytest.mark.parametrize('bad, usable', [
+    (rigid(rotation=np.eye(3) * (1 + 4.5e-5), translation=(10, 0, 0)), True),  # |R^T R - I| = 9.0e-5
+    (rigid(rotation=np.eye(3) * (1 + 5.5e-5), translation=(10, 0, 0)), False),  # 1.1e-4
+    (last_row(0.9e-6, 2), True),
+    (last_row(1.1e-6, 2), False),
+    (last_row(0.9e-6, 3), True),
+    (last_row(1.1e-6, 3), False),
+], ids=['rigid-inside', 'rigid-outside', 'last-row-inside', 'last-row-outside', 'last-corner-inside', 'last-corner-outside'])
+def test_a_matrix_just_inside_rigid_atol_or_last_row_atol_is_used_and_just_outside_gives_an_empty_text(world, bad, usable):
+    registered, text = world.registration([world.reg(world.items(rigid(), bad))])
+    assert registered is True
+    assert (text != '') is usable
+    if usable:
+        assert np.allclose(apply(text, MR_POINT), CT_POINT, rtol=0, atol=1e-3)
+
+
+@pytest.mark.parametrize('own', ['ct', 'mr'])
+def test_a_reg_whose_own_frame_also_has_an_explicit_item_uses_that_item_not_an_extra_identity(world, own):
+    # the implied identity only fills in a frame with no item: with one present there is still exactly one matrix to use
+    if own == 'ct':
+        sequence, frame = world.items(rigid(translation=(3, 0, 0)), rigid(translation=(13, 0, 0))), world.ct_frame
+    else:
+        sequence, frame = world.items(rigid(translation=(-13, 0, 0)), rigid(translation=(-3, 0, 0))), world.mr_frame
+    registered, text = world.registration([world.reg(sequence, frame_uid=frame)])
+    assert registered is True and text != ''
+    assert np.allclose(apply(text, MR_POINT), CT_POINT, rtol=0, atol=1e-6)
+
+
+def test_a_single_slice_is_skipped_by_its_own_guard_before_any_geometry_is_read(tmp_path, monkeypatch):
+    _, items = make_series(tmp_path, shuffle=False, **spaced())
+    def read_past_the_guard(ds):
+        raise AssertionError('a single slice got past the guard')
+    monkeypatch.setattr(ser, '_pixel_spacing', read_past_the_guard)
+    monkeypatch.setattr(ser, '_position', read_past_the_guard)
+    assert ser.check_volume(items[:1]) is None and ser.check_volume([]) is None
+    with pytest.raises(AssertionError):  # the spy is live: two slices do reach the geometry
+        ser.check_volume(items[:2])
