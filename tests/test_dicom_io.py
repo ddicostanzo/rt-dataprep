@@ -202,6 +202,16 @@ def test_quiet_call_restores_everything(capfd):
         sitk.ProcessObject.SetGlobalWarningDisplay(shown)
 
 
+@pytest.mark.parametrize('error', [MemoryError(FAKE_PATH), RuntimeError(f'{FAKE_PATH}:179:\nFailed to allocate memory for image.')])
+def test_quiet_call_raises_a_bare_memory_error_when_out_of_memory(error):
+    def fail():
+        raise error
+    with pytest.raises(MemoryError) as err:
+        quiet_call(fail, REASON)
+    assert err.value.args == ()
+    assert _chain(err.value) == (None, None)
+
+
 def test_read_header_error_has_no_context(tmp_path):
     path = tmp_path / 'notes.dcm'
     path.write_text('SYNTHETIC_ not a dicom file')

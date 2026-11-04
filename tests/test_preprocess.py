@@ -636,6 +636,20 @@ def test_a_compute_failure_aborts_with_a_flushed_report_and_nothing_chained(tmp_
     assert sorted(p.name for p in out.iterdir()) == ['preprocess_report.csv']  # no partial, and the next patient was not started
 
 
+def test_running_out_of_memory_reading_a_nifti_aborts_instead_of_refusing_the_plan(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    write_plan(converted, patient='SYNTHETICPTB')
+
+    def no_memory(path):
+        raise RuntimeError('SYNTHETICPTA:179:\nFailed to allocate memory for image.')  # what ITK raises
+    monkeypatch.setattr(sitk, 'ReadImage', no_memory)
+    with pytest.raises(pre.PreprocessAborted):
+        pre.preprocess(converted, out, SMALL)
+    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='')]
+    assert sorted(p.name for p in out.iterdir()) == ['preprocess_report.csv']
+
+
 def test_each_patient_is_built_under_a_partial_name_and_renamed(tmp_path, monkeypatch):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     write_plan(converted)
