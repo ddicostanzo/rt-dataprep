@@ -482,6 +482,17 @@ def test_a_blank_id_duplicate_of_a_present_slice_does_not_refuse_the_patient(tre
     assert rows(out)[0]['outcome'] == 'organized'
 
 
+def test_a_blank_id_file_whose_sop_collides_with_another_series_still_refuses(tree):
+    src, out = tree
+    first = planning_study(src / PID / 'p')
+    other = planning_study(src / PID / 'q', tag='x')
+    ds = pydicom.dcmread(first['ct']['paths'][0])  # its SOP is present, but in the first CT series
+    ds.PatientID, ds.SeriesInstanceUID = '', other['ct']['series_uid']
+    ds.save_as(mk(src / PID / 'blank') / 'collide.dcm')
+    organize(src, out)
+    assert (rows(out)[0]['outcome'], rows(out)[0]['reason']) == ('refused', org.REASON_SPLIT_SERIES)
+
+
 def test_empty_sop_instance_uids_refuse_the_patient(tree):
     src, out = tree
     planning_study(src / PID / 'p')

@@ -89,8 +89,9 @@ def _organize_patient(folder, out_root, claimed, exclude_models):
         return PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NO_SOP_UID)
     # A blank or whitespace UID is no series, and a blank-id copy of a slice already present takes nothing away (#71).
     series_of = lambda items: {u for _, ds in items if (u := str(ds.get('SeriesInstanceUID', ''))).strip()}  # noqa: E731
-    present = {str(ds.SOPInstanceUID) for _, ds in headers}
-    extra = [(path, ds) for path, ds in blank if str(ds.get('SOPInstanceUID', '')) not in present]
+    pair = lambda ds: (str(ds.get('SOPInstanceUID', '')), str(ds.get('SeriesInstanceUID', '')))  # noqa: E731 (a SOP alone may collide, #81)
+    present = {pair(ds) for _, ds in headers}
+    extra = [(path, ds) for path, ds in blank if pair(ds) not in present]
     if series_of(extra) & series_of(headers):  # a series split between blank and real ids would be placed short
         return PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_SPLIT_SERIES)
     if name.casefold() in claimed:  # two folders, one output name: refuse, never merge
