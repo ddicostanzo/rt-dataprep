@@ -24,7 +24,7 @@ DIRECTION_ATOL = 1e-6  # equality of ImageOrientationPatient across slices
 REASON_SERIES_UNREADABLE = 'the series pixel data is unreadable'
 
 
-def _header_call(fn, *args):
+def _or_none(fn, *args):
     """fn(*args), or None when a tag is missing or odd (AttributeError, KeyError, IndexError, TypeError, ValueError)."""
     failed, result = False, None
     try:
@@ -93,7 +93,7 @@ def check_volume(slices):
     (skip) unless: single-frame files; one orientation, image size, pixel spacing and FrameOfReferenceUID; unit, orthogonal
     cosines; at least two slices; uniform step along the normal with every position (sideways too) within SERIES_ATOL_MM.
     """
-    return _header_call(_sorted_volume, slices)
+    return _or_none(_sorted_volume, slices)
 
 
 def _geometry(ordered):
@@ -114,7 +114,7 @@ def read_series(slices):
     None (skip) when check_volume skips it, a pixel read fails or the image size differs from the headers.
     """
     ordered = check_volume(slices)
-    geometry = None if ordered is None else _header_call(_geometry, ordered)
+    geometry = None if ordered is None else _or_none(_geometry, ordered)
     if geometry is None:
         return None
     size, origin, spacing, direction = geometry
@@ -175,7 +175,7 @@ def _reg_text(reg, ct_frame, series_frame, headers_by_sop):
     items = [(_item_frame(item, headers_by_sop), item) for item in reg.RegistrationSequence]
     matrices = {}
     for frame in (ct_frame, series_frame):
-        found = [_header_call(_rigid_matrix, item) for item_frame, item in items if item_frame == frame]
+        found = [_or_none(_rigid_matrix, item) for item_frame, item in items if item_frame == frame]
         matrices[frame] = found or ([np.eye(4)] if own == frame else [])  # symmetric: the REG's own frame has an identity item
     if not (matrices[ct_frame] and matrices[series_frame]):
         return None
@@ -203,9 +203,9 @@ def registration(ct_frame, series_frame, regs, headers_by_sop):
         return False, ''
     if ct_frame == series_frame:
         return True, IDENTITY
-    keyed = [(sop, reg) for reg in regs if (sop := _header_call(lambda r: str(r.SOPInstanceUID), reg)) is not None]
+    keyed = [(sop, reg) for reg in regs if (sop := _or_none(lambda r: str(r.SOPInstanceUID), reg)) is not None]
     for _, reg in sorted(keyed, key=lambda pair: pair[0]):
-        text = _header_call(_reg_text, reg, ct_frame, series_frame, headers_by_sop)
+        text = _or_none(_reg_text, reg, ct_frame, series_frame, headers_by_sop)
         if text is not None:
             return True, text
     return False, ''
@@ -233,8 +233,8 @@ def tainted_studies(headers):
     """
     studies, blind = set(), False
     for _, ds in headers:
-        if _header_call(_file_keys, ds) is None:
-            study = _header_call(lambda d: str(d.StudyInstanceUID), ds)
+        if _or_none(_file_keys, ds) is None:
+            study = _or_none(lambda d: str(d.StudyInstanceUID), ds)
             if study:
                 studies.add(study)
             else:
@@ -255,10 +255,10 @@ def candidates(headers, exclude_models):
     """
     keyed, broken = [], set()
     for path, ds in headers:
-        keys = _header_call(_file_keys, ds)
+        keys = _or_none(_file_keys, ds)
         if keys is None:  # a dropped slice may be an end slice, which check_volume cannot see: drop its whole series
             # shortcut: a file whose SeriesInstanceUID is unreadable too taints nothing, upgrade if one shows up in real data
-            broken.add(_header_call(lambda d: str(d.SeriesInstanceUID), ds))
+            broken.add(_or_none(lambda d: str(d.SeriesInstanceUID), ds))
         else:
             keyed.append((path, ds, keys))
     excluded = {study for _, _, (_, study, _, model) in keyed if any(m in model for m in exclude_models)}
@@ -271,7 +271,7 @@ def candidates(headers, exclude_models):
         unique.append((path, ds, study, modality))
     series = defaultdict(list)
     for path, ds, study, _ in unique:
-        if study not in excluded and (uid := _header_call(_candidate_series, ds)):
+        if study not in excluded and (uid := _or_none(_candidate_series, ds)):
             series[uid].append((path, ds))
     regs = [ds for _, ds, study, modality in unique if modality == 'REG' and study not in excluded]
     by_sop = {}

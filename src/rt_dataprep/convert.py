@@ -238,6 +238,7 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
     """
     found, regs, by_sop = ser.candidates(headers, exclude_models)
     converted = [(row, result, result.series_rows[0]) for row, result in outcomes if result is not None]  # row 0 is the CT row
+    assert all(ct['kind'] == 'ct' for _, _, ct in converted)
     planning = {result.ct_series_uid for _, result, _ in converted}
     found = [(uid, slices) for uid, slices in found if uid not in planning]
     if not found:
