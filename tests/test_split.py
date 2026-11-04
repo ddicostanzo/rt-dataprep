@@ -19,8 +19,9 @@ SEED_A, SEED_B = 0, 1
 TEN = [f'SYNTHETIC_P{i:02d}' for i in range(9)] + ['00123']
 
 
-def write_manifest(folder, patients, name='manifest.csv', two_plans=('SYNTHETIC_P00',)):
-    """One plan per patient, two for those in `two_plans`; only the case_dir and patient columns matter to split."""
+def write_manifest(folder, patients, name='manifest.csv', two_plans=('SYNTHETIC_P00',), imaging=()):
+    """One plan per patient, two for those in `two_plans`; a patient in `imaging` also gets two study series rows (a patient
+    only in `imaging` has no plan). Only the case_dir and patient columns matter to split."""
     folder.mkdir(exist_ok=True)
     path = folder / name
     with open(path, 'w', newline='') as handle:
@@ -28,7 +29,10 @@ def write_manifest(folder, patients, name='manifest.csv', two_plans=('SYNTHETIC_
         writer.writerow(COLUMNS)
         for patient in patients:
             for fx in (['plan_1', 'plan_2'] if patient in two_plans else ['plan_1']):
-                writer.writerow([f'{patient}/{fx}', patient, fx, '', '', '1', '', '', '', ''])
+                writer.writerow([f'{patient}/{fx}', patient, fx, '', '', '1', '', '', '', '', 'plan', 'CT', ''])
+        for patient in imaging:
+            for study, series in (('study_1', 'series_CT_1'), ('study_2', 'series_MR_1')):
+                writer.writerow([f'{patient}/{study}/{series}', patient, '', '', '', '0', '[]', '', '', '', 'imaging', series.split('_')[1], f'{series}.nii.gz'])
     return path
 
 
@@ -95,6 +99,19 @@ def test_whole_patients_per_split_and_every_case_placed(tmp_path):
             assert plans == sorted(f'{patient}/{fx}' for fx in ('plan_1', 'plan_2') if f'{patient}/{fx}' in cases)
     holder = next(name for name in ('train', 'val', 'test') if 'SYNTHETIC_P00' in obj[name])
     assert obj[holder]['SYNTHETIC_P00'] == ['SYNTHETIC_P00/plan_1', 'SYNTHETIC_P00/plan_2']
+
+
+def test_a_patients_plan_and_imaging_cases_share_one_split(tmp_path):
+    imaging = [*TEN[:5], 'SYNTHETIC_IMG_ONLY']  # five patients with plan and imaging cases, one with imaging cases only
+    obj = run(write_manifest(tmp_path, TEN, imaging=imaging))
+    placed = {patient: name for name in ('train', 'val', 'test') for patient in obj[name]}
+    assert set(placed) == {*TEN, 'SYNTHETIC_IMG_ONLY'}  # each patient is in exactly one split
+    for patient in imaging:
+        cases = obj[placed[patient]][patient]
+        assert {c for c in cases if '/study_' in c} == {f'{patient}/study_1/series_CT_1', f'{patient}/study_2/series_MR_1'}
+        assert patient == 'SYNTHETIC_IMG_ONLY' or f'{patient}/plan_1' in cases
+    every = [case for name in ('train', 'val', 'test') for cases in obj[name].values() for case in cases]
+    assert len(every) == len(set(every)) == 11 + 2 * len(imaging)
 
 
 def test_same_seed_is_byte_identical_and_two_seeds_differ_as_assignments(tmp_path):
