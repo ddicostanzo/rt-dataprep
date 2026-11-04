@@ -5,6 +5,7 @@ from DicomRTTool import DicomReaderWriter
 import synthetic_dicom as sd
 
 SPACING, ORIGIN = (0.5, 2.0, 3.0), (10.0, 20.0, 30.0)
+STUDY_DATE, STUDY_TIME = '20240315', '083000'  # SYNTHETIC
 BOX = ((1, 2), (1, 3), (2, 5))  # inclusive (z, y, x) voxel index ranges
 POINT_MM, CHANNEL_MM = (11.0, 22.0, 33.0), [(10.0, 20.0, 30.0 + 3 * k) for k in range(12)]
 ROIS = [
@@ -186,3 +187,21 @@ def test_ct_series_number_of_frames_and_no_pixel_spacing(tmp_path):
     ds = [pydicom.dcmread(p) for p in ct['paths']]
     assert {d.NumberOfFrames for d in ds} == {4}
     assert all('PixelSpacing' not in d for d in ds)
+
+
+def test_study_date_and_time_only_when_given(tmp_path):
+    (tmp_path / 'default').mkdir()
+    default = sd.write_ct_series(tmp_path / 'default', np.zeros((1, 2, 2)))
+    for modality in ('CT', 'MR', 'PT'):
+        (tmp_path / modality).mkdir()
+        series = sd.write_ct_series(tmp_path / modality, np.zeros((2, 2, 2)), modality=modality, study_date=STUDY_DATE,
+                                    study_time=STUDY_TIME)
+        assert {(d.StudyDate, d.StudyTime) for d in map(pydicom.dcmread, series['paths'])} == {(STUDY_DATE, STUDY_TIME)}
+    ds = pydicom.dcmread(default['paths'][0])
+    assert 'StudyDate' not in ds and 'StudyTime' not in ds
+    dose = tmp_path / 'dose.dcm'
+    sd.write_rtdose(dose, np.zeros((1, 2, 2)), invalid_values=True)
+    assert pydicom.dcmread(dose).StudyDate == sd.INVALID_DA
+    assert 'StudyTime' not in pydicom.dcmread(dose)
+    sd.write_rtdose(dose, np.zeros((1, 2, 2)), study_date=STUDY_DATE, study_time=STUDY_TIME)
+    assert (pydicom.dcmread(dose).StudyDate, pydicom.dcmread(dose).StudyTime) == (STUDY_DATE, STUDY_TIME)
