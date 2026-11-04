@@ -70,7 +70,10 @@ def _sorted_volume(slices):
             and abs(np.dot(row, column)) <= ORTHO_ATOL):
         return None
     pixel_spacing = np.asarray([_pixel_spacing(ds) for ds in heads])
-    if not ((pixel_spacing > 0).all()  # SetSpacing raises on a zero or negative spacing
+    rescale = np.asarray([[float(ds.get('RescaleSlope', 1)), float(ds.get('RescaleIntercept', 0))] for ds in heads])
+    # GDCM reads an inf spacing as 1.0 and a non-finite rescale as 1 or 0; allclose takes inf == inf as close.
+    if not (np.isfinite(pixel_spacing).all() and np.isfinite(rescale).all()
+            and (pixel_spacing > 0).all()  # SetSpacing raises on a zero or negative spacing
             and np.allclose(pixel_spacing, pixel_spacing[0], rtol=0, atol=SERIES_ATOL_MM)
             and len({(int(ds.Rows), int(ds.Columns)) for ds in heads}) == 1
             and len({str(ds.FrameOfReferenceUID) for ds in heads}) == 1):
