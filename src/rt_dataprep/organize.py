@@ -125,7 +125,7 @@ def _organize_patient(folder, out_root, claimed, exclude_models, workers):
         _copy_all(misc, partial / 'misc_files')
         partial.mkdir(exist_ok=True)
         partial.rename(target)
-    except OSError:
+    except BaseException:  # Ctrl-C too: no hidden half-copied folder left behind
         shutil.rmtree(partial, ignore_errors=True)
         raise
     return done(PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED), time.monotonic() - copy_started)
