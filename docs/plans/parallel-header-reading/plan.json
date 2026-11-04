@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "dicom_io: read_header_core and a pooled read helper under one quiet block",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/dicom_io.py",
+        "tests/test_dicom_io.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/dicom_io.py": "modify",
+        "tests/test_dicom_io.py": "modify"
+      },
+      "test_approach": "Red first in tests/test_dicom_io.py next to the existing read_header and quiet_call tests, in their style (capfd, caplog, recwarn, SYNTHETIC_ data via synthetic_dicom). Quiet test: write >= 16 synthetic files, one with an invalid DS value (e.g. a PixelSpacing element whose raw bytes are not a number); a control asserts that pydicom.dcmread plus value access of that file under default validation warns or logs outside any quiet block; then the pooled helper with workers=4 and step dicom_io.read_header_core (never read_header, which quiets itself) over all files leaves recwarn, the pydicom caplog records and capfd empty, and pydicom.config.settings.reading_validation_mode, logging.getLogger('pydicom').disabled and warnings.filters equal their values before. Order test: patch dicom_io.read_header_core with a stub that sleeps longer for earlier paths, assert the helper's results come back in input order. Order and Ctrl-C tests pass a step that calls dicom_io.read_header_core through the module, with the core patched. Ctrl-C test (margin structural, not temporal): workers=4, 50 paths, the patched core records calls, raises KeyboardInterrupt on the FIRST path and sleeps >= 0.5 s on every other path; assert KeyboardInterrupt propagates, len(calls) <= 2 * workers, the last path never ran, and the quiet state is restored. The quiet test's control uses warnings.simplefilter('always') inside its catch_warnings(record=True). Core test: a truncated / non-DICOM / missing file through read_header_core raises OSError whose str is REASON_UNREADABLE with __context__ and __cause__ None. Confirm the new tests fail (helper missing) before implementing; then the full suite.",
+      "criteria": [
+        "dicom_io.read_header_core(path) is today's read_header minus the _pydicom_quiet block: dcmread(stop_before_pixels=True), the iterall value access, and any Exception converted to OSError(REASON_UNREADABLE) raised after the except block (nothing chained)",
+        "read_header(path) is _pydicom_quiet around read_header_core; its behaviour and existing tests are unchanged",
+        "A pooled helper in dicom_io takes a per-path step, the paths and workers (int >= 1) and returns the step results in input order whatever the completion order; workers=1 runs through the same helper (one thread)",
+        "The helper enters _pydicom_quiet once around a ThreadPoolExecutor; the executor is created and shut down inside the quiet block",
+        "Shutdown is try/finally with executor.shutdown(cancel_futures=True), and that cancelling shutdown runs before any other shutdown or __exit__ of the executor (not a `with ThreadPoolExecutor(...)` whose __exit__ drains the queue first): any exception from a step (KeyboardInterrupt included) cancels the queued steps, and the quiet state is restored after the running ones finish; no raise inside an except block",
+        "Workers resolve read_header_core as a dicom_io module attribute at call time, so monkeypatching dicom_io.read_header_core reaches the worker threads",
+        "With workers=4 and step read_header_core, a header whose value conversion warns under default validation emits no warning, no pydicom log record and nothing on fds 1/2; pydicom's reading_validation_mode, the pydicom logger's disabled flag and warnings.filters equal their prior values afterwards, also after a KeyboardInterrupt; the test includes a control showing the same file warns without the quiet block",
+        "A comment at the helper states the assumptions: GIL build of CPython, nothing else runs in the process while the block is held, quiet_call never runs inside a worker"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "organize: pooled preamble + header step, workers kwarg, run timing line",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/organize.py",
+        "tests/test_organize.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/organize.py": "modify",
+        "tests/test_organize.py": "modify"
+      },
+      "test_approach": "Red first in tests/test_organize.py using planning_study and the tree fixture. Parametrize the existing unreadable-file and non-DICOM-file classification tests (or add one) over workers 1 and 4 and assert identical rows and copied files. Preamble OSError test: patch the preamble check (looked up at call time) to raise OSError for one path with workers=4; that patient is refused with REASON_IO_ERROR, the other organized. Repoint test_ctrl_c_still_writes_the_report_of_what_was_done from org.read_header to dicom_io.read_header_core (via getattr(dicom_io, 'read_header_core') or monkeypatch.setattr(dicom_io, 'read_header_core', ...)), parametrized over workers 1 and 4, keeping its report assertion and adding that no .partial folder is left. Timing test: caplog at INFO, one organize run; exactly one record matches the timing line, its message has only numbers and the fixed words, no 'SYNTHETIC' and no '/'. Then the full suite.",
+      "criteria": [
+        "organize(src, out, *, exclude_models=..., workers=1): the walk stays serial and is fully listed and sorted (sorted(_walk(folder))) before the pooled step runs over every listed path through the task-01 helper; the step checks the preamble (looked up at call time), then calls dicom_io.read_header_core through the module (not a from-import), so a patch of dicom_io.read_header_core reaches it",
+        "The step catches only the OSError from read_header_core and returns that path as bad (counted unreadable, copied to misc_files); a non-DICOM file returns nothing; an OSError from the preamble check propagates and refuses the patient with REASON_IO_ERROR as today; os.walk stays serial and unchanged",
+        "Headers and bad paths are in sorted-path order, as today",
+        "For the same input, workers=1 and workers=4 give identical report rows and identical copied trees in the classification tests",
+        "The organize Ctrl-C test patches dicom_io.read_header_core instead of org.read_header, runs with workers 1 and 4, keeps its report assertion and also asserts no .partial folder is left",
+        "_organize_patient returns its reading seconds, copying seconds and walked-file count next to its row on every return path (each early return included); a patient refused by an OSError contributes 0 files and 0 seconds to reading/copying (its time counts toward total only); no module-level globals",
+        "Right after the existing summary line, organize logs once at INFO: 'organize: %.1f s total, %.1f s reading, %.1f s copying, %d files, workers %d' (total = time.monotonic span of the patient loop; reading = walk + preamble + header reads; files = files the walk listed); not logged on Ctrl-C, like the summary",
+        "The timing message holds no patient id, path, UID or folder name (test asserts no 'SYNTHETIC' and no '/')"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "convert: pooled read_folder_headers, workers kwarg, run timing line",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_convert.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_convert.py": "modify"
+      },
+      "test_approach": "Red first in tests/test_convert.py using make_plan and the tree fixture. Parametrize a plan with an unreadable file and a non-DICOM file in plan_1 and in misc_files over workers 1 and 4; assert identical rows. Timing test: caplog INFO, one convert run, exactly one timing record, numbers and fixed words only, no 'SYNTHETIC', no '/'. Abort test: reuse an existing ConvertAborted test setup (e.g. the classifier AttributeError one) and assert the timing line is logged before ConvertAborted propagates. Widen the existing read_then_lose_a_slice stub to (folder, *args, **kwargs); it must still pass. Then the full suite.",
+      "criteria": [
+        "convert(org, out, *, exclude_models=..., workers=1) passes workers down to read_folder_headers(folder, workers=1), which reads its files through the task-01 helper with a step that calls dicom_io.read_header_core through the module (not a from-import), catches only its OSError and returns a marker for that file; the unreadable flag is derived from the markers, so one unreadable file never ends the folder read, exactly as today",
+        "read_folder_headers keeps its name, module and return of (headers sorted by path, unreadable flag); the existing stub patching conv.read_folder_headers (test_convert.py read_then_lose_a_slice) is widened to (folder, *args, **kwargs) and otherwise unchanged; callers with one argument still work (workers defaults to 1)",
+        "For the same input with an unreadable file and a non-DICOM file in a plan folder and in misc_files, workers=1 and workers=4 give identical report rows",
+        "_convert_patient returns its reading seconds and file count (headers read, i.e. len of the headers read_folder_headers returned) next to its rows on every return path; a patient refused by an OSError or ending in an abort contributes 0 files and 0 reading seconds (its time counts toward total, hence converting); no module-level globals",
+        "Right after the existing summary line, convert logs once at INFO: 'convert: %.1f s total, %.1f s reading, %.1f s converting, %d files, workers %d' (converting = total - reading, salvage reads included); on ConvertAborted it is logged before the raise, as the summary is; not logged on Ctrl-C",
+        "The timing message holds no patient id, path, UID or folder name (test asserts no 'SYNTHETIC' and no '/')"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "CLI --workers on organize and convert, and the end-to-end equivalence test",
+      "depends_on": [
+        "task-02",
+        "task-03"
+      ],
+      "files": [
+        "src/rt_dataprep/__main__.py",
+        "tests/test_cli.py",
+        "tests/test_convert.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_cli.py": "modify",
+        "tests/test_convert.py": "modify"
+      },
+      "test_approach": "CLI tests in tests/test_cli.py in its existing cli.main([...]) / capfd style: '--workers 0', '--workers -1' and '--workers x' raise SystemExit(2); '--workers 3' reaches organize and convert as workers=3 (monkeypatch the names __main__ imports and record kwargs); no flag gives workers=1. Equivalence test in tests/test_convert.py (make_plan writes the organize source; two fresh conversions are expected to be byte-identical, and if the workers=1 control run against itself is not, stop and report rather than loosening the comparison): a synthetic export of two or more patients (make_plan, with doses and rois so conversion writes real files) organized then converted once with workers=1 and once with workers=4 into separate output roots; tree_hashes of both organized trees and both converted trees are equal after filtering out the dated report copies (names matching <report>_<UTC time>.csv), and the report rows are equal. Then the full suite and lint.",
+      "criteria": [
+        "organize and convert subcommands accept --workers N (type: int >= 1, default 1) and pass it as workers=N; 0, negative and non-integer values are argparse usage errors (exit 2)",
+        "The --workers help text says it is the number of threads reading headers and that output is the same for any value",
+        "No other subcommand gains the flag; preprocess, manifest and split are unchanged",
+        "End-to-end: organize then convert with workers=1 and workers=4 give equal tree_hashes for the organized and the converted trees (dated report copies filtered out in the test) and equal report rows"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02",
+      "task-03"
+    ],
+    [
+      "task-04"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-04",
+    "spec": "docs/specs/2026-11-04-parallel-header-reading.md",
+    "profile": "project-profile.yml",
+    "issues": "refs #2 (closed later only if the owner's real-export timing shows a gain or proves none)",
+    "guardrails": [
+      "Commit gate: at most 5 staged files per commit; the private-API scan flags a dotted private reference (module, dot, underscore name) in added lines, findings.md and comments included: tests use getattr(module, '_name')  # noqa: B009, and prose names private helpers bare",
+      "No raise inside an except block (test_no_case_refused_is_raised_inside_an_except_block and the masks twin): store the exception, raise after; executor cleanup is try/finally",
+      "PHI: log lines carry fixed words and numbers only; test data SYNTHETIC_-prefixed; no .dcm committed",
+      "Vault pydicom-validates-lazily-on-first-tag-access: every tag value is converted inside the quiet block (read_header_core keeps the iterall access, and the helper holds the quiet block around it)",
+      "Vault audit-hook-input-trace-misses-forkserver-pool-workers: process workers inherit no state; this plan uses threads only",
+      "New DICOM guards: edit fixtures through dcmread/dcmwrite and check the value reads back; run each new test against the old code first",
+      "Run tests with uv run --group dev pytest (vault memory rt-dataprep/pre-push-uses-stale-dotvenv-pytest)",
+      "Vault full-suite-only-flakes-scale-with-cpu-contention and concurrency-test-elapsed-threshold-flake-rendezvous-event: concurrency tests assert structural bounds (call counts with a >= 0.5 s margin, which path never ran), never elapsed-time thresholds"
+    ]
+  }
+}
