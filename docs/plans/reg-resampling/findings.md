@@ -38,3 +38,21 @@ Append under `## <task-id>`: files changed, decisions, gotchas, and every change
 - Gotcha: step-prefix names (reshape_resample_initialresample_series_MR_1.nii.gz) pass because `series_id` strips them; the MOD check runs on the stripped id.
 - Existing tests changed: `test_series_csv_keeps_every_column_renames_files_and_drops_series_rows` (tests/test_preprocess.py): it now writes a small series_MR_1.nii.gz first, because its series file was missing and check_rows now refuses that; its assertions are unchanged. No other existing test changed (test_manifest.py's monkeypatched `check_rows` wrapper passes the tuple through, so it needed no edit).
 - New tests: 12 in tests/test_preprocess.py (check_rows shape and order, missing file, 7 bad-row cases, step prefixes, no header read, reworded reasons) and 1 in tests/test_manifest.py (missing series file counted refused). Red evidence: with src reverted 13 failed (shape, refusals, wording), 162 passed.
+
+## task-03
+- Files: src/rt_dataprep/preprocess.py, tests/test_preprocess.py, docs/plans/reg-resampling/findings.md.
+- New in preprocess.py: `process_series(native, final_ct, matrix, rescale_hu)` (inverse of the 4x4 as an `sitk.AffineTransform`, identity -> `sitk.Transform()`; the inverse is computed outside `quiet_call`, the resample (and the CT-series rescale) inside, REASON_INTERNAL) and `read_series(path)` (None for REASON_FILE_UNREADABLE, any other refusal re-raised after the except block). `preprocess_plan` loops `series` after the existing rows: `reg_matrix_array` None -> skip; unreadable -> skip; resampled; native has a nonzero voxel and the result none -> skip; else written, `del native, image`. Series never take the copy branch and skip `check_crop` and `same_grid`.
+- Output row: `row | {file renamed, reg_matrix 'identity', frame_of_reference_uid of the CT row}`, after the existing rows; `files` lists them before series.csv. Name: `output_name(file, steps, ct=modality == 'CT')`.
+- `preprocess_plan` now returns `(files, skipped)`; `preprocess_one` passes it to `PreprocessRow.skipped_series` (default 0). The report gains `skipped_series` after `files`; the closing log line ends `; %d registered series skipped`. No per-skip log line (the report carries the count; a log line per skip is deferred).
+- Gotcha: a series row from `series_row()` has `reg_matrix=''`, i.e. it is left out; tests that need a kept series pass `reg_matrix='identity'`.
+- Gotcha: landmark tests for (c) build the matrix so the landmark lands exactly on a final voxel centre (translation = q - R p), so the output maximum is unique whatever the interpolation weights; (a), (b) are axis-aligned, where the nearest voxel per axis is the maximum.
+- Direction mutant (inverse -> forward matrix in `process_series`, reverted): 5 failed, 159 passed in tests/test_preprocess.py: AC2 (b), (c), AC3, AC4 and AC9 fail; (a) and the identity tests pass, as they must.
+- Red evidence: with the new tests and pin updates in place and src untouched, 21 failed (15 new tests, 6 updated pins), 143 passed.
+- Suite: 752 passed, 4 skipped (baseline 737 + 15 new); ruff clean.
+- Existing tests changed (all in tests/test_preprocess.py):
+  - `report_rows` helper: asserts the header `[..., 'files', 'skipped_series']` (the preprocess_report.csv header pin).
+  - `test_preset_writes_the_prefixed_files_and_leaves_the_input_alone`: the expected report row gains `skipped_series='0'`.
+  - `test_a_compute_failure_aborts_with_a_flushed_report_and_nothing_chained`, `test_running_out_of_memory_reading_a_nifti_aborts_instead_of_refusing_the_plan` and the study abort test `test_an_internal_error_in_a_study_series_aborts_the_run_and_removes_the_partial`: the expected report row gains `skipped_series='0'`.
+  - `test_the_run_log_counts_plan_rows_and_imaging_rows_separately`: the expected closing line ends `; 0 registered series skipped`.
+  - `test_series_csv_keeps_every_column_renames_files_and_drops_series_rows` renamed `test_series_csv_keeps_every_column_and_renames_files_and_lists_the_aligned_series_last`: its series row has `reg_matrix='identity'`, and the output now lists the aligned series last (file renamed, other columns equal).
+  - `test_no_log_line_carries_a_path_a_folder_name_or_a_series_value`: also runs a plan_3 with a kept and a skipped registered series, and forbids `series_MR` in the log text.
