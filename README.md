@@ -194,6 +194,14 @@ plan series. A value of 1 marks acquired support and 0 marks outside-FOV fill or
 each geometric step with nearest-neighbor interpolation and zero padding; true zero-valued image voxels remain valid.
 Auxiliary masks do not add rows to `series.csv`. The manifest lists them only when their headers match the relevant image grid.
 
+An optional `--min-mask-retention FRACTION` refuses a plan when resampling retains less than the configured fraction of
+a mask's physical foreground volume, even when a few voxels survive. Binary masks use foreground count times voxel
+volume; linear masks integrate fractional occupancy times voxel volume. The limit must be greater than 0 and at most 1,
+with a relative floating-point comparison tolerance of 1e-6. No clinical threshold is imposed by default; select one for
+the intended analysis. Growth, shape distortion and registration accuracy are separate checks. A refused plan is removed
+from output and recorded with a fixed reason; sibling plans can continue. As with other plan refusals, review the report
+even when the CLI exits successfully. Python uses `PreprocessSteps(min_mask_retention=...)`.
+
 Optional `--ahe` applies per-volume min-max scaling followed by scikit-image CLAHE (default kernel of one eighth of each
 axis, 128 bins, clip limit 0.05) to planning CT and CT/MR/PT image series. It is off by default and never equalizes dose,
 masks, or applicator coordinates. It produces float32 image values in [0, 1]; these are contrast values, not HU or SUV.
