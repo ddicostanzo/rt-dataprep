@@ -171,16 +171,31 @@ def process_mask(mask, final_ct, steps):
 
 def process_series(native, final_ct, matrix, rescale_hu):
     """`native` (HU-rescaled first when rescale_hu) linearly resampled once onto final_ct as float32; 0 outside its FOV.
-    `matrix` is series frame -> CT frame; Resample maps output points to input points, so the transform is its inverse."""
+    `matrix` is series frame -> CT frame (series_transform)."""
+    transform = series_transform(matrix)
+    def run():
+        image = rescale(native) if rescale_hu else native
+        return sitk.Resample(image, final_ct, transform, sitk.sitkLinear, 0.0, sitk.sitkFloat32)
+    return quiet_call(run, REASON_INTERNAL)
+
+
+def series_transform(matrix):
+    """Resample's transform for `matrix` (series frame -> CT frame): Resample maps output points to input points, so its inverse."""
     transform = sitk.Transform()
     if not np.array_equal(matrix, np.eye(4)):
         inverse = np.linalg.inv(matrix)
         transform = sitk.AffineTransform(3)
         transform.SetMatrix(inverse[:3, :3].ravel().tolist())
         transform.SetTranslation(inverse[:3, 3].tolist())
+    return transform
+
+
+def covers_ct(native, final_ct, matrix):
+    """Whether any final_ct voxel falls inside native's FOV under `matrix`, whatever native's values (D6)."""
     def run():
-        image = rescale(native) if rescale_hu else native
-        return sitk.Resample(image, final_ct, transform, sitk.sitkLinear, 0.0, sitk.sitkFloat32)
+        fov = sitk.Image(native.GetSize(), sitk.sitkUInt8) + 1
+        fov.CopyInformation(native)
+        return has_voxels(sitk.Resample(fov, final_ct, series_transform(matrix), sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8))
     return quiet_call(run, REASON_INTERNAL)
 
 
@@ -498,7 +513,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
             continue
         is_ct = row['modality'] == 'CT'
         image = process_series(native, final, matrix, is_ct and steps.rescale)
-        if has_voxels(native) and not has_voxels(image):  # entirely outside the CT
+        if not covers_ct(native, final, matrix):  # entirely outside the CT
             skipped += 1
         else:
             name = output_name(row['file'], steps, ct=is_ct)

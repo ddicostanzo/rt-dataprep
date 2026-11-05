@@ -54,8 +54,9 @@ the registered MR/PT volumes voxel-aligned with the final CT, and a manifest col
 - D5 Unusable matrix: a series whose `reg_matrix` is not `identity` and is `''`, not 16 finite numbers, or not rigid (the same rigidity
   test `series.py` applies to REG items, factored into one shared helper) is left out: no output file, no output
   `series.csv` row. The plan is still preprocessed.
-- D6 No overlap: a series that has a nonzero voxel natively but none after resampling is left out, as in D5. Partial
-  coverage is kept, 0 outside. Series skip `check_crop` and the dose/mask `same_grid` check (both assume the CT grid
+- D6 No overlap: a series whose FOV covers no CT voxel after resampling is left out, as in D5. The test is geometric
+  (an all-ones copy resampled nearest-neighbour), not by values: an all-zero series that overlaps is kept, and one
+  overlapping only in zero background is kept (#121, #126). Partial coverage is kept, 0 outside. Series skip `check_crop` and the dose/mask `same_grid` check (both assume the CT grid
   and would refuse the plan).
 - D7 Counting: `preprocess_report.csv` gains a `skipped_series` column (as `convert_report.csv` has), set on plan rows
   to the number of series left out by D5, D6 and D8, and 0 on every other row (patient, study, study series). The
