@@ -82,7 +82,7 @@ def run(workspace):
     if any(row.outcome != 'converted' or row.skipped_series for row in conversion.rows):
         raise RuntimeError('synthetic conversion had an unexpected outcome')
 
-    # All four geometric steps (the CLI's --initial-resample --rescale --resample --reshape), with a deliberately compact grid for a quick local example.
+    # The four legacy steps, three geometric plus the CT rescale (the CLI's --initial-resample --rescale --resample --reshape), with a deliberately compact grid for a quick local example.
     steps = PreprocessSteps(resample=True, rescale=True, harmonize_spacing=True, reshape=True,
                             new_spacing=(1, 1, 2), final_spacing=(1.25, 1.25, 2), new_shape=(16, 16, 8))
     preprocessing = preprocess(converted, processed, steps)
