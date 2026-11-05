@@ -311,7 +311,10 @@ uv run python -m rt_dataprep convert /secure/organized /secure/converted --overw
 - **When it replaces.** The patient is rebuilt in a hidden partial folder. The old folder is replaced only once the new
   output holds at least one successful case. If every case was refused or skipped (for example after a transient read
   error), the old folder is kept unchanged. That patient's report row shows the refusal, and the summary line counts it
-  as kept. Each summary line ends with `N replaced, N kept`.
+  as kept. Each summary line ends with `N replaced, N kept`. A patient refused for a file system error, or an `organize`
+  patient refused before its name is known, also keeps its old folder but is not counted. Replacement is per patient
+  folder: when one case succeeds, cases refused in the new run are not carried over from the old folder, so check the
+  report before discarding any copy of the old output.
 - **Only this run's patients.** Output folders with no matching input patient are never touched.
 - **Interrupted runs.** During a swap the old output sits in a hidden `.<name>.old` folder. If a run is interrupted, the
   next run of the same stage restores it when `<name>` is missing, or deletes it when `<name>` was already replaced. This
@@ -323,7 +326,8 @@ uv run python -m rt_dataprep convert /secure/organized /secure/converted --overw
   that differ only in letter case, because a case-insensitive file system would map them to one folder.
 - **Downstream outputs are not updated.** After replacing converted output, rerun `preprocess` (into a fresh or
   `--overwrite` output root), `manifest`, and `split`. `manifest.csv` and `splits.json` are not regenerated for you, and
-  `split` still refuses changed content, so write the new cohort record to a separate output root.
+  `split` still refuses changed content: once a root holds a `splits.json`, preprocess the new cohort into a fresh root
+  rather than overwriting that one.
 - **One writer per output root.** `--overwrite` does not coordinate simultaneous runs.
 
 ## Python API
