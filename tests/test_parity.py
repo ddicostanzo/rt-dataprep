@@ -68,3 +68,11 @@ def test_cli_prints_no_identifiers(tmp_path, capfd):
     assert s['refused'] == {parity.REASON_UNREADABLE: 1}
     assert s['counts'] == {'pooled_folders': 1} and s['masks'] == {}  # a failed pair adds nothing but its refusal
     assert all(secret not in printed.out + printed.err for secret in (tc.PID, str(tmp_path)))
+
+
+def test_a_three_part_root_or_grouping_folder_is_searched(tmp_path):
+    out, pooled, old = build(tmp_path)
+    nested = tmp_path / 'legacy_pooled_data' / 'site_a_b'
+    nested.mkdir(parents=True)
+    shutil.move(old, nested / old.name)
+    assert parity.run(out, tmp_path / 'legacy_pooled_data')['counts']['compared'] == 1

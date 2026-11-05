@@ -34,14 +34,14 @@ REASON_UNREADABLE = 'a file of the pair is unreadable or malformed'
 
 
 def pooled_folders(pooled):
-    """[(mrn, fx, folder)] for every <mrn>_<x>_<fx> folder holding files, never descending into one (the rnt rule)."""
+    """[(mrn, fx, folder)] for every <mrn>_<x>_<fx> folder holding files, never descending into one (the rnt rule).
+    A three-part name without files (the root, a grouping folder) is descended into."""
     out = []
     for root, dirs, files in os.walk(pooled):
         leaf = Path(root).name.split('_')
-        if len(leaf) == 3:
+        if len(leaf) == 3 and files:
             dirs[:] = []
-            if files:
-                out.append((leaf[0], leaf[2], Path(root)))
+            out.append((leaf[0], leaf[2], Path(root)))
     return sorted(out, key=lambda t: str(t[2]))
 
 
