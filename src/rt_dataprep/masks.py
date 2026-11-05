@@ -56,9 +56,11 @@ def classify(struct, plan, frame_uid, taken=()):
     contours = {int(c.ReferencedROINumber): c for c in struct.get('ROIContourSequence', [])}
     interpreted = {int(o.ReferencedROINumber): str(o.get('RTROIInterpretedType', ''))
                    for o in struct.get('RTROIObservationsSequence', [])}
-    channel_ids = {}
+    channel_ids, referenced_rois = {}, set()
     for setup in plan.get('ApplicationSetupSequence', []):
         for channel in setup.get('ChannelSequence', []):
+            if 'ReferencedROINumber' in channel:  # referenced with or without an applicator id: never a droppable twin
+                referenced_rois.add(int(channel.ReferencedROINumber))
             if 'ReferencedROINumber' in channel and 'SourceApplicatorID' in channel:
                 channel_ids.setdefault(int(channel.ReferencedROINumber), str(channel.SourceApplicatorID))
     result, apps = RoiPlan(), []
@@ -73,7 +75,7 @@ def classify(struct, plan, frame_uid, taken=()):
             raise CaseRefused(REASON_ROI_FRAME)
         if 'OPEN_NONPLANAR' in types or interpreted.get(number) == 'BRACHY_CHANNEL':
             stem = ''.join(c for c in channel_ids.get(number, name) if c.isalnum())
-            apps.append((stem, np.concatenate(points), name, number in channel_ids))
+            apps.append((stem, np.concatenate(points), name, number in referenced_rois))
         else:
             planar = [p for p, item in zip(points, items, strict=True) if str(item.ContourGeometricType) != 'POINT']
             result.kept.append((number, name, format_name(name) + SUFFIX, planar))

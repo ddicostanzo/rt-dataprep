@@ -477,6 +477,13 @@ def test_an_unreferenced_applicator_twin_of_a_plan_channel_is_dropped(tmp_path):
     assert np.allclose(np.loadtxt(case / 'Ring4.nii.gz'), channel_points(6), atol=1e-3)  # the referenced channel's points
 
 
+def test_a_channel_without_an_applicator_id_still_counts_as_referenced(tmp_path):
+    rois = [dict(number=1, name='Ch 1', kind='channel', points=channel_points(6)),
+            dict(number=2, name='Ring4', kind='channel', points=channel_points(6) + 1)]  # referenced, by a channel with no id
+    channels = [dict(applicator_id='Ring 4', dwells_mm=np.zeros((2, 3)), roi=1), dict(dwells_mm=np.zeros((2, 3)), roi=2)]
+    assert refused(tmp_path, make_plan(tmp_path, rois, channels)) == masks.REASON_ROI_NAMES
+
+
 def test_an_applicator_named_like_a_mask_gets_the_channel_suffix(tmp_path):
     rois = [box(1, 'Cylinder 1', (1, 2), (1, 2), (1, 2)), dict(number=2, name='x', kind='channel', points=channel_points(3))]
     channels = [dict(applicator_id='Cylinder 1', dwells_mm=np.zeros((2, 3)), roi=2)]
