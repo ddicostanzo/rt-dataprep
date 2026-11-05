@@ -269,7 +269,9 @@ def candidates(headers, exclude_models):
     ManufacturerModelName cannot be read is dropped first, and so is the series it belongs to (when that UID reads).
     series: [(SeriesInstanceUID, [(path, header)])] of the CT/MR/PT series, first-seen order; localizer files are dropped one
     by one, files without a SeriesInstanceUID are dropped, and so is every file of a study that holds a file whose
-    ManufacturerModelName contains an excluded model (case-sensitive substring) or that has no StudyInstanceUID.
+    ManufacturerModelName contains an excluded model (case-sensitive substring) or that has no StudyInstanceUID tag.
+    Explicitly empty study tags stay in `series` so the caller can reject and count the affected series, including a
+    whitespace-only UI that pydicom normalized to ''. Such tags never qualify a REG.
     regs: the REG headers outside those studies. headers_by_sop: {SOPInstanceUID: header} of all kept files, excluded
     studies and localizers included. The caller still removes the planning CTs of converted plans from `series`.
     """
@@ -282,7 +284,6 @@ def candidates(headers, exclude_models):
         else:
             keyed.append((path, ds, keys))
     excluded = {study for _, _, (_, study, _, model) in keyed if any(m in model for m in exclude_models)}
-    excluded.add('')
     unique, seen = [], set()
     for path, ds, (sop, study, modality, _) in keyed:
         if sop and sop in seen:
@@ -291,9 +292,9 @@ def candidates(headers, exclude_models):
         unique.append((path, ds, study, modality))
     series = defaultdict(list)
     for path, ds, study, _ in unique:
-        if study not in excluded and (uid := _or_none(_candidate_series, ds)):
+        if study not in excluded and (study or 'StudyInstanceUID' in ds) and (uid := _or_none(_candidate_series, ds)):
             series[uid].append((path, ds))
-    regs = [ds for _, ds, study, modality in unique if modality == 'REG' and study not in excluded]
+    regs = [ds for _, ds, study, modality in unique if modality == 'REG' and study and study not in excluded]
     by_sop = {}
     for _, ds, (sop, *_) in keyed:
         by_sop.setdefault(sop, ds)

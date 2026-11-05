@@ -807,18 +807,101 @@ def test_b4_excluded_model_studies_and_localizers_are_written_nowhere_and_not_co
     assert np.array_equal(sitk.GetArrayFromImage(nii(study(out) / 'series_MR_1.nii.gz')), VALUES.astype(np.float32))
 
 
-def test_b4_a_whitespace_only_study_uid_is_dropped_like_an_absent_one(tree):
+@pytest.mark.parametrize('blank_uid', ['  ', '\t', ' \t\r\n '], ids=['spaces', 'tab', 'mixed'])
+@pytest.mark.parametrize('modality', ser.IMAGE_MODALITIES)
+def test_a_whitespace_only_study_uid_is_skipped_and_counted(tree, blank_uid, modality):
     org, out = tree
     misc = org / PID / 'misc_files'
-    kept = put(misc, prefix='kept')
-    blank = put(misc, prefix='blank')
+    kept = put(misc, prefix='kept', modality=modality)
+    blank = put(misc, prefix='blank', modality=modality)
     for path in blank['paths']:
         with pytest.warns(UserWarning, match='Invalid value for VR UI'):  # pydicom warns on writing spaces as a UI
-            edit(path, lambda ds: setattr(ds, 'StudyInstanceUID', '  '))
-    assert {pydicom.dcmread(path).StudyInstanceUID for path in blank['paths']} == {''}  # read back stripped, so candidates drops it
+            edit(path, lambda ds: setattr(ds, 'StudyInstanceUID', blank_uid))
+    assert {pydicom.dcmread(path).StudyInstanceUID for path in blank['paths']} == {''}  # pydicom strips UI whitespace
     rows = conv.convert(org, out).rows
-    assert [(r.folder, r.outcome, r.skipped_series) for r in rows] == [('studies', 'converted', 0), ('study_1/series_MR_1', 'converted', 0)]
+    assert [(r.folder, r.outcome, r.skipped_series) for r in rows] == [
+        ('studies', 'converted', 1), (f'study_1/series_{modality}_1', 'converted', 0)]
+    assert [r['skipped_series'] for r in report(out)] == ['1', '0']
     assert study_uids(out) == {kept['series_uid']} and listing(out / PID) == ['study_1']
+
+
+@pytest.mark.parametrize('blank_uid', ['  ', '\t', ' \t\r\n '], ids=['spaces', 'tab', 'mixed'])
+@pytest.mark.parametrize('with_valid', [False, True], ids=['all-unsafe', 'valid-siblings'])
+def test_raw_blank_study_uids_never_group_unrelated_series_or_change_valid_output(
+        tree, tmp_path, monkeypatch, capfd, caplog, recwarn, blank_uid, with_valid):
+    org, out = tree
+    misc = org / PID / 'misc_files'
+    frame = pydicom.uid.generate_uid()
+    control = tmp_path / 'control'
+    if with_valid:
+        plan = make_plan(org / PID / 'plan_1')
+        frame = plan['ct']['frame_uid']  # unsafe series would also be registered to this plan
+        for modality in ser.IMAGE_MODALITIES:
+            put(misc, prefix=f'good_{modality}', modality=modality, frame_uid=frame,
+                study_uid='1.9.1' if modality != 'PT' else '1.9.2', study_date=STUDY_D2)
+        conv.convert(org, control)
+    unsafe = [put(misc, prefix=f'bad_{modality}', modality=modality, frame_uid=frame,
+                  study_date=STUDY_D1) for modality in ser.IMAGE_MODALITIES]
+    assert len({s['study_uid'] for s in unsafe}) == 3  # unrelated studies before their identifiers become blank
+    unsafe_uids = {s['series_uid'] for s in unsafe}
+    real_headers = conv.read_folder_headers
+
+    def headers(folder, workers=1):
+        found, unreadable = real_headers(folder, workers)
+        for _, ds in found:
+            if str(ds.get('SeriesInstanceUID', '')) in unsafe_uids:
+                # Exercise decoded raw text independently of pydicom's UI normalization, without private attributes.
+                ds.add_new('StudyInstanceUID', 'LO', blank_uid)
+                assert str(ds.StudyInstanceUID) == blank_uid
+        return found, unreadable
+
+    monkeypatch.setattr(conv, 'read_folder_headers', headers)
+    real_read, read_uids = ser.read_series, []
+
+    def read(slices):
+        read_uids.append(str(slices[0][1].SeriesInstanceUID))
+        return real_read(slices)
+
+    monkeypatch.setattr(ser, 'read_series', read)
+    before = tree_hashes(org)
+    caplog.set_level(logging.DEBUG)
+    caplog.clear()
+    recwarn.clear()
+    capfd.readouterr()
+    rows = conv.convert(org, out).rows
+    assert tree_hashes(org) == before
+    assert unsafe_uids.isdisjoint(read_uids)  # rejected before any pixel read or destination assignment
+    summary = studies_row(rows)
+    assert summary.skipped_series == 3
+    assert next(r for r in report(out) if r['folder'] == 'studies')['skipped_series'] == '3'
+    assert hidden_names(out) == []
+    if with_valid:
+        assert summary.outcome == 'converted' and summary.reason == ''
+        assert listing(out / PID) == ['plan_1', 'study_1', 'study_2']
+        expected_files = {p.relative_to(control / PID) for p in (control / PID).rglob('*') if p.is_file()}
+        assert {p.relative_to(out / PID) for p in (out / PID).rglob('*') if p.is_file()} == expected_files
+        for relative in expected_files:
+            actual, expected = out / PID / relative, control / PID / relative
+            if relative.name == conv.SERIES_NAME:
+                assert actual.read_bytes() == expected.read_bytes()
+            else:
+                actual_image, expected_image = nii(actual), nii(expected)
+                assert np.array_equal(sitk.GetArrayFromImage(actual_image), sitk.GetArrayFromImage(expected_image))
+                assert (actual_image.GetSize(), actual_image.GetSpacing(), actual_image.GetOrigin(),
+                        actual_image.GetDirection(), actual_image.GetPixelID()) == (
+                    expected_image.GetSize(), expected_image.GetSpacing(), expected_image.GetOrigin(),
+                    expected_image.GetDirection(), expected_image.GetPixelID())
+    else:
+        assert [(r.folder, r.outcome, r.reason, r.files) for r in rows] == [
+            ('studies', 'skipped', conv.REASON_NO_STUDIES, [])]
+        assert listing(out / PID) == []
+    captured = capfd.readouterr()
+    texts = [captured.out, captured.err, caplog.text, *(str(w.message) for w in recwarn.list),
+             *(r.reason for r in rows)]
+    secrets = [PID, str(tmp_path), STUDY_D1, STUDY_D2, *every_uid(misc)]
+    if with_valid:
+        secrets += every_uid(plan['folder'])
+    assert [s for s in secrets for t in texts if s in t] == []
 
 
 def copy_to(paths, folder):
