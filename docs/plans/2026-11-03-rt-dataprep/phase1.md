@@ -180,11 +180,11 @@ aggregate counts only, with no identifiers. Run on N ≥ 20 fractions. Pass crit
   separately with a Pearson r ≥ 0.999, because of the uncertainty about the legacy torchio/SimpleITK handoff after
   AHE.
 - Masks: Dice ≥ 0.98 for each OAR after thresholding at 0.5.
-- Applicator text files: point arrays equal within 1e-3.
-- Dose is **not** compared to legacy, because legacy dose was unscaled. When the new native-grid CT is
-  `geometry_equal` to rnt's `ct.nii.gz`, the new native-grid dose must match rnt's `dose_gy.nii.gz` within
-  1e-4 Gy, since both come from the same `resample_dose`. If the grids differ, no dose tolerance applies; record
-  the grid mismatch count instead.
+- Applicator text files: not checked. The npz pooled layout holds `dwells.npz`, not Ring/Tandem text files.
+- Dose: reported as information only (max abs diff in Gy, legacy max and Pearson r when the grids are equal), with no
+  pass/fail. The legacy `dose_gy.nii.gz` is the RTDOSE resampled once onto `ct.nii.gz`. The new dose is resampled
+  onto the native CT and then again by preprocess, so no tight tolerance can hold. (The earlier 1e-4 Gy criterion
+  assumed a native-grid CT equal to `ct.nii.gz`, which cannot be.)
 
 **Organize parity** comes later and is separate. A fresh DICOM_Transport export is organized and then compared to
 `raw/` by the `rtplan_uid` read from each tree's RTPLAN, never by `fx_<n>`. Legacy numbering depended on

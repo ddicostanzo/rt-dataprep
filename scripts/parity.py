@@ -6,8 +6,8 @@ Parity of a preprocessed tree against rnt's legacy pooled folders (phase1.md, "P
 A pooled folder <mrn>_<x>_<fx> (rnt's per_fraction_dataframe naming) pairs with PREPROCESSED/<mrn>/plan_<fx>/; the
 new files are found through that folder's series.csv. Per pair: the CT (ct.nii.gz) by geometry, max abs difference
 and Pearson r; each legacy structure mask (<structure>.nii.gz) against the new mask of the same format_name, by Dice
-after thresholding both at 0.5; dose_gy.nii.gz against the new dose when the grids are equal; Ring/Tandem text files
-against a new applicator file of the same name. Prints a JSON summary of counts and distributions only: no folder
+after thresholding both at 0.5; dose_gy.nii.gz against the new dose when the grids are equal, as information only (the
+new dose is resampled twice, legacy once, so no tolerance applies). Prints a JSON summary of counts and distributions only: no folder
 name, path, UID or exception text.
 """
 import argparse
@@ -24,8 +24,7 @@ import SimpleITK as sitk
 from rt_dataprep.masks import format_name
 
 STRUCTURES = ('hrctv', 'bladder', 'rectum', 'sigmoid', 'bowel', 'body')
-APPLICATORS = ('Ring.nii.gz', 'Tandem.nii.gz')
-CT_TOL, DOSE_TOL_GY, DICE_MIN, POINT_TOL = 1e-3, 1e-4, 0.98, 1e-3
+CT_TOL, DICE_MIN = 1e-3, 0.98
 SPACING_TOL, ORIGIN_TOL_MM = 1e-4, 1e-3
 
 REASON_NEW_MISSING = 'no new plan folder with a series.csv for the pooled folder'
@@ -47,8 +46,8 @@ def pooled_folders(pooled):
 
 
 def new_files(folder):
-    """{'ct': path, 'dose': path, 'mask': {format_name: path}, 'applicator': {file name: path}} from series.csv."""
-    found = {'mask': {}, 'applicator': {}}
+    """{'ct': path, 'dose': path, 'mask': {format_name: path}} from series.csv."""
+    found = {'mask': {}}
     with open(folder / 'series.csv', newline='', encoding='utf-8') as f:
         for row in csv.DictReader(f):
             path = folder / row['file']
@@ -56,8 +55,6 @@ def new_files(folder):
                 found[row['kind']] = path
             elif row['kind'] == 'mask':
                 found['mask'][format_name(row['roi_name'])] = path
-            elif row['kind'] == 'applicator':
-                found['applicator'][row['file']] = path
     return found
 
 
@@ -96,6 +93,14 @@ class Tally:
         self.values = collections.defaultdict(list)
         self.masks = {s: collections.Counter() for s in STRUCTURES}
 
+    def merge(self, other):
+        self.counts.update(other.counts)
+        self.size_delta.update(other.size_delta)
+        for k, v in other.values.items():
+            self.values[k].extend(v)
+        for s, c in other.masks.items():
+            self.masks[s].update(c)
+
     def summary(self):
         def dist(v):
             return {'n': len(v), 'min': min(v), 'median': float(np.median(v)), 'max': max(v)} if v else {'n': 0}
@@ -103,11 +108,11 @@ class Tally:
                 'ct_size_delta_xyz': {str(k): n for k, n in sorted(self.size_delta.items())},
                 'masks': {s: dict(c) for s, c in self.masks.items() if c},
                 'distributions': {k: dist(v) for k, v in sorted(self.values.items())},
-                'tolerances': {'ct_max_abs': CT_TOL, 'dose_gy': DOSE_TOL_GY, 'dice_min': DICE_MIN, 'points': POINT_TOL}}
+                'tolerances': {'ct_max_abs': CT_TOL, 'dice_min': DICE_MIN}}
 
 
 def compare_pair(old, new, tally):
-    """Compares one pooled folder with its new plan folder into tally; returns a refusal reason or None."""
+    """Compares one pooled folder with its new plan folder into tally (a fresh one per pair); returns a refusal reason or None."""
     files = new_files(new)
     if 'ct' not in files or not (old / 'ct.nii.gz').is_file():
         return REASON_NO_CT
@@ -148,14 +153,14 @@ def compare_pair(old, new, tally):
             diff = float(np.abs(a - b).max())
             tally.values['dose_max_abs_diff_gy'].append(diff)
             tally.values['dose_legacy_max_gy'].append(float(a.max()))
-            tally.counts['dose_within_tol' if diff <= DOSE_TOL_GY else 'dose_outside_tol'] += 1
+            r = pearson(a, b)
+            if r is not None:
+                tally.values['dose_pearson_r'].append(r)
+            tally.counts['dose_compared'] += 1
         else:
             tally.counts['dose_grid_differs'] += 1
-    for name in APPLICATORS:
-        if (old / name).is_file() and name in files['applicator']:
-            a, b = np.loadtxt(old / name, ndmin=2), np.loadtxt(files['applicator'][name], ndmin=2)
-            equal = a.shape == b.shape and np.allclose(a, b, atol=POINT_TOL, rtol=0)
-            tally.counts['applicator_equal' if equal else 'applicator_differs'] += 1
+    else:
+        tally.counts['dose_missing'] += 1
     return None
 
 
@@ -166,18 +171,20 @@ def run(preprocessed, pooled):
     shared = collections.Counter((mrn, fx) for mrn, fx, _ in pairs)
     for mrn, fx, old in pairs:
         new = Path(preprocessed) / mrn / f'plan_{fx}'
-        if shared[(mrn, fx)] > 1:
-            reason = REASON_SHARED
-        elif not (new / 'series.csv').is_file():
-            reason = REASON_NEW_MISSING
-        else:
-            try:
-                reason = compare_pair(old, new, tally)
-            except Exception:  # the message could name a path; count it under a fixed reason
-                reason = REASON_UNREADABLE
+        pair = Tally()
+        try:
+            if shared[(mrn, fx)] > 1:
+                reason = REASON_SHARED
+            elif not (new / 'series.csv').is_file():
+                reason = REASON_NEW_MISSING
+            else:
+                reason = compare_pair(old, new, pair)
+        except Exception:  # the message could name a path; count it under a fixed reason
+            reason = REASON_UNREADABLE
         if reason:
             tally.refused[reason] += 1
         else:
+            tally.merge(pair)  # only whole pairs, so every count covers the same pairs
             tally.counts['compared'] += 1
     return tally.summary()
 

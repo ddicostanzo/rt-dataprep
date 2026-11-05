@@ -4,7 +4,6 @@ import json
 import shutil
 from pathlib import Path
 
-import numpy as np
 import SimpleITK as sitk
 
 import test_convert as tc
@@ -37,10 +36,10 @@ def build(tmp_path):
 def test_identical_output_passes_every_check(tmp_path):
     out, pooled, _ = build(tmp_path)
     s = parity.run(out, pooled)
-    assert s['counts'] == {'pooled_folders': 1, 'ct_geometry_equal': 1, 'ct_pass': 1, 'dose_within_tol': 1, 'compared': 1}
+    assert s['counts'] == {'pooled_folders': 1, 'ct_geometry_equal': 1, 'ct_pass': 1, 'dose_compared': 1, 'compared': 1}
     assert s['refused'] == {}
     assert s['masks'] == {'hrctv': {'legacy': 1, 'pass': 1}, 'bladder': {'legacy': 1, 'pass': 1}}
-    assert s['distributions']['ct_pearson_r']['min'] > 0.999
+    assert s['distributions']['ct_pearson_r']['min'] > 0.999 and s['distributions']['dose_max_abs_diff_gy']['max'] == 0
 
 
 def test_differences_are_counted(tmp_path):
@@ -59,12 +58,13 @@ def test_differences_are_counted(tmp_path):
     assert 'ct_pass' not in s['counts'] and 'bladder' not in s['masks']
 
 
-def test_cli_prints_no_identifiers(tmp_path, capsys):
+def test_cli_prints_no_identifiers(tmp_path, capfd):
     out, pooled, old = build(tmp_path)
     (old / 'hrctv.nii.gz').write_bytes(b'not nifti')
     assert parity.main([str(out), str(pooled), '--json', str(tmp_path / 's.json')]) == 0
-    printed = capsys.readouterr()
+    printed = capfd.readouterr()  # capfd: ITK writes to fd 2 directly
     assert json.loads(printed.out) == json.loads((tmp_path / 's.json').read_text())
-    assert json.loads(printed.out)['refused'] == {parity.REASON_UNREADABLE: 1}
+    s = json.loads(printed.out)
+    assert s['refused'] == {parity.REASON_UNREADABLE: 1}
+    assert s['counts'] == {'pooled_folders': 1} and s['masks'] == {}  # a failed pair adds nothing but its refusal
     assert all(secret not in printed.out + printed.err for secret in (tc.PID, str(tmp_path)))
-    assert np.isfinite(json.loads(printed.out)['tolerances']['ct_max_abs'])
