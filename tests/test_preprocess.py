@@ -1919,3 +1919,88 @@ def test_a_failing_equalize_is_one_fixed_internal_reason(monkeypatch):
 def test_the_module_docstring_describes_ahe_and_not_geometric_only_series():
     doc = getattr(pre, '__doc__')  # noqa: B009
     assert 'ahe' in doc and 'geometric ones only' not in doc
+
+
+# ---- AHE task-03: the aligned plan series is equalized on its native grid, then resampled once; the zero fill. Gradients, never constants. ----
+
+AHE_SIDE = 24  # CLAHE's kernel is 1/8 of each axis: an 8^3 volume has 1-voxel tiles and equalizes to all 1
+MR_RAMP = np.linspace(1.0, 500.0, AHE_SIDE ** 3).reshape((AHE_SIDE,) * 3)
+CT_RAMP = np.linspace(-1000.0, 200.0, AHE_SIDE ** 3).reshape((AHE_SIDE,) * 3)
+AHE_MR_OUT = 'reshape_resample_ahe_initialresample_series_MR_1.nii.gz'
+AHE_PT_OUT = 'reshape_resample_ahe_initialresample_series_PT_1.nii.gz'
+
+
+def reference_series(native, final_ct, matrix, rescale_hu=False):
+    """Resample(reference equalize(native)) onto final_ct with the series transform, float32, fill 0: never the code under test."""
+    equalized = sitk.GetImageFromArray(reference_equalize(pre.rescale(native) if rescale_hu else native))
+    equalized.CopyInformation(native)
+    return sitk.Resample(equalized, final_ct, pre.series_transform(matrix), sitk.sitkLinear, 0, sitk.sitkFloat32)
+
+
+@pytest.mark.parametrize('matrix, geometry', [(rigid(0, (4, 0, 0)), MR_GRID),
+                                              (rigid(17, (2.3, -1.1, 0.6)), dict(MR_GRID, spacing=(1.1, 0.9, 1.7), direction=ROTATED))],
+                         ids=['translated', 'rotated_with_a_non_identity_native_direction'])
+def test_ac3_an_aligned_mr_is_equalized_on_its_native_grid_then_resampled_and_is_zero_outside_its_fov(tmp_path, matrix, geometry):
+    _, done, folder = run_plan(tmp_path, [mr_spec(MR_RAMP, matrix, geometry)], steps=SMALL_AHE)
+    image, ct, native = read_out(done, AHE_MR_OUT), read_out(done, AHE_CT_FILE), sitk.ReadImage(str(folder / 'series_MR_1.nii.gz'))
+    values, expected = sitk.GetArrayFromImage(image), sitk.GetArrayFromImage(reference_series(native, ct, matrix))
+    np.testing.assert_array_equal(values, expected)
+    interior, outside = coverage(image, geometry, (AHE_SIDE,) * 3, matrix)
+    assert (values[outside] == 0).all() and values[interior].min() >= 0 and values[interior].max() > 0 and len(np.unique(values[interior])) > 10
+    assert image.GetPixelID() == sitk.sitkFloat32 and header(image) == header(ct)  # read back on both sides
+
+
+@pytest.mark.parametrize('rescale', [False, True])
+def test_a_non_rescaled_aligned_ct_series_is_filled_with_zero_not_its_own_minimum(tmp_path, rescale):
+    steps, matrix = dataclasses.replace(SMALL_AHE, rescale=rescale), rigid(0, (4, 0, 0))
+    out_name = pre.output_name('series_CT_1.nii.gz', steps, ct=True, image=True)
+    _, done, folder = run_plan(tmp_path, [mr_spec(CT_RAMP, matrix, file='series_CT_1.nii.gz', modality='CT')], steps=steps)
+    image, ct = read_out(done, out_name), read_out(done, pre.output_name(conv.CT_NAME, steps, ct=True, image=True))
+    native = sitk.ReadImage(str(folder / 'series_CT_1.nii.gz'))
+    assert pre.minimum(native) == -1000  # a fill by the native minimum would show here
+    values = sitk.GetArrayFromImage(image)
+    np.testing.assert_array_equal(values, sitk.GetArrayFromImage(reference_series(native, ct, matrix, rescale_hu=rescale)))
+    _, outside = coverage(image, MR_GRID, (AHE_SIDE,) * 3, matrix)
+    assert (values[outside] == 0).all() and values.min() == 0 and len(np.unique(values)) > 10
+
+
+def test_aligned_series_names_carry_ahe_for_mr_pt_and_ct_and_dose_and_masks_do_not(tmp_path):
+    matrix = rigid(0, (4, 0, 0))
+    specs = [mr_spec(MR_RAMP, matrix), mr_spec(MR_RAMP, matrix, file='series_PT_1.nii.gz', modality='PT'), mr_spec(CT_RAMP, matrix, file='series_CT_1.nii.gz', modality='CT')]
+    report, done, _ = run_plan(tmp_path, specs, steps=SMALL_AHE)
+    ct_out = 'reshape_resample_ahe_rescale_initialresample_series_CT_1.nii.gz'
+    assert plan_row(report).files == [AHE_CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt', AHE_MR_OUT, AHE_PT_OUT, ct_out, 'series.csv']
+    assert [r['file'] for r in conv_rows(done)] == plan_row(report).files[:-1]
+
+
+def test_ac2_dose_and_mask_outputs_are_identical_with_and_without_ahe(tmp_path):
+    outs = {}
+    for steps in (SMALL, SMALL_AHE):
+        _, done, _ = run_plan(tmp_path / str(steps.ahe), [], steps=steps)
+        outs[steps.ahe] = done
+    for name in (DOSE_FILE, PTV_FILE, BLADDER_FILE):
+        a, b = read_out(outs[False], name), read_out(outs[True], name)
+        np.testing.assert_array_equal(sitk.GetArrayFromImage(a), sitk.GetArrayFromImage(b))
+        assert (a.GetOrigin(), a.GetSpacing(), a.GetDirection(), a.GetPixelID()) == (b.GetOrigin(), b.GetSpacing(), b.GetDirection(), b.GetPixelID())
+    assert (outs[False] / 'applicator_a.txt').read_bytes() == (outs[True] / 'applicator_a.txt').read_bytes()
+
+
+def test_the_fov_mask_is_written_for_the_ahe_series_and_ahe_does_not_change_it(tmp_path):
+    matrix, masks = rigid(0, (4, 0, 0)), {}
+    for steps in (FOV, dataclasses.replace(SMALL_AHE, series_fov_mask=True)):
+        report, done, _ = run_plan(tmp_path / str(steps.ahe), [mr_spec(MR_RAMP, matrix)], steps=steps)
+        name = pre.output_name('series_MR_1.nii.gz', steps, image=True)
+        assert plan_row(report).files[-3:] == [name, f'fovmask_{name}', 'series.csv']
+        masks[steps.ahe] = read_out(done, f'fovmask_{name}')
+    assert masks[True].GetPixelID() == sitk.sitkUInt8
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(masks[True]), sitk.GetArrayFromImage(masks[False]))
+    assert header(masks[True]) == header(masks[False]) and sitk.GetArrayFromImage(masks[True]).any()
+
+
+def test_a_failing_equalize_in_process_series_is_one_fixed_internal_reason(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError('SYNTHETICPTA')
+    monkeypatch.setattr(pre, 'equalize_adapthist', boom)
+    with pytest.raises(CaseRefused) as caught:
+        pre.process_series(make_image(MR_RAMP, **MR_GRID), FINAL, np.eye(4), False, False, True)
+    assert str(caught.value) == pre.REASON_INTERNAL

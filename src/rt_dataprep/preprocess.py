@@ -192,14 +192,16 @@ def process_mask(mask, final_ct, steps):
     return quiet_call(lambda: sitk.Resample(mask, final_ct, sitk.Transform(), interpolator, 0, pixel), REASON_INTERNAL)
 
 
-def process_series(native, final_ct, matrix, rescale_hu, ct):
-    """`native` (HU-rescaled first when rescale_hu) linearly resampled once onto final_ct as float32; 0 outside its FOV,
-    or its own minimum for a CT that is not rescaled (#125: 0 would be water; the planning CT pads with its minimum too).
+def process_series(native, final_ct, matrix, rescale_hu, ct, ahe):
+    """`native` (HU-rescaled first when rescale_hu, then equalized on its own grid when ahe) linearly resampled once onto final_ct as float32;
+    0 outside its FOV, or its own minimum for a CT that is neither rescaled nor equalized (#125: 0 would be water; the planning CT pads with its minimum too).
     `matrix` is series frame -> CT frame (series_transform)."""
     transform = series_transform(matrix)
     def run():
         image = rescale(native) if rescale_hu else native
-        fill = minimum(native) if ct and not rescale_hu else 0.0
+        if ahe:
+            image = equalize(image)
+        fill = minimum(native) if ct and not rescale_hu and not ahe else 0.0
         return sitk.Resample(image, final_ct, transform, sitk.sitkLinear, fill, sitk.sitkFloat32)
     return quiet_call(run, REASON_INTERNAL)
 
@@ -554,7 +556,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
         if not covered:  # entirely outside the CT: never resampled
             skipped += 1
         else:
-            image = process_series(native, final, matrix, is_ct and steps.rescale, is_ct)
+            image = process_series(native, final, matrix, is_ct and steps.rescale, is_ct, steps.ahe)
             name = output_name(row['file'], steps, ct=is_ct, image=True)
             conv.write_atomic(image, out_dir / name)
             files.append(name)

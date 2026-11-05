@@ -42,3 +42,19 @@ but `process_series` does not equalize yet: task-03 (value change, zero fill).
 
 Gotchas: `write_plan` puts a 12^3 dose and masks on the CT grid, so AHE tests with another size pass `dose=None, masks={}`.
 The first preprocessed row of a study also lists `series.csv`.
+
+## review-group-2 (task-02)
+No BLOCKING. WARNING: aligned series named ahe_ before task-03 equalizes them (same PR, resolved by task-03). NOTEs: AC1a grid uses identity direction; constant-CT test uses not .any().
+
+## task-03
+
+Files changed: `src/rt_dataprep/preprocess.py`, `tests/test_preprocess.py`.
+
+Decisions: `process_series(native, final_ct, matrix, rescale_hu, ct, ahe)` takes `ahe` as a 6th positional argument (the caller passes `steps.ahe`);
+inside `run` it equalizes the (rescaled-if-CT) native image with `equalize` before the one Resample. The fill is the native minimum only for a CT that is
+neither rescaled nor equalized; it is 0 otherwise.
+
+Gotchas: CLAHE's default kernel is 1/8 of each axis, so an 8^3 series has 1-voxel tiles and equalizes to all 1 (even a linear gradient). The AHE series
+tests use 24^3 gradients (`AHE_SIDE`). A landmark-peak test (ahe on vs off) was dropped as fragile: CLAHE saturates other tiles at 1, so argmax ties
+move; the A4 geometry check is the exact comparison with `Resample(reference_equalize(native))` on a rotated-direction native.
+The names, AC2 (dose/mask identical) and fovmask tests passed before the code change (task-02 had added the names; dose, masks and the FOV mask are geometry only).
