@@ -14,6 +14,7 @@ is the one place the patient folder names appear.
 """
 import csv
 import logging
+import os
 import re
 import shutil
 import sys
@@ -24,6 +25,7 @@ import numpy as np
 import SimpleITK as sitk
 
 from rt_dataprep import convert as conv
+from rt_dataprep import dicom_io
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
 from rt_dataprep.series import DIRECTION_ATOL, IDENTITY, IMAGE_MODALITIES, reg_matrix_array
 
@@ -37,6 +39,7 @@ REASON_OUTSIDE_INPUT = 'output root is the converted root or inside it'
 REASON_NO_STEPS = 'no preprocessing step is on'
 REASON_NO_SERIES_STEPS = 'no preprocessing step that is on applies to an MR or PT series'
 REASON_EXISTS = 'output folder already exists'
+REASON_NAME_CLAIMED = 'another folder of this run already maps to this output name (case-insensitive)'
 REASON_NO_CASES = 'patient folder holds no plan or study folder with a series.csv'
 STUDY_FOLDER = r'study_[0-9]+'
 REASON_NO_CT = 'series.csv does not list exactly one ct file'
@@ -356,8 +359,12 @@ class PreprocessReport:
     rows: list
 
 
-def preprocess(converted_root, out_root, steps=PreprocessSteps()):  # noqa: B008 (frozen, so the shared default is safe; with no step on it raises)
-    """Preprocess every <patient>/plan_<n>/ and <patient>/study_<n>/ under converted_root into out_root and write preprocess_report.csv."""
+def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, overwrite=False):  # noqa: B008 (frozen, so the shared default is safe; with no step on it raises)
+    """
+    Preprocess every <patient>/plan_<n>/ and <patient>/study_<n>/ under converted_root into out_root and write preprocess_report.csv.
+
+    overwrite: replace a patient's existing output folder once the new output holds a preprocessed row; otherwise the old one is kept.
+    """
     converted_root, out_root = Path(converted_root), Path(out_root)
     if out_root.resolve().is_relative_to(converted_root.resolve()):  # before any mkdir: nothing is written into the input
         raise ValueError(REASON_OUTSIDE_INPUT)
@@ -371,10 +378,14 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps()):  # noqa: B008
     folders = sorted(p for p in converted_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
     rows, aborted = [], False
+    claimed = set()  # casefolded folder names of this run, read only under overwrite: a case-insensitive root would merge them
+    replaced = kept = 0
     try:
         for folder in folders:
             try:
-                rows += preprocess_patient(folder, out_root, steps)
+                found, status = preprocess_patient(folder, out_root, steps, overwrite, claimed)
+                rows += found
+                replaced, kept = replaced + (status == 'replaced'), kept + (status == 'kept')
             except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
                 rows.append(PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_IO_ERROR))
                 log.warning('preprocess: %s', REASON_IO_ERROR)
@@ -390,42 +401,51 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps()):  # noqa: B008
     imaging_rows = [r for r in rows if r.folder.startswith('study_')]
     plan_rows = [r for r in rows if r.folder and not r.folder.startswith('study_')]
     patient_rows = [r for r in rows if r.folder == '']
-    log.info('preprocess: %d plan rows (%d preprocessed, %d refused), %d imaging rows (%d preprocessed, %d refused), %d patient rows (%d refused, %d skipped); %d registered series skipped',
+    log.info('preprocess: %d plan rows (%d preprocessed, %d refused), %d imaging rows (%d preprocessed, %d refused), %d patient rows (%d refused, %d skipped); %d registered series skipped; %d replaced, %d kept',
              len(plan_rows), *(sum(r.outcome == o for r in plan_rows) for o in (OUTCOME_PREPROCESSED, conv.OUTCOME_REFUSED)),
              len(imaging_rows), *(sum(r.outcome == o for r in imaging_rows) for o in (OUTCOME_PREPROCESSED, conv.OUTCOME_REFUSED)),
              len(patient_rows), *(sum(r.outcome == o for r in patient_rows) for o in (conv.OUTCOME_REFUSED, conv.OUTCOME_SKIPPED)),
-             sum(r.skipped_series for r in rows))
+             sum(r.skipped_series for r in rows), replaced, kept)
     if aborted:  # raised here, after the except blocks: nothing of the original is chained
         raise PreprocessAborted(REASON_INTERNAL)
     return PreprocessReport(rows)
 
 
-def preprocess_patient(folder, out_root, steps):
+def preprocess_patient(folder, out_root, steps, overwrite=False, claimed=None):
+    """(rows, status None/'new'/'replaced'/'kept'); a raise adds no status."""
+    if overwrite:  # first: a repeat of a name written this run must not recover, rename or replace anything
+        if folder.name.casefold() in claimed:
+            return [PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_NAME_CLAIMED)], None
+        claimed.add(folder.name.casefold())
     target = out_root / folder.name
-    if target.exists():
-        return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_EXISTS)]
+    dicom_io.recover(out_root, folder.name)
+    exists = os.path.lexists(target)  # lexists, as publish: a dangling link is an existing target
+    if exists and not overwrite:
+        return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_EXISTS)], None
     plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(conv.PLAN_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()),
                    key=lambda p: (int(p.name.split('_')[1]), p.name))  # plan_1 and fx_1: a fixed order
     studies = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(STUDY_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()),
                      key=lambda p: int(p.name.split('_')[1]))
     if not plans and not studies:
-        return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_NO_CASES)]
+        return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_NO_CASES)], 'kept' if exists else None
     # Built under a hidden name and renamed at the end, as convert does: a run that dies part-way leaves no folder that a
     # later run would skip as done. The flag, not an except block, decides the cleanup, so any failure (and Ctrl-C) removes it.
     partial = out_root / f'.{folder.name}.partial'
     shutil.rmtree(partial, ignore_errors=True)
-    rows, done = [], False
+    rows, done, status = [], False, None
     try:
         partial.mkdir()
         rows = [preprocess_one(plan_dir, partial / plan_dir.name, steps) for plan_dir in plans]
         for study_dir in studies:
             rows += preprocess_study(study_dir, partial / study_dir.name, steps)
-        partial.rename(target)  # an empty partial (every plan and series refused) is renamed too: the patient has its outcome
+        # An empty partial (every plan and series refused) is renamed too when there is no old folder: the patient has its outcome.
+        status = dicom_io.publish(out_root, folder.name, overwrite=overwrite,
+                                  success=any(row.outcome == OUTCOME_PREPROCESSED for row in rows))
         done = True
     finally:
         if not done:
             shutil.rmtree(partial, ignore_errors=True)
-    return rows
+    return rows, status
 
 
 def preprocess_one(plan_dir, out_dir, steps):
