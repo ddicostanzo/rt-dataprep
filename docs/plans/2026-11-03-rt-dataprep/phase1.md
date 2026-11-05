@@ -186,6 +186,14 @@ aggregate counts only, with no identifiers. Run on N ≥ 20 fractions. Pass crit
   onto the native CT and then again by preprocess, so no tight tolerance can hold. (The earlier 1e-4 Gy criterion
   assumed a native-grid CT equal to `ct.nii.gz`, which cannot be.)
 
+- **Grids differ in practice (radonc-phgpu subset, 2026-11-05).** The pooled `ct.nii.gz` is 320 x 320 x 256 at
+  1.25 mm. Its crop is centred per patient, with x/y shifts of up to about 100 mm against a centred crop, and its grid
+  is offset from ours by a fraction of a voxel (.5 or .31). So exact-grid criteria cannot pass. `parity.py` then
+  resamples the new image linearly onto each legacy grid and compares the voxels both cover (`resampled_` keys: CT max
+  and 99th-percentile abs diff and r, Dice per structure, dose). These are information for the owner to judge, not
+  pass/fail. Preprocess the comparison tree at `new_shape=(320, 320, 256)`, with its crop guard off for that run only,
+  since legacy CropOrPad cropped dose and masks silently.
+
 **Organize parity** comes later and is separate. A fresh DICOM_Transport export is organized and then compared to
 `raw/` by the `rtplan_uid` read from each tree's RTPLAN, never by `fx_<n>`. Legacy numbering depended on
 pre-filters and a keep-list.

@@ -9,6 +9,10 @@ and Pearson r; each legacy structure mask (<structure>.nii.gz) against the new m
 after thresholding both at 0.5; dose_gy.nii.gz against the new dose when the grids are equal, as information only (the
 new dose is resampled twice, legacy once, so no tolerance applies). Prints a JSON summary of counts and distributions only: no folder
 name, path, UID or exception text.
+
+When a legacy file's grid differs from the new one (legacy crops per patient, and its 1.25 mm grid is offset by a fraction
+of a voxel), the new image is resampled linearly onto the legacy grid and compared over the voxels both cover. Those
+results carry a 'resampled_' prefix and are information only: no pass/fail.
 """
 import argparse
 import collections
@@ -69,11 +73,23 @@ def geometry_equal(a, b):
 
 
 def array(image):
-    return sitk.GetArrayViewFromImage(image).astype(np.float32, copy=False)
+    return sitk.GetArrayFromImage(image).astype(np.float32, copy=False)  # a copy: a view dies with a temporary image
+
+
+def on_legacy_grid(old, new):
+    """(legacy values, new values, same grid) as 1-D float32 arrays; on another grid, the new image resampled linearly
+    onto the legacy grid, over the legacy voxels the new image covers."""
+    if geometry_equal(old, new):
+        return array(old).ravel(), array(new).ravel(), True
+    moved = sitk.Resample(new, old, sitk.Transform(), sitk.sitkLinear, 0.0, sitk.sitkFloat32)
+    ones = sitk.Image(new.GetSize(), sitk.sitkUInt8)
+    ones.CopyInformation(new)
+    inside = sitk.GetArrayFromImage(sitk.Resample(ones + 1, old, sitk.Transform(), sitk.sitkNearestNeighbor, 0)) > 0
+    return array(old)[inside], sitk.GetArrayFromImage(moved)[inside], False
 
 
 def pearson(a, b):
-    a, b = a[::2, ::2, ::2].ravel().astype(np.float64), b[::2, ::2, ::2].ravel().astype(np.float64)  # 1/8: memory
+    a, b = a.ravel()[::8].astype(np.float64), b.ravel()[::8].astype(np.float64)  # 1/8: memory
     if a.std() == 0 or b.std() == 0:
         return None
     return float(np.corrcoef(a, b)[0, 1])
@@ -117,19 +133,25 @@ def compare_pair(old, new, tally):
     if 'ct' not in files or not (old / 'ct.nii.gz').is_file():
         return REASON_NO_CT
     old_ct, new_ct = sitk.ReadImage(str(old / 'ct.nii.gz')), sitk.ReadImage(str(files['ct']))
-    same = geometry_equal(old_ct, new_ct)
+    a, b, same = on_legacy_grid(old_ct, new_ct)
     tally.counts['ct_geometry_equal' if same else 'ct_geometry_differs'] += 1
+    p = '' if same else 'resampled_'
     if not same:
         tally.size_delta[tuple(int(n) - int(o) for n, o in zip(new_ct.GetSize(), old_ct.GetSize(), strict=True))] += 1
-        return None  # no voxel comparison on different grids; the masks and dose share the CT grid
-    a, b = array(old_ct), array(new_ct)
-    diff = float(np.abs(a - b).max())
-    tally.values['ct_max_abs_diff'].append(diff)
+    if a.size == 0:
+        tally.counts['ct_no_overlap'] += 1
+        return None
+    diff = np.abs(a - b)
+    tally.values[f'{p}ct_max_abs_diff'].append(float(diff.max()))
+    tally.values[f'{p}ct_p99_abs_diff'].append(float(np.percentile(diff, 99)))
     r = pearson(a, b)
     if r is not None:
-        tally.values['ct_pearson_r'].append(r)
-    tally.counts['ct_pass' if diff <= CT_TOL else 'ct_fail'] += 1
-    del a, b
+        tally.values[f'{p}ct_pearson_r'].append(r)
+    if same:
+        tally.counts['ct_pass' if diff.max() <= CT_TOL else 'ct_fail'] += 1
+    else:
+        tally.counts['ct_resampled'] += 1
+    del a, b, diff
     for s in STRUCTURES:
         path = old / f'{s}.nii.gz'
         if not path.is_file():
@@ -139,26 +161,21 @@ def compare_pair(old, new, tally):
         if s not in files['mask']:
             c['no_new_mask'] += 1
             continue
-        old_m, new_m = sitk.ReadImage(str(path)), sitk.ReadImage(str(files['mask'][s]))
-        if not geometry_equal(old_m, new_m):
-            c['grid_differs'] += 1
-            continue
-        d = dice(array(old_m), array(new_m))
-        tally.values[f'dice_{s}'].append(d)
-        c['pass' if d >= DICE_MIN else 'fail'] += 1
+        a, b, same = on_legacy_grid(sitk.ReadImage(str(path)), sitk.ReadImage(str(files['mask'][s])))
+        d = dice(a, b)
+        p = '' if same else 'resampled_'
+        tally.values[f'{p}dice_{s}'].append(d)
+        c[f'{p}pass' if d >= DICE_MIN else f'{p}fail'] += 1
     if (old / 'dose_gy.nii.gz').is_file() and 'dose' in files:
-        old_d, new_d = sitk.ReadImage(str(old / 'dose_gy.nii.gz')), sitk.ReadImage(str(files['dose']))
-        if geometry_equal(old_d, new_d):
-            a, b = array(old_d), array(new_d)
-            diff = float(np.abs(a - b).max())
-            tally.values['dose_max_abs_diff_gy'].append(diff)
-            tally.values['dose_legacy_max_gy'].append(float(a.max()))
+        a, b, same = on_legacy_grid(sitk.ReadImage(str(old / 'dose_gy.nii.gz')), sitk.ReadImage(str(files['dose'])))
+        p = '' if same else 'resampled_'
+        if a.size:
+            tally.values[f'{p}dose_max_abs_diff_gy'].append(float(np.abs(a - b).max()))
+            tally.values[f'{p}dose_legacy_max_gy'].append(float(a.max()))
             r = pearson(a, b)
             if r is not None:
-                tally.values['dose_pearson_r'].append(r)
-            tally.counts['dose_compared'] += 1
-        else:
-            tally.counts['dose_grid_differs'] += 1
+                tally.values[f'{p}dose_pearson_r'].append(r)
+        tally.counts[f'{p}dose_compared'] += 1
     else:
         tally.counts['dose_missing'] += 1
     return None

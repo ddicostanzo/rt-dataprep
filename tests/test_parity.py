@@ -55,7 +55,24 @@ def test_differences_are_counted(tmp_path):
     sitk.WriteImage(ct[:-1, :, :], str(old / 'ct.nii.gz'))  # legacy one voxel shorter in x: the #100 pattern
     s = parity.run(out, pooled)
     assert s['counts']['ct_geometry_differs'] == 1 and s['ct_size_delta_xyz'] == {'(1, 0, 0)': 1}
-    assert 'ct_pass' not in s['counts'] and 'bladder' not in s['masks']
+    assert 'ct_pass' not in s['counts'] and s['counts']['ct_resampled'] == 1
+    assert s['distributions']['resampled_ct_max_abs_diff']['max'] == 0  # the legacy grid is a sub-grid: same voxels
+    assert s['masks']['bladder'] == {'legacy': 1, 'fail': 1}  # the mask's own grid still matches
+
+
+def test_a_shifted_legacy_grid_is_compared_after_resampling(tmp_path):
+    out, pooled, old = build(tmp_path)
+    for name in ('ct', 'hrctv', 'bladder', 'dose_gy'):
+        image = sitk.ReadImage(str(old / f'{name}.nii.gz'))
+        ref = sitk.Image(image)
+        ref.SetOrigin([o + 0.5 * sp for o, sp in zip(image.GetOrigin(), image.GetSpacing(), strict=True)])  # half a voxel
+        sitk.WriteImage(sitk.Resample(image, ref, sitk.Transform(), sitk.sitkLinear, 0.0, sitk.sitkFloat32), str(old / f'{name}.nii.gz'))
+    s = parity.run(out, pooled)
+    assert s['counts'] == {'pooled_folders': 1, 'ct_geometry_differs': 1, 'ct_resampled': 1, 'resampled_dose_compared': 1, 'compared': 1}
+    assert s['ct_size_delta_xyz'] == {'(0, 0, 0)': 1}
+    assert s['distributions']['resampled_ct_max_abs_diff']['max'] < 1e-5
+    assert s['distributions']['resampled_ct_pearson_r']['min'] > 0.9999
+    assert set(s['masks']) == {'hrctv', 'bladder'} and all(c['legacy'] == 1 and sum(c.values()) == 2 for c in s['masks'].values())
 
 
 def test_cli_prints_no_identifiers(tmp_path, capfd):
