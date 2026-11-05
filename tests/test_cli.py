@@ -9,7 +9,7 @@ import sys
 import pytest
 import SimpleITK as sitk
 from test_convert import PID, make_plan
-from test_preprocess import SMALL, report_rows, write_plan
+from test_preprocess import FOUR_STEPS, SMALL, report_rows, write_plan
 
 from rt_dataprep import convert as conv
 from rt_dataprep import preprocess as pre
@@ -79,16 +79,19 @@ def test_an_unexpected_error_exits_1_and_the_last_stderr_line_is_the_fixed_text(
         assert [(r['outcome'], r['reason']) for r in csv.DictReader(handle)] == [(conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
 
 
-# F2b: the preprocess subcommand. The preset pads to 701 cubed, so these runs shrink new_shape inside the child process
-# (as CRASH patches build_masks); argv comes after -c, so no path is embedded. %s is extra patch code, run before main.
+# F2b: the preprocess subcommand. The reshape step pads to 701 x 701 x 433, so these runs shrink new_shape inside the child process
+# by wrapping preprocess() before main imports it (as CRASH patches build_masks); argv comes after -c, so no path is embedded.
+# %s is extra patch code, run before main.
 PRE_RUN = """
 import dataclasses, runpy, sys
 from rt_dataprep import preprocess
-preprocess.LEGACY_RNT = dataclasses.replace(preprocess.LEGACY_RNT, new_shape=%r)
+real = preprocess.preprocess
+preprocess.preprocess = lambda converted, out, steps: real(converted, out, dataclasses.replace(steps, new_shape=%r))
 %s
 sys.argv = ['rt_dataprep', 'preprocess', *sys.argv[1:]]
 runpy.run_module('rt_dataprep', run_name='__main__')
 """
+FOUR_FLAGS = ('--initial-resample', '--rescale', '--resample', '--reshape')
 PRE_CRASH = "def boom(*args, **kwargs):\n    raise TypeError('1.2.3.4.5')\npreprocess.process_ct = boom"
 
 
@@ -108,9 +111,9 @@ def converted(tmp_path):
     return root
 
 
-def test_preprocess_legacy_rnt_runs_end_to_end(tmp_path, converted):
+def test_preprocess_four_step_flags_run_end_to_end(tmp_path, converted):
     out = tmp_path / 'out'
-    result = run_pre(converted, out, '--legacy-rnt')
+    result = run_pre(converted, out, *FOUR_FLAGS)
     assert result.returncode == 0 and result.stdout == ''
     assert [(r['patient'], r['folder'], r['outcome']) for r in report_rows(out)] == [('SYNTHETICPTA', 'plan_1', pre.OUTCOME_PREPROCESSED)]
     names = {p.name for p in (out / 'SYNTHETICPTA' / 'plan_1').iterdir()}
@@ -121,14 +124,14 @@ def test_preprocess_legacy_rnt_runs_end_to_end(tmp_path, converted):
 
 def test_legacy_linear_masks_flag_sets_the_field(tmp_path, converted):
     out = tmp_path / 'out'
-    result = run_pre(converted, out, '--legacy-rnt', '--legacy-linear-masks')
+    result = run_pre(converted, out, *FOUR_FLAGS, '--legacy-linear-masks')
     assert result.returncode == 0
     assert mask_pixel_type(out, dataclasses.replace(SMALL, legacy_linear_masks=True)) == sitk.sitkFloat32
 
 
-def test_preprocess_without_the_preset_exits_1_with_no_steps(tmp_path, converted):
+def test_preprocess_without_a_step_flag_exits_1_with_no_steps(tmp_path, converted):
     out = tmp_path / 'out'
-    for flags in ([], ['--legacy-linear-masks'], ['--series-fov-mask']):
+    for flags in ([], ['--legacy-linear-masks'], ['--series-fov-mask'], ['--legacy-linear-masks', '--series-fov-mask']):
         result = subprocess.run([sys.executable, '-m', 'rt_dataprep', 'preprocess', str(converted), str(out), *flags], capture_output=True, text=True)
         assert result.returncode == 1
         assert result.stderr == f'rt_dataprep: {pre.REASON_NO_STEPS}\n' and result.stdout == ''
@@ -138,7 +141,7 @@ def test_preprocess_without_the_preset_exits_1_with_no_steps(tmp_path, converted
 @pytest.mark.parametrize('where', ['same', 'inside'])
 def test_preprocess_out_inside_the_input_exits_1_with_the_reason(tmp_path, converted, where):
     out = converted if where == 'same' else converted / 'deeper' / 'out'
-    result = run_pre(converted, out, '--legacy-rnt')
+    result = run_pre(converted, out, *FOUR_FLAGS)
     assert result.returncode == 1
     assert result.stderr == f'rt_dataprep: {pre.REASON_OUTSIDE_INPUT}\n' and result.stdout == ''
     assert not (converted / 'deeper').exists() and not (converted / pre.REPORT_NAME).exists()
@@ -147,14 +150,14 @@ def test_preprocess_out_inside_the_input_exits_1_with_the_reason(tmp_path, conve
 def test_preprocess_oserror_exits_1_with_a_path_free_message(tmp_path, converted):
     blocker = tmp_path / 'blocker'
     blocker.write_text('a file, not a folder')
-    result = run_pre(converted, blocker / 'out', '--legacy-rnt')
+    result = run_pre(converted, blocker / 'out', *FOUR_FLAGS)
     assert result.returncode == 1
     assert result.stderr == 'rt_dataprep: file system error on the source or output root\n' and result.stdout == ''
 
 
 def test_preprocess_unexpected_error_exits_1_with_its_own_fixed_text(tmp_path, converted):
     out = tmp_path / 'out'
-    result = run_pre(converted, out, '--legacy-rnt', patch=PRE_CRASH)
+    result = run_pre(converted, out, *FOUR_FLAGS, patch=PRE_CRASH)
     assert result.returncode == 1 and result.stdout == ''
     lines = result.stderr.splitlines()
     assert lines[-1] == f'rt_dataprep: {pre.REASON_INTERNAL}' and pre.REASON_INTERNAL != conv.REASON_INTERNAL
@@ -162,11 +165,16 @@ def test_preprocess_unexpected_error_exits_1_with_its_own_fixed_text(tmp_path, c
     assert [(r['outcome'], r['reason']) for r in report_rows(out)] == [(conv.OUTCOME_REFUSED, pre.REASON_INTERNAL)]
 
 
-def test_preprocess_help_names_ahe_and_no_longer_requires_the_preset():
+def test_preprocess_help_lists_the_five_step_flags_with_their_values_and_prefixes():
     result = subprocess.run([sys.executable, '-m', 'rt_dataprep', 'preprocess', '--help'], capture_output=True, text=True)
     assert result.returncode == 0
     text = ' '.join(result.stdout.split())
-    assert '--ahe' in text and 'required for any output' not in text
+    assert 'at least one step flag' in text and '--legacy-rnt' not in text
+    for flag, value, prefix in [('--initial-resample', '1 mm', 'initialresample_'), ('--rescale', '(HU + 1024) / 4096', 'rescale_'),
+                                ('--ahe', 'CLAHE', 'ahe_'), ('--resample', '1.25 mm', 'resample_'), ('--reshape', '701 x 701 x 433', 'reshape_')]:
+        entry = text[text.index(f'{flag} ') + len(flag):]
+        entry = entry[:entry.index(' --')] if ' --' in entry else entry  # this flag's help, up to the next option
+        assert value in entry and prefix in entry, flag
 
 
 def test_preprocess_ahe_alone_equalizes_the_ct_and_copies_dose_and_masks(tmp_path, converted):
@@ -180,9 +188,9 @@ def test_preprocess_ahe_alone_equalizes_the_ct_and_copies_dose_and_masks(tmp_pat
         assert (dst / name).read_bytes() == (src / name).read_bytes()
 
 
-def test_preprocess_ahe_with_legacy_rnt_writes_the_full_ct_name(tmp_path, converted):
+def test_preprocess_ahe_with_the_four_step_flags_writes_the_full_ct_name(tmp_path, converted):
     out = tmp_path / 'out'
-    result = run_pre(converted, out, '--ahe', '--legacy-rnt')
+    result = run_pre(converted, out, '--ahe', *FOUR_FLAGS)
     assert result.returncode == 0 and result.stdout == ''
     names = {p.name for p in (out / 'SYNTHETICPTA' / 'plan_1').iterdir()}
     assert f'reshape_resample_ahe_rescale_initialresample_{conv.CT_NAME}' in names
@@ -192,15 +200,33 @@ def test_preprocess_ahe_with_legacy_rnt_writes_the_full_ct_name(tmp_path, conver
 @pytest.mark.parametrize('flags, want', [
     (['--ahe'], pre.PreprocessSteps(ahe=True)),
     (['--ahe', '--series-fov-mask'], pre.PreprocessSteps(ahe=True, series_fov_mask=True)),
-    (['--ahe', '--legacy-rnt'], dataclasses.replace(pre.LEGACY_RNT, ahe=True)),
-    (['--legacy-rnt'], pre.LEGACY_RNT),
+    ([*FOUR_FLAGS, '--ahe'], dataclasses.replace(FOUR_STEPS, ahe=True)),
+    (list(FOUR_FLAGS), FOUR_STEPS),
 ])
 def test_ahe_flag_reaches_preprocess_steps(flags, want, monkeypatch):
     seen = []
     monkeypatch.setattr(cli, 'preprocess', lambda *args: seen.append(args))
     cli.main(['preprocess', 'a', 'b', *flags])
     assert seen == [('a', 'b', want)]
-    assert seen[0][2].ahe is ('--ahe' in flags) and pre.LEGACY_RNT.ahe is False
+    assert seen[0][2].ahe is ('--ahe' in flags)
+
+
+# Flags are named after the output prefix, not the field: --resample is harmonize_spacing (1.25 mm), --initial-resample is resample (1 mm).
+STEP_FIELDS = {'--initial-resample': 'resample', '--rescale': 'rescale', '--ahe': 'ahe', '--resample': 'harmonize_spacing', '--reshape': 'reshape'}
+
+
+@pytest.mark.parametrize('flags', [[flag] for flag in STEP_FIELDS] + [list(STEP_FIELDS)])
+def test_each_step_flag_sets_exactly_its_field(flags, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, 'preprocess', lambda *args: seen.append(args))
+    cli.main(['preprocess', 'a', 'b', *flags])
+    assert seen == [('a', 'b', pre.PreprocessSteps(**{STEP_FIELDS[flag]: True for flag in flags}))]
+
+
+def test_legacy_rnt_is_an_argparse_usage_error(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(['preprocess', 'a', 'b', '--legacy-rnt'])
+    assert exc.value.code == 2 and 'unrecognized arguments: --legacy-rnt' in capsys.readouterr().err
 
 
 # convert itself raises outside the patient loop, so the CLI's own handler reports it; argv comes after -c.
@@ -351,10 +377,10 @@ def calls(monkeypatch):
 
 
 @pytest.mark.parametrize('flags, want', [
-    (['--legacy-rnt'], pre.LEGACY_RNT),
-    (['--legacy-rnt', '--series-fov-mask'], dataclasses.replace(pre.LEGACY_RNT, series_fov_mask=True)),
-    (['--legacy-rnt', '--legacy-linear-masks', '--series-fov-mask'],
-     dataclasses.replace(pre.LEGACY_RNT, legacy_linear_masks=True, series_fov_mask=True)),
+    (list(FOUR_FLAGS), FOUR_STEPS),
+    ([*FOUR_FLAGS, '--series-fov-mask'], dataclasses.replace(FOUR_STEPS, series_fov_mask=True)),
+    ([*FOUR_FLAGS, '--legacy-linear-masks', '--series-fov-mask'],
+     dataclasses.replace(FOUR_STEPS, legacy_linear_masks=True, series_fov_mask=True)),
 ])
 def test_series_fov_mask_flag_reaches_preprocess_steps(flags, want, monkeypatch):
     seen = []

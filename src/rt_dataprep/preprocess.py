@@ -1,5 +1,5 @@
 """
-Legacy RNT preprocessing of a converted tree (spec: f2b-preprocess): the CT pipeline, the resampling of dose and masks, and the walk.
+Preprocessing of a converted tree, one opt-in step flag per step (spec: f2b-preprocess): the CT pipeline, the resampling of dose and masks, and the walk.
 
 The CT runs initial resample -> rescale -> ahe -> final spacing -> reshape, each resample linear with default value 0. The ahe step
 (opt-in) min-max scales the volume in float32 to [0, 1] and equalizes it with skimage's CLAHE (default kernel, 128 bins, clip 0.05). The grid
@@ -68,9 +68,6 @@ class PreprocessSteps:
     new_spacing: tuple = (1, 1, 1)  # mm, (x, y, z)
     final_spacing: tuple = (1.25, 1.25, 1.25)
     new_shape: tuple = (701, 701, 433)  # voxels, (x, y, z)
-
-
-LEGACY_RNT = PreprocessSteps(resample=True, rescale=True, harmonize_spacing=True, reshape=True)
 
 
 def read_image(path):

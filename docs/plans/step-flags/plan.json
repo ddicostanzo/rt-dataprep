@@ -1,0 +1,84 @@
+{
+  "metadata": {
+    "title": "One CLI flag per preprocessing step, replacing --legacy-rnt (#150)",
+    "spec": "docs/specs/2026-11-05-step-flags.md",
+    "issue": 150,
+    "branch": "feat/remove-legacy-rnt",
+    "created": "2026-11-05"
+  },
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "Per-step preprocess flags; remove --legacy-rnt and LEGACY_RNT",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/__main__.py",
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_cli.py",
+        "tests/test_preprocess.py",
+        "tests/test_convert.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/__main__.py": "modify",
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_cli.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "tests/test_convert.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_cli.py: parametrized in-process cases (monkeypatched preprocess, as the existing cases at test_cli.py:195-203 and :354-357 do) for each step flag alone, all five together, the four-flag legacy equivalence with and without --ahe, --legacy-rnt as a usage error, and no step flag; the help test; the end-to-end child-process run with the four flags. test_preprocess.py and test_convert.py swap the constant for a module-level test constant. These five files form one atomic commit (the suite is red in between); the commit gate's limit is 5 files. The task branch changes only these five tracked files; the implementer reports findings in its final message and the orchestrator writes them to findings.md on the session branch after the squash merge.",
+      "criteria": [
+        "AC1: `preprocess --help` output lists --initial-resample, --rescale, --ahe, --resample and --reshape and does not contain --legacy-rnt; PREPROCESS_HELP contains the phrase 'at least one step flag'. Each step flag's help names its value (1 mm; (HU + 1024) / 4096 on CT; CLAHE; 1.25 mm; 701 x 701 x 433) and its file prefix.",
+        "AC2: --initial-resample sets resample, --rescale sets rescale, --ahe sets ahe, --resample sets harmonize_spacing, --reshape sets reshape; every other step field stays False. Asserted for each flag alone and all five together on the PreprocessSteps passed to preprocess(); --legacy-linear-masks and --series-fov-mask still map to their fields.",
+        "Wiring warning (clinical output): flag names follow the file prefixes, not the field names. --resample sets harmonize_spacing (1.25 mm final spacing), NOT the resample field; --initial-resample sets resample (1 mm). The AC2 tests encode this; if one fails, fix the wiring, never the test.",
+        "AC2b (clinical output): --initial-resample --rescale --resample --reshape passes a PreprocessSteps equal to PreprocessSteps(resample=True, rescale=True, harmonize_spacing=True, reshape=True) with default new_spacing, final_spacing and new_shape; with --ahe added, equal to the same with ahe=True.",
+        "AC3: an end-to-end child-process CLI run with the four flags writes reshape_resample_rescale_initialresample_planning_ct.nii.gz and the dose/mask names the old preset wrote. PRE_RUN no longer replaces LEGACY_RNT; it shrinks new_shape by wrapping rt_dataprep.preprocess.preprocess before runpy (any equivalent seam is fine), and its comment no longer calls it a preset.",
+        "AC4: --legacy-rnt exits 2 (argparse usage error).",
+        "AC5: no step flag, alone or with only --legacy-linear-masks and/or --series-fov-mask, exits 1 with REASON_NO_STEPS and writes nothing under the output root (existing test kept, flag lists updated).",
+        "AC6: LEGACY_RNT is removed from preprocess.py; the preprocess.py module docstring no longer calls the steps a 'Legacy RNT' preset; the --series-fov-mask help no longer names --legacy-rnt. No reference to LEGACY_RNT or --legacy-rnt remains in src/ or tests/.",
+        "Sanctioned test changes (the only ones allowed): (a) every pre.LEGACY_RNT / LEGACY_RNT value becomes the shared four-step constant, including expected 'want' values (test_cli.py:195-196 and :354-357); (b) every '--legacy-rnt' argument becomes '--initial-resample', '--rescale', '--resample', '--reshape'; (c) delete assertions whose only subject is the removed constant: tests/test_preprocess.py:53-55, :1812 second clause and :1813, and the trailing 'and pre.LEGACY_RNT.ahe is False' clause at tests/test_cli.py:203 (keep every assertion about PreprocessSteps() defaults); (d) rename tests whose names mention legacy_rnt or preset to name the step flags: test_cli.py test_preprocess_legacy_rnt_runs_end_to_end, test_preprocess_ahe_with_legacy_rnt_writes_the_full_ct_name, test_preprocess_without_the_preset_exits_1_with_no_steps, test_preprocess_help_names_ahe_and_no_longer_requires_the_preset; test_preprocess.py test_steps_defaults_and_preset, test_preset_writes_the_prefixed_files_and_leaves_the_input_alone, test_ahe_field_defaults_off_and_the_preset_is_unchanged; (e) the help test (test_cli.py:165) is rewritten to the AC1 assertions; (f) comments that call it a preset (e.g. the PRE_RUN comment at test_cli.py:82) are reworded; (g) new tests for AC2, AC2b, AC4 and AC5 (add the case with both --legacy-linear-masks and --series-fov-mask). Where (c) and (a) both name a line, (c) wins. Every other test keeps its assertions unchanged. A failing test is fixed in the code, never by changing its expectation.",
+        "tests/test_preprocess.py defines one module-level constant FOUR_STEPS = PreprocessSteps(resample=True, rescale=True, harmonize_spacing=True, reshape=True); STEPS_SMALL, SMALL and the other dataclasses.replace(...) derivations build from it, and tests/test_cli.py imports it (it already imports SMALL from there). tests/test_convert.py:845 may construct it inline. No other repetition of the four-field construction.",
+        "No change to process_ct, process_series, process_dose, process_mask, output_name, STUDY_FILE, the step order, fill values or REASON_* texts.",
+        "Full suite (uv run --group dev pytest -q --tb=short) and ruff pass. Commit gate: tests must not read a dunder attribute with dot syntax (use getattr(obj, '__doc__')  # noqa: B009). Run pytest through uv, not a stale .venv (vault: pre-push-uses-stale-dotvenv-pytest)."
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "Document the step flags in README and examples",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "README.md",
+        "examples/README.md",
+        "examples/synthetic_workflow.py"
+      ],
+      "file_ops": {
+        "README.md": "modify",
+        "examples/README.md": "modify",
+        "examples/synthetic_workflow.py": "modify"
+      },
+      "test_approach": "Docs only. Verify with grep (no --legacy-rnt / LEGACY_RNT / 'legacy preset' left) and run tests/test_examples.py plus the full suite.",
+      "criteria": [
+        "AC7: README's command table, preprocess example and step description use the per-step flags; the four-flag command --initial-resample --rescale --resample --reshape is shown as the full legacy pipeline, with a table or list mapping each flag to its value and file prefix. The --ahe sections say it combines with any step flag. The troubleshooting row for 'no preprocessing step is on' names the step flags.",
+        "AC7: examples/README.md commands and prose use the step flags; examples/synthetic_workflow.py's comment no longer refers to the preset.",
+        "AC7b: README no longer says only a Python rescale-only configuration refuses MR/PT study series; it says --rescale alone does too.",
+        "README notes that --reshape without a resample flag crops/pads at the CT's own spacing.",
+        "AC6: grep finds no --legacy-rnt, LEGACY_RNT or 'legacy preset' in README.md, examples/, src/ or tests/.",
+        "AC8: full suite and ruff pass."
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ]
+  ],
+  "Deferred": [
+    "CLI options for new_spacing, final_spacing and new_shape (spec S3).",
+    "--reshape without a resample flag can pad to a very large extent at native spacing (hardening issue).",
+    "A named shorthand for the four legacy steps, if typing four flags proves error-prone."
+  ]
+}

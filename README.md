@@ -55,7 +55,7 @@ uv run python examples/synthetic_workflow.py /tmp/rt-dataprep-demo
 ```
 
 Expected result: **18 imaging cases**, no refusals, and **2/2/2 patients in train/validation/test**. The example deliberately
-uses a small output grid; the CLI's legacy preprocessing grid is substantially larger.
+uses a small output grid; the CLI's `--reshape` grid is substantially larger.
 
 See [examples/](examples/README.md) for the complete walkthrough, a clinical-export recipe, and a configurable Python
 preprocessing example. On Windows, replace `/tmp/...` with a new folder in your approved workspace.
@@ -81,7 +81,7 @@ count before accepting the cohort. Successful process completion can include ref
 | --- | --- | --- |
 | `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers 1..64` (default 1) |
 | `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers 1..64` (default 1) |
-| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | At least `--legacy-rnt` or `--ahe`; also `--legacy-linear-masks`, `--series-fov-mask` |
+| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | At least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--legacy-linear-masks`, `--series-fov-mask` |
 | `manifest ROOT` | Write `ROOT/manifest.csv` and a dated copy. | Works on converted or preprocessed trees. |
 | `split ROOT` | Read `ROOT/manifest.csv`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
 
@@ -161,20 +161,30 @@ use `study_<n>/` and ignore the old `images/` layout.
 
 ## Preprocessing
 
-The CLI accepts the legacy preset, adaptive histogram equalization (`--ahe`), or both. To use the legacy preset:
+Each preprocessing step has its own opt-in flag, and any combination is allowed. The full legacy pipeline is the four flags
+`--initial-resample --rescale --resample --reshape`:
 
 ```bash
-uv run python -m rt_dataprep preprocess /secure/converted /secure/preprocessed --legacy-rnt --series-fov-mask
+uv run python -m rt_dataprep preprocess /secure/converted /secure/preprocessed --initial-resample --rescale --resample --reshape --series-fov-mask
 uv run python -m rt_dataprep manifest /secure/preprocessed
 uv run python -m rt_dataprep split /secure/preprocessed --test-size 0.2 --val-size 0.2 --seed 42
 ```
 
-`--legacy-rnt` resamples to 1 mm, applies `(HU + 1024) / 4096` to CT, resamples to 1.25 mm, then crops/pads to
-**701 × 701 × 433 voxels (x, y, z)**. One float32 image at that size occupies about **812 MiB** before processing copies
-and other volumes; plan memory and storage accordingly. The CT formula is not intensity clipping.
+| Flag | Step | Output prefix |
+| --- | --- | --- |
+| `--initial-resample` | Resample to 1 mm spacing | `initialresample_` |
+| `--rescale` | Apply `(HU + 1024) / 4096` to CT | `rescale_` |
+| `--ahe` | CLAHE adaptive histogram equalization | `ahe_` |
+| `--resample` | Resample to 1.25 mm spacing | `resample_` |
+| `--reshape` | Centred crop/pad to **701 × 701 × 433 voxels (x, y, z)** | `reshape_` |
 
-CT study series receive all enabled steps. MR/PT study series receive geometric steps and optional AHE, and skip HU rescaling. A Python
-rescale-only configuration refuses MR/PT because it has no applicable step. Registered plan series are resampled onto
+Steps always run in the order of the table, whichever flags are given. One float32 image at the `--reshape` size occupies
+about **812 MiB** before processing copies and other volumes; plan memory and storage accordingly. The CT formula is not
+intensity clipping. `--reshape` without `--initial-resample` or `--resample` crops/pads at the CT's own spacing, which can
+pad a large extent at native spacing.
+
+CT study series receive all enabled steps. MR/PT study series receive geometric steps and optional AHE, and skip HU rescaling. `--rescale`
+alone (or the same Python configuration) refuses MR/PT because it has no applicable step. Registered plan series are resampled onto
 the final planning CT grid; unusable alignment, no overlap, or unreadable data skips that series and increments the plan's
 `skipped_series`. Output `reg_matrix` is `identity` after alignment.
 
@@ -188,15 +198,15 @@ masks, or applicator coordinates. It produces float32 image values in [0, 1]; th
 The step runs before final resampling/cropping, after any CT rescale. Registered plan series are equalized on their native
 grids before alignment. Constant volumes become zero. This is not a numerical parity port of legacy mclahe.
 
-For AHE without the large legacy grid, use a fresh output root:
+For AHE without the large `--reshape` grid, use a fresh output root:
 
 ```bash
 uv run python -m rt_dataprep preprocess /secure/converted /secure/equalized --ahe
 uv run python -m rt_dataprep manifest /secure/equalized
 ```
 
-Combine `--ahe --legacy-rnt` to enable both. AHE can require several additional volume-sized arrays; include those in
-memory planning. Its parameters are currently fixed; it does not add CLI controls for kernel, bins, or clip limit.
+`--ahe` combines with any other step flag, for example the four legacy flags. AHE can require several additional
+volume-sized arrays; include those in memory planning. Its parameters are currently fixed; it does not add CLI controls for kernel, bins, or clip limit.
 
 Output filenames acquire step prefixes such as `reshape_resample_rescale_initialresample_`; when enabled, `ahe_` sits
 between `resample_` and `rescale_` (for example `reshape_resample_ahe_rescale_initialresample_`). Generate a new manifest
@@ -248,7 +258,7 @@ class/module/line details. Reports and per-folder CSVs are sensitive artifacts a
 | A patient is skipped on rerun | Its destination patient folder already exists. Use a fresh output root to recompute. |
 | A plan is refused | Read its fixed reason in the conversion report; verify the RTPLAN → RTSTRUCT → CT reference chain and geometry. |
 | Fewer images than expected | Review study summary skips, series eligibility, model exclusions, localizers, and readable pixel data. |
-| Preprocessing reports no step is on | Pass `--legacy-rnt`, `--ahe`, or enable applicable `PreprocessSteps` in Python. |
+| Preprocessing reports no step is on | Pass a step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`), or enable applicable `PreprocessSteps` in Python. |
 | A series or plan is missing from the manifest | Check the refusal count, `series.csv`, file presence, and image headers. |
 | Split refuses existing content | Preserve the old cohort record and generate the new cohort in a separate output root. |
 | Unexpected internal error | Preserve source data and reports in approved storage; report a synthetic reproducer and safe class/site details. |

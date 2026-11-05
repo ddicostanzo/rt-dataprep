@@ -842,7 +842,7 @@ def test_crash_site_is_the_caller_of_quiet_call(monkeypatch):
         raise RuntimeError('SYNTHETICPTA')
     monkeypatch.setattr(pre, 'resample_to', boom)
     with pytest.raises(CaseRefused) as err:
-        pre.process_ct(sitk.Image(2, 2, 2, sitk.sitkFloat32), pre.LEGACY_RNT)
+        pre.process_ct(sitk.Image(2, 2, 2, sitk.sitkFloat32), pre.PreprocessSteps(resample=True, rescale=True, harmonize_spacing=True, reshape=True))
     module, line = conv.crash_site(err.tb)
     assert module == 'rt_dataprep.preprocess'
     assert 'quiet_call(run' in inspect.getsource(pre).splitlines()[line - 1]
