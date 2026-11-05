@@ -170,10 +170,11 @@ Acceptance tests:
 
 ## Parity check on real data (OSC, run by the user, after F2)
 
-**Convert parity.** The OSC `raw/<mrn>/fx_<n>/` tree is already organized (convert and preprocess read `fx_<n>` like
-`plan_<n>` and keep the name), so run `convert` on it directly, then
-`preprocess --legacy-rnt --legacy-linear-masks` on convert's output (never on `raw/`), and match against the pooled
-legacy folders by folder name, the same pairing `scripts/convert_dose.py` uses. This keeps convert parity separate from organize. `scripts/parity.py` prints
+**Convert parity.** Organize the raw export, run `convert`, then
+`preprocess --initial-resample --rescale --resample --reshape --legacy-linear-masks` on convert's output
+(`--legacy-rnt` was removed in #150; the user confirmed the pooled `ct.nii.gz` has no AHE), and match against the
+pooled legacy folders: pooled `<mrn>_<x>_<fx>` pairs with `<mrn>/plan_<fx>`, as rnt's `scripts/convert_dose.py` pairs
+by name. A pair whose CT grid or values differ is the sign of a numbering mismatch. This keeps convert parity separate from organize. `scripts/parity.py` prints
 aggregate counts only, with no identifiers. Run on N ≥ 20 fractions. Pass criteria:
 - CT: `geometry_equal` to legacy, and voxel max abs diff ≤ 1e-3 on the rescaled scale. With `ahe` on, it is checked
   separately with a Pearson r ≥ 0.999, because of the uncertainty about the legacy torchio/SimpleITK handoff after
