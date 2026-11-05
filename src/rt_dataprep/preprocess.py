@@ -374,11 +374,12 @@ def preprocess_series(study_dir, out_dir, row, steps):
     if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape):
         raise CaseRefused(REASON_NO_SERIES_STEPS)  # a rescale-only run has nothing to do to an MR or PT: no read, no copy under another name
     source = study_dir / row['file']
-    image = read_image(source)
-    if not is_volume(image):  # before too_small, which assumes three axes
-        raise CaseRefused(REASON_NOT_VOLUME)
-    if too_small(read_info(source), steps):
+    info = read_info(source)  # header first: a too-small series is refused without a pixel read (#141)
+    if len(info[0]) == 3 and too_small(info, steps):  # too_small assumes three axes; other shapes fail is_volume below
         raise CaseRefused(REASON_TOO_SMALL)
+    image = read_image(source)
+    if not is_volume(image):
+        raise CaseRefused(REASON_NOT_VOLUME)
     image = process_ct(image, steps)
     name = output_name(row['file'], steps, ct=is_ct)
     out_dir.mkdir(exist_ok=True)
