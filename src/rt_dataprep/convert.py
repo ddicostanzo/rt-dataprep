@@ -254,7 +254,7 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
     from series.py, anything else is the patient's REASON_INTERNAL. A series with a kept file in a folder of `short` (refused
     plan folders that may have lost a slice) or whose SeriesInstanceUID is in `lost` (known short) is skipped and counted,
     and so is a series of a tainted study (`misc_taint` and series.tainted_studies) or, when a taint has no study, a series
-    held only in `misc_dir` (the patient's misc_files), or whose slices disagree on study.
+    held only in `misc_dir` (the patient's misc_files), or whose slices disagree on study or have a stripped-empty study UID.
     """
     found, regs, by_sop = ser.candidates(headers, exclude_models)
     converted = [(row, result, result.series_rows[0]) for row, result in outcomes if result is not None]  # row 0 is the CT row
@@ -269,7 +269,8 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
 
     def at_risk(slices):
         studies = {_tag(ds, 'StudyInstanceUID') for _, ds in slices}  # slices that disagree on study are skipped too (#69)
-        return len(studies) > 1 or bool(studies & tainted) or (blind and all(path.parent == misc_dir for path, _ in slices))
+        return (any(not study.strip() for study in studies) or len(studies) > 1 or bool(studies & tainted)
+                or (blind and all(path.parent == misc_dir for path, _ in slices)))
     checked = [None if uid in lost or any(path.parent in short for path, _ in slices) or at_risk(slices) else ser.check_volume(slices)
                for uid, slices in found]
     skipped = checked.count(None)
