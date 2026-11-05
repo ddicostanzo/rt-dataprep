@@ -22,3 +22,6 @@ PASS: no BLOCKING. NOTE (deferred): no test asserts the PRE_RUN seam shrinks out
 ## task-02
 - README/examples now show the five step flags, a flag/step/prefix table and the four-flag full pipeline; the "--rescale alone refuses MR/PT" and reshape-at-native-spacing notes added.
 - Suite on the session branch: 842 passed, 4 skipped; ruff clean.
+
+## review-loop-pass-1
+CLEAN: code review and spec axis found no BLOCKING. Deferred findings filed as #156 (hardening). No fixes, so no verification pass.
