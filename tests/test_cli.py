@@ -128,7 +128,7 @@ def test_legacy_linear_masks_flag_sets_the_field(tmp_path, converted):
 
 def test_preprocess_without_the_preset_exits_1_with_no_steps(tmp_path, converted):
     out = tmp_path / 'out'
-    for flags in ([], ['--legacy-linear-masks']):
+    for flags in ([], ['--legacy-linear-masks'], ['--series-fov-mask']):
         result = subprocess.run([sys.executable, '-m', 'rt_dataprep', 'preprocess', str(converted), str(out), *flags], capture_output=True, text=True)
         assert result.returncode == 1
         assert result.stderr == f'rt_dataprep: {pre.REASON_NO_STEPS}\n' and result.stdout == ''
@@ -313,6 +313,20 @@ def calls(monkeypatch):
     monkeypatch.setattr(cli, 'organize', lambda *args, **kwargs: seen.append(('organize', args, kwargs)))
     monkeypatch.setattr(cli, 'convert', lambda *args, **kwargs: seen.append(('convert', args, kwargs)))
     return seen
+
+
+@pytest.mark.parametrize('flags, want', [
+    (['--legacy-rnt'], pre.LEGACY_RNT),
+    (['--legacy-rnt', '--series-fov-mask'], dataclasses.replace(pre.LEGACY_RNT, series_fov_mask=True)),
+    (['--legacy-rnt', '--legacy-linear-masks', '--series-fov-mask'],
+     dataclasses.replace(pre.LEGACY_RNT, legacy_linear_masks=True, series_fov_mask=True)),
+])
+def test_series_fov_mask_flag_reaches_preprocess_steps(flags, want, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, 'preprocess', lambda *args: seen.append(args))
+    cli.main(['preprocess', 'a', 'b', *flags])
+    assert seen == [('a', 'b', want)]
+    assert seen[0][2].series_fov_mask is ('--series-fov-mask' in flags)
 
 
 @pytest.mark.parametrize('command', ['organize', 'convert'])
