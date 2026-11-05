@@ -14,8 +14,10 @@ import SimpleITK as sitk
 from rt_dataprep import convert as conv
 from rt_dataprep import preprocess as pre
 from rt_dataprep.dicom_io import CaseRefused
-from rt_dataprep.preprocess import LEGACY_RNT, PreprocessSteps
+from rt_dataprep.preprocess import PreprocessSteps
 from skimage.exposure import equalize_adapthist
+
+FOUR_STEPS = PreprocessSteps(resample=True, rescale=True, harmonize_spacing=True, reshape=True)
 
 ROTATED = (0.8660254037844387, -0.5, 0.0, 0.5, 0.8660254037844387, 0.0, 0.0, 0.0, 1.0)  # 30 degrees about z
 QUARTER = (0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)  # 90 degrees about z: D @ (a, b, c) = (-b, a, c)
@@ -44,15 +46,12 @@ def centroid_mm(mask):
     return np.array(mask.TransformContinuousIndexToPhysicalPoint(index.tolist()))
 
 
-def test_steps_defaults_and_preset():
+def test_steps_defaults_and_the_four_step_combination():
     steps = PreprocessSteps()
     assert (steps.resample, steps.rescale, steps.harmonize_spacing, steps.reshape, steps.legacy_linear_masks) == (False,) * 5
     assert steps.new_spacing == (1, 1, 1) and steps.final_spacing == (1.25, 1.25, 1.25) and steps.new_shape == (701, 701, 433)
     with pytest.raises(dataclasses.FrozenInstanceError):
         steps.resample = True
-    assert (LEGACY_RNT.resample, LEGACY_RNT.rescale, LEGACY_RNT.harmonize_spacing, LEGACY_RNT.reshape) == (True,) * 4
-    assert not LEGACY_RNT.legacy_linear_masks
-    assert dataclasses.replace(LEGACY_RNT, resample=False, rescale=False, harmonize_spacing=False, reshape=False) == steps
 
 
 def test_reference_grid_hand_computed():
@@ -97,7 +96,7 @@ def test_crop_or_pad_odd_difference_puts_the_larger_half_first():
     assert out.GetOrigin() == pytest.approx(tuple(np.array(image.GetOrigin()) + shift))
 
 
-STEPS_SMALL = dataclasses.replace(LEGACY_RNT, new_spacing=(1.5, 1.5, 1.5), new_shape=(9, 9, 9))
+STEPS_SMALL = dataclasses.replace(FOUR_STEPS, new_spacing=(1.5, 1.5, 1.5), new_shape=(9, 9, 9))
 
 
 def small_ct():
@@ -150,7 +149,7 @@ def test_dose_matches_the_analytic_dose_and_is_zero_outside():
     native[lo[2]:hi[2] + 1, lo[1]:hi[1] + 1, lo[0]:hi[0] + 1] = (0.5 + 0.1 * x_mm)[lo[0]:hi[0] + 1]
     dose = make_image(native, spacing=spacing, origin=origin)
     final = pre.process_ct(make_image(np.zeros((20, 24, 30)), spacing=spacing, origin=origin),
-                           dataclasses.replace(LEGACY_RNT, new_shape=(28, 28, 28)))
+                           dataclasses.replace(FOUR_STEPS, new_shape=(28, 28, 28)))
     out = sitk.GetArrayFromImage(pre.process_dose(dose, final))
     assert out.dtype == np.float32
     z, y, x = (np.array(final.GetOrigin())[::-1, None, None, None] + np.array(final.GetSpacing())[::-1, None, None, None]
@@ -176,7 +175,7 @@ def cube_fixture(side=12):
 
 def test_masks_are_binary_uint8_by_default_and_fractional_float32_when_legacy_linear():
     ct, mask = cube_fixture(side=8)
-    steps = dataclasses.replace(LEGACY_RNT, new_shape=(20, 20, 20))
+    steps = dataclasses.replace(FOUR_STEPS, new_shape=(20, 20, 20))
     final = pre.process_ct(ct, steps)
     out = pre.process_mask(mask, final, steps)
     assert out.GetPixelID() == sitk.sitkUInt8 and set(np.unique(sitk.GetArrayFromImage(out))) == {0, 1}
@@ -188,7 +187,7 @@ def test_masks_are_binary_uint8_by_default_and_fractional_float32_when_legacy_li
 
 def test_default_masks_take_the_nearest_native_voxel():
     ct, mask = cube_fixture(side=8)
-    steps = dataclasses.replace(LEGACY_RNT, new_shape=(20, 20, 20))
+    steps = dataclasses.replace(FOUR_STEPS, new_shape=(20, 20, 20))
     final = pre.process_ct(ct, steps)
     out = sitk.GetArrayFromImage(pre.process_mask(mask, final, steps))
     native = sitk.GetArrayFromImage(mask)
@@ -202,7 +201,7 @@ def test_default_masks_take_the_nearest_native_voxel():
 
 def test_cube_keeps_its_centroid_and_volume_and_a_shifted_copy_fails():
     ct, mask = cube_fixture()
-    steps = dataclasses.replace(LEGACY_RNT, new_shape=(20, 20, 20))
+    steps = dataclasses.replace(FOUR_STEPS, new_shape=(20, 20, 20))
     final = pre.process_ct(ct, steps)
     out = pre.process_mask(mask, final, steps)
     s = max(steps.final_spacing)
@@ -227,7 +226,7 @@ def test_every_output_keeps_the_input_direction_exactly():
     ct = make_image(np.zeros((8, 8, 8)), **geometry)
     dose = make_image(np.ones((8, 8, 8)), **geometry)
     mask = sitk.Cast(dose, sitk.sitkUInt8)
-    steps = dataclasses.replace(LEGACY_RNT, new_shape=(10, 10, 10))
+    steps = dataclasses.replace(FOUR_STEPS, new_shape=(10, 10, 10))
     final = pre.process_ct(ct, steps)
     outputs = [final, pre.process_dose(dose, final), pre.process_mask(mask, final, steps)]
     assert all(image.GetDirection() == ROTATED for image in outputs)
@@ -235,9 +234,9 @@ def test_every_output_keeps_the_input_direction_exactly():
 
 
 def test_names_newest_step_first_and_geometric_prefixes_only_for_dose_and_masks():
-    assert pre.output_name('planning_ct.nii.gz', LEGACY_RNT, ct=True) == 'reshape_resample_rescale_initialresample_planning_ct.nii.gz'
-    assert pre.output_name('dose.nii.gz', LEGACY_RNT) == 'reshape_resample_initialresample_dose.nii.gz'
-    assert pre.output_name('ptv.nii.gz', LEGACY_RNT) == 'reshape_resample_initialresample_ptv.nii.gz'
+    assert pre.output_name('planning_ct.nii.gz', FOUR_STEPS, ct=True) == 'reshape_resample_rescale_initialresample_planning_ct.nii.gz'
+    assert pre.output_name('dose.nii.gz', FOUR_STEPS) == 'reshape_resample_initialresample_dose.nii.gz'
+    assert pre.output_name('ptv.nii.gz', FOUR_STEPS) == 'reshape_resample_initialresample_ptv.nii.gz'
     rescale = PreprocessSteps(rescale=True)
     assert pre.output_name('planning_ct.nii.gz', rescale, ct=True) == 'rescale_planning_ct.nii.gz'
     assert pre.output_name('dose.nii.gz', rescale) == 'dose.nii.gz' and pre.output_name('ptv.nii.gz', rescale) == 'ptv.nii.gz'
@@ -251,8 +250,8 @@ def test_third_party_failures_are_one_fixed_reason(tmp_path):
     with pytest.raises(CaseRefused) as caught:
         pre.read_image(bad)
     assert str(caught.value) == pre.REASON_FILE_UNREADABLE and str(bad) not in str(caught.value)
-    for call in (lambda: pre.process_ct(None, LEGACY_RNT), lambda: pre.process_dose(None, blank((2, 2, 2))),
-                 lambda: pre.process_mask(None, blank((2, 2, 2)), LEGACY_RNT)):
+    for call in (lambda: pre.process_ct(None, FOUR_STEPS), lambda: pre.process_dose(None, blank((2, 2, 2))),
+                 lambda: pre.process_mask(None, blank((2, 2, 2)), FOUR_STEPS)):
         with pytest.raises(CaseRefused) as caught:
             call()
         assert str(caught.value) == pre.REASON_INTERNAL
@@ -270,7 +269,7 @@ def test_no_array_view_of_a_temporary_image():
 
 # ---- task-02: the tree walk. A synthetic converted tree lives in tmp_path; patient IDs hold no digits or underscores. ----
 
-SMALL = dataclasses.replace(LEGACY_RNT, new_shape=(10, 10, 10))
+SMALL = dataclasses.replace(FOUR_STEPS, new_shape=(10, 10, 10))
 CT_FILE = 'reshape_resample_rescale_initialresample_planning_ct.nii.gz'
 DOSE_FILE = 'reshape_resample_initialresample_dose.nii.gz'
 PTV_FILE, BLADDER_FILE = 'reshape_resample_initialresample_ptv.nii.gz', 'reshape_resample_initialresample_bladder.nii.gz'
@@ -338,7 +337,7 @@ def plan_row(report, patient='SYNTHETICPTA', folder='plan_1'):
     return next(r for r in report.rows if (r.patient, r.folder) == (patient, folder))
 
 
-def test_preset_writes_the_prefixed_files_and_leaves_the_input_alone(tmp_path):
+def test_four_steps_write_the_prefixed_files_and_leave_the_input_alone(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     folder, rows = write_plan(converted)
     before = state(converted)
@@ -704,7 +703,7 @@ def test_a_mask_is_written_before_the_next_one_is_read(tmp_path, monkeypatch):
 
 def crop_case(tmp_path, **plan):
     """A plan whose objects sit in the corner voxels, cut off by new_shape (4, 4, 4); the final grid covers +-2.5 mm."""
-    small = dataclasses.replace(LEGACY_RNT, new_shape=(4, 4, 4))
+    small = dataclasses.replace(FOUR_STEPS, new_shape=(4, 4, 4))
     write_plan(tmp_path / 'converted', **plan)
     write_plan(tmp_path / 'converted', plan='plan_2', dose=box((5, 5, 5), (7, 7, 7), value=2.0), masks={'ptv': box((5, 5, 5), (7, 7, 7))})
     report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', small)
@@ -920,7 +919,7 @@ def test_matches_torchio(tmp_path, direction, y_spacing):
     mask = sitk.Cast(make_image(mask_array, spacing=ct.GetSpacing(), origin=ct.GetOrigin(), direction=direction), sitk.sitkUInt8)
     sitk.WriteImage(ct, str(tmp_path / 'ct.nii.gz'))
     sitk.WriteImage(mask, str(tmp_path / 'mask.nii.gz'))
-    steps = dataclasses.replace(LEGACY_RNT, new_spacing=(1.5, 1.5, 1.5), new_shape=(14, 4, 13))
+    steps = dataclasses.replace(FOUR_STEPS, new_spacing=(1.5, 1.5, 1.5), new_shape=(14, 4, 13))
 
     final = pre.process_ct(pre.read_image(tmp_path / 'ct.nii.gz'), steps)
     mine_mask = pre.process_mask(pre.read_image(tmp_path / 'mask.nii.gz'), final, steps)
@@ -1808,9 +1807,8 @@ def ahe_plan(root, n=16, **plan):
     return write_plan(root, n=n, dose=None, masks={}, applicator=False, **plan)
 
 
-def test_ahe_field_defaults_off_and_the_preset_is_unchanged():
-    assert PreprocessSteps().ahe is False and LEGACY_RNT.ahe is False
-    assert dataclasses.replace(LEGACY_RNT, ahe=False) == LEGACY_RNT
+def test_ahe_field_defaults_off():
+    assert PreprocessSteps().ahe is False
 
 
 def test_ac1a_ahe_only_equalizes_the_ct_on_its_own_non_default_grid(tmp_path):
