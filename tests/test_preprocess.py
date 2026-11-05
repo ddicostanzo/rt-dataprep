@@ -516,7 +516,7 @@ def test_out_root_in_or_equal_to_the_input_raises_before_any_write(tmp_path):
 def test_no_step_on_raises_before_any_write_even_with_linear_masks(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     write_plan(converted)
-    for steps in (PreprocessSteps(), PreprocessSteps(legacy_linear_masks=True)):
+    for steps in (PreprocessSteps(), PreprocessSteps(legacy_linear_masks=True), PreprocessSteps(series_fov_mask=True)):
         with pytest.raises(ValueError) as caught:
             pre.preprocess(converted, out, steps)
         assert str(caught.value) == pre.REASON_NO_STEPS and not out.exists()
@@ -1703,3 +1703,62 @@ def test_each_series_is_released_before_the_next_file_is_read(tmp_path, monkeypa
     assert plan_row(report).outcome == 'preprocessed'
     assert alive_at_read == [0] * 6  # CT, dose, two masks, two series
     assert sum(ref() is not None for ref in tracked) == 0
+
+
+FOV = dataclasses.replace(SMALL, series_fov_mask=True)
+FOV_OUT = f'fovmask_{MR_OUT}'
+
+
+def test_fov_mask_is_the_final_grid_uint8_where_the_series_lands_and_listed_right_after_its_series(tmp_path):
+    report, done, _ = run_plan(tmp_path, [mr_spec(np.full((8, 8, 8), 3.0), rigid(0, (4, 0, 0)))], steps=FOV)
+    assert plan_row(report).files == [*BASE_FILES, MR_OUT, FOV_OUT, 'series.csv']
+    assert [r['file'] for r in conv_rows(done)] == [*BASE_FILES, MR_OUT]  # no mask row in series.csv
+    mask, ct, image = read_out(done, FOV_OUT), read_out(done, CT_FILE), read_out(done)
+    assert mask.GetPixelID() == sitk.sitkUInt8
+    assert (mask.GetSize(), mask.GetOrigin(), mask.GetSpacing(), mask.GetDirection()) == (ct.GetSize(), ct.GetOrigin(), ct.GetSpacing(), ct.GetDirection())
+    flags, values = sitk.GetArrayFromImage(mask), sitk.GetArrayFromImage(image)
+    assert (flags == 1).any() and (flags == 0).any()
+    assert ((flags == 1) == (values != 0)).all() and (values[flags == 1] == 3.0).all()  # exact: the mask is geometry, never loosened
+
+
+def test_fov_mask_of_a_registered_ct_filled_with_its_minimum_equals_the_mr_mask(tmp_path):
+    steps, matrix = dataclasses.replace(FOV, rescale=False), rigid(0, (4, 0, 0))
+    ct_out = pre.output_name('series_CT_1.nii.gz', steps, ct=True)
+    _, done, _ = run_plan(tmp_path, [mr_spec(np.full((8, 8, 8), 3.0), matrix), mr_spec(np.full((8, 8, 8), -1000.0), matrix, file='series_CT_1.nii.gz', modality='CT')], steps=steps)
+    assert (sitk.GetArrayFromImage(read_out(done, f'fovmask_{ct_out}')) == sitk.GetArrayFromImage(read_out(done, f'fovmask_{MR_OUT}'))).all()
+
+
+@pytest.mark.parametrize('spec', [mr_spec(np.ones((4, 4, 4)), ''), mr_spec(np.ones((8, 8, 8)), rigid(0, (500, 0, 0))), mr_spec(b'SYNTHETIC not a nifti', 'identity')],
+                         ids=['no_matrix', 'no_overlap', 'unreadable'])
+def test_a_series_left_out_gets_no_fov_mask(tmp_path, spec):
+    report, done, _ = run_plan(tmp_path, [spec], steps=FOV)
+    assert plan_row(report).skipped_series == 1 and plan_row(report).files == [*BASE_FILES, 'series.csv']
+    assert not any(p.name.startswith('fovmask_') for p in done.iterdir())
+
+
+def test_no_fov_mask_is_written_by_default(tmp_path):
+    report, done, _ = run_plan(tmp_path, [mr_spec(np.full((8, 8, 8), 3.0), rigid(0, (4, 0, 0)))])
+    assert plan_row(report).files == [*BASE_FILES, MR_OUT, 'series.csv'] and not any(p.name.startswith('fovmask_') for p in done.iterdir())
+
+
+def test_the_fov_mask_leaves_every_other_output_unchanged(tmp_path):
+    outs = []
+    for steps in (SMALL, FOV):
+        root = tmp_path / str(steps.series_fov_mask)
+        folder, rows = write_plan(root / 'converted')
+        rows[0]['frame_of_reference_uid'] = CT_FRAME
+        sitk.WriteImage(make_image(np.full((8, 8, 8), 3.0), **MR_GRID), str(folder / 'series_MR_1.nii.gz'))
+        rows.append(series_row('series_MR_1.nii.gz', 'series', modality='MR', reg_matrix=matrix_text(rigid(0, (4, 0, 0))), frame_of_reference_uid=MR_FRAME))
+        save_rows(folder, rows)
+        write_study_tree(root / 'converted')
+        pre.preprocess(root / 'converted', root / 'out', steps)
+        outs.append(root / 'out' / 'SYNTHETICPTA')
+    off, on = ({p.relative_to(out) for p in out.rglob('*') if p.is_file() and not p.name.startswith('fovmask_')} for out in outs)
+    assert off == on and len(off) > 7  # plan files and series, study series and csvs
+    assert sum(p.name.startswith('fovmask_') for p in outs[1].rglob('*')) == 1  # the plan's one aligned series only
+    for name in off:
+        if name.suffix == '.gz':
+            a, b = sitk.ReadImage(str(outs[0] / name)), sitk.ReadImage(str(outs[1] / name))
+            assert (sitk.GetArrayFromImage(a) == sitk.GetArrayFromImage(b)).all() and a.GetOrigin() == b.GetOrigin()
+        else:
+            assert (outs[0] / name).read_bytes() == (outs[1] / name).read_bytes()

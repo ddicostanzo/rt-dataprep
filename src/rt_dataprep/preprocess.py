@@ -61,6 +61,7 @@ class PreprocessSteps:
     harmonize_spacing: bool = False  # final resample to final_spacing, linear
     reshape: bool = False  # centred crop/pad to new_shape
     legacy_linear_masks: bool = False
+    series_fov_mask: bool = False  # not a step: also write fovmask_<series> (uint8, 1 inside the series FOV) per aligned plan series
     new_spacing: tuple = (1, 1, 1)  # mm, (x, y, z)
     final_spacing: tuple = (1.25, 1.25, 1.25)
     new_shape: tuple = (701, 701, 433)  # voxels, (x, y, z)
@@ -198,11 +199,12 @@ def series_transform(matrix):
 
 
 def covers_ct(native, final_ct, matrix):
-    """Whether any final_ct voxel falls inside native's FOV under `matrix`, whatever native's values (D6)."""
+    """(the uint8 image on final_ct that is 1 where native's FOV lands under `matrix`, whether any voxel is), whatever native's values (D6)."""
     def run():
         fov = sitk.Image(native.GetSize(), sitk.sitkUInt8) + 1
         fov.CopyInformation(native)
-        return has_voxels(sitk.Resample(fov, final_ct, series_transform(matrix), sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8))
+        landed = sitk.Resample(fov, final_ct, series_transform(matrix), sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8)
+        return landed, has_voxels(landed)
     return quiet_call(run, REASON_INTERNAL)
 
 
@@ -529,15 +531,21 @@ def preprocess_plan(plan_dir, out_dir, steps):
             skipped += 1
             continue
         is_ct = row['modality'] == 'CT'
-        if not covers_ct(native, final, matrix):  # entirely outside the CT: never resampled
+        fov, covered = covers_ct(native, final, matrix)
+        if not steps.series_fov_mask:
+            fov = None  # released right after the check: a default run's peak memory is unchanged (#47)
+        if not covered:  # entirely outside the CT: never resampled
             skipped += 1
         else:
             image = process_series(native, final, matrix, is_ct and steps.rescale, is_ct)
             name = output_name(row['file'], steps, ct=is_ct)
             conv.write_atomic(image, out_dir / name)
             files.append(name)
+            if fov is not None:  # the mask is listed after its series, not in series.csv
+                conv.write_atomic(fov, out_dir / f'fovmask_{name}')
+                files.append(f'fovmask_{name}')
             series_rows.append(row | {'file': name, 'reg_matrix': IDENTITY, 'frame_of_reference_uid': kept[0]['frame_of_reference_uid']})
             del image
-        del native
+        del native, fov
     conv.write_series_csv(series_rows, out_dir / conv.SERIES_NAME)
     return [*files, conv.SERIES_NAME], skipped

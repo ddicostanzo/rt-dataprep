@@ -3,7 +3,7 @@ manifest.csv of a converted or preprocessed tree (spec: f3-manifest-split): one 
 and one per series of each <patient>/study_<n>/ that holds one (imaging-cases spec D9, D14-D16).
 
 Each plan goes through preprocess.check_rows, which validates series.csv and reads the CT header only; the `series` column then
-reads the header of each identity series. A plan check_rows refuses is left out and counted. A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.csv rows, and a
+reads the header of each identity series; an entry gains `fov_mask` when preprocess wrote fovmask_<file> beside it. A plan check_rows refuses is left out and counted. A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.csv rows, and a
 series whose header cannot be read is left out and counted on its own. The tree is only read; manifest.csv (and its dated copy) in the root is the one place the patient folder names
 appear. The log line carries counts only.
 """
@@ -53,7 +53,8 @@ def _study_rows(patient, study):
 
 
 def _aligned(plan, series, ct):
-    """The plan's series rows that are in the CT frame (identity) and on the CT grid, as {file, modality}, in series.csv order (D10)."""
+    """The plan's series rows that are in the CT frame (identity) and on the CT grid, as {file, modality}, in series.csv order (D10);
+    plus fov_mask when preprocess wrote fovmask_<file> beside it (#129; on the CT grid by construction, so no header read)."""
     listed = []
     for row in series:
         if row['reg_matrix'] != 'identity':
@@ -63,7 +64,10 @@ def _aligned(plan, series, ct):
         except (CaseRefused, OSError):  # this series only: it is not listed, the plan keeps its row
             continue
         if on_grid:
-            listed.append({'file': row['file'], 'modality': row['modality']})
+            entry = {'file': row['file'], 'modality': row['modality']}
+            if (plan / f'fovmask_{row["file"]}').is_file():
+                entry['fov_mask'] = f'fovmask_{row["file"]}'
+            listed.append(entry)
     return listed
 
 
