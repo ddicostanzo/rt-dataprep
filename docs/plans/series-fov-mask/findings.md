@@ -38,3 +38,10 @@ function docstrings updated), tests/test_manifest.py (one test: on/off trees, co
 Gotchas:
 - Red run: the single new test failed on the missing key only; the other 31 manifest tests passed. Full suite 787 passed, 4 skipped; ruff clean.
 - The mask is found by name on the output tree only; the converted tree never has fovmask_ files, so its entries are unchanged.
+
+## review-loop-pass-1
+- Spec axis (Opus): every plan criterion and spec AC met; no plan bugs; nothing blocking.
+- Bugs (Opus, also wave review for task-02/03 and integration): no blocking findings; default output and memory unchanged;
+  40 random rotated/sub-voxel cases matched mask to linear output voxel for voxel.
+- Deferred, filed as hardening: #145 (test coverage gaps, incl. wave NOTEs), #146 (manifest mask header check), #147 (study/CT pad mask).
+- No BLOCKING fix, so no verification pass.
