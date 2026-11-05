@@ -44,3 +44,10 @@ N5 callers must never log str() of the re-raised OSError.
 - Failure injection: OSError via `conv.sitk.WriteImage` (build) and `dicom_io.rename_dir` (swap); unreadable via
   `dicom_io.read_header_core`.
 - Untested: claimed untouched without overwrite (indirect only); recover raising on a failed restore.
+
+## task-04
+- preprocess(..., *, overwrite=False); `preprocess_patient(folder, out_root, steps, overwrite=False, claimed=None)`
+  returns `(rows, status)`; same flow as convert. New preprocess.REASON_NAME_CLAIMED (same text as convert's).
+- recover runs on every patient (plain runs too) and cleans leftover `.old`/`.partial`. Skip check uses `os.path.lexists`.
+- Failure injection: OSError via `conv.write_atomic` (build) and `dicom_io.rename_dir` (swap); tests use `SMALL`.
+- Untested: dangling symlink at the target; recover raising on a failed restore.
