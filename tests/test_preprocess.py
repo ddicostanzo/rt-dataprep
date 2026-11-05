@@ -15,6 +15,7 @@ from rt_dataprep import convert as conv
 from rt_dataprep import preprocess as pre
 from rt_dataprep.dicom_io import CaseRefused
 from rt_dataprep.preprocess import LEGACY_RNT, PreprocessSteps
+from skimage.exposure import equalize_adapthist
 
 ROTATED = (0.8660254037844387, -0.5, 0.0, 0.5, 0.8660254037844387, 0.0, 0.0, 0.0, 1.0)  # 30 degrees about z
 QUARTER = (0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)  # 90 degrees about z: D @ (a, b, c) = (-b, a, c)
@@ -1766,3 +1767,155 @@ def test_the_fov_mask_leaves_every_other_output_unchanged(tmp_path):
             assert (a.GetOrigin(), a.GetSpacing(), a.GetDirection(), a.GetPixelID()) == (b.GetOrigin(), b.GetSpacing(), b.GetDirection(), b.GetPixelID())
         else:
             assert (outs[0] / name).read_bytes() == (outs[1] / name).read_bytes()
+
+
+# ---- AHE task-02: the ahe step for the planning CT and study series. Volumes are linear gradients, never constant or two-level. ----
+
+AHE = PreprocessSteps(ahe=True)
+SMALL_AHE = dataclasses.replace(SMALL, ahe=True)
+AHE_CT_FILE = 'reshape_resample_ahe_rescale_initialresample_planning_ct.nii.gz'
+AHE_STUDY_CT = 'reshape_resample_ahe_rescale_initialresample_series_CT_1.nii.gz'
+
+
+def reference_equalize(image):
+    """The array of `image` min-max scaled in float32, then skimage's equalize_adapthist with the spec constants: never the code under test."""
+    array = sitk.GetArrayFromImage(image).astype(np.float32)
+    return equalize_adapthist((array - array.min()) / (array.max() - array.min()), nbins=128, clip_limit=0.05)
+
+
+def reference_pipeline(image, steps):
+    """initial resample -> rescale -> reference equalize -> final spacing -> reshape, each step on only when `steps` says so."""
+    if steps.resample:
+        image = pre.resample_to(image, steps.new_spacing)
+    if steps.rescale:
+        image = pre.rescale(image)
+    equalized = sitk.GetImageFromArray(reference_equalize(image))
+    equalized.CopyInformation(image)
+    image = equalized
+    if steps.harmonize_spacing:
+        image = pre.resample_to(image, steps.final_spacing)
+    if steps.reshape:
+        image = pre.crop_or_pad(image, steps.new_shape, pre.minimum(image))
+    return image
+
+
+def header(image):
+    return image.GetSize(), image.GetOrigin(), image.GetSpacing(), image.GetDirection()
+
+
+def ahe_plan(root, n=16, **plan):
+    """write_plan with a gradient CT on an n^3 grid and no dose or masks (their 12^3 grid would not match)."""
+    return write_plan(root, n=n, dose=None, masks={}, applicator=False, **plan)
+
+
+def test_ahe_field_defaults_off_and_the_preset_is_unchanged():
+    assert PreprocessSteps().ahe is False and LEGACY_RNT.ahe is False
+    assert dataclasses.replace(LEGACY_RNT, ahe=False) == LEGACY_RNT
+
+
+def test_ac1a_ahe_only_equalizes_the_ct_on_its_own_non_default_grid(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, _ = ahe_plan(converted, spacing=1.5)
+    pre.preprocess(converted, out, AHE)
+    source, done = sitk.ReadImage(str(folder / conv.CT_NAME)), sitk.ReadImage(str(out / 'SYNTHETICPTA' / 'plan_1' / f'ahe_{conv.CT_NAME}'))
+    assert source.GetOrigin() == (-11.25,) * 3 and source.GetSpacing() == (1.5,) * 3
+    expected = reference_equalize(source)
+    values = sitk.GetArrayFromImage(done)
+    np.testing.assert_array_equal(values, expected)
+    assert values.dtype == np.float32 and done.GetPixelID() == sitk.sitkFloat32 and values.min() == 0 and values.max() == 1
+    assert not np.array_equal(values, (sitk.GetArrayFromImage(source) - np.float32(-1000)) / np.float32(1200))  # the step did something
+    assert header(done) == header(source)
+
+
+def test_ac1b_small_plus_ahe_equals_the_reference_pipeline(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, _ = ahe_plan(converted, spacing=1.5)
+    pre.preprocess(converted, out, SMALL_AHE)
+    done = sitk.ReadImage(str(out / 'SYNTHETICPTA' / 'plan_1' / AHE_CT_FILE))
+    expected = reference_pipeline(sitk.ReadImage(str(folder / conv.CT_NAME)), SMALL_AHE)
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(done), sitk.GetArrayFromImage(expected))
+    assert header(done) == header(expected) and done.GetSize() == (10, 10, 10)
+    assert done.GetPixelID() == sitk.sitkFloat32
+    assert sitk.GetArrayFromImage(done).min() >= 0 and sitk.GetArrayFromImage(done).max() <= 1
+
+
+def test_a_ct_is_cast_to_float32_before_the_min_max(tmp_path):
+    ct = sitk.Cast(make_image(np.linspace(-1000, 200, 16 ** 3).reshape(16, 16, 16), spacing=(1.5,) * 3, origin=(-11.25,) * 3), sitk.sitkInt16)
+    done = pre.process_ct(ct, AHE)
+    assert done.GetPixelID() == sitk.sitkFloat32
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(done), reference_equalize(ct))
+    assert header(done) == header(ct)
+
+
+def test_a_constant_ct_becomes_zeros_without_calling_skimage_and_the_plan_is_preprocessed(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, _ = ahe_plan(converted, n=8)
+    sitk.WriteImage(make_image(np.full((8, 8, 8), -300.0), **grid(8)), str(folder / conv.CT_NAME))
+    monkeypatch.setattr(pre, 'equalize_adapthist', lambda *a, **k: pytest.fail('skimage was called on a constant volume'))
+    report = pre.preprocess(converted, out, AHE)
+    assert plan_row(report).outcome == 'preprocessed'
+    done = sitk.ReadImage(str(out / 'SYNTHETICPTA' / 'plan_1' / f'ahe_{conv.CT_NAME}'))
+    assert done.GetPixelID() == sitk.sitkFloat32 and not sitk.GetArrayFromImage(done).any()
+
+
+def test_ac4_study_mr_pt_and_ct_series_are_each_equalized(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder = write_study_tree(converted, series=(('CT', 1), ('MR', 1), ('PT', 1)), n=16)
+    pre.preprocess(converted, out, SMALL_AHE)
+    study = out / 'SYNTHETICPTA' / 'study_1'
+    names = {'CT': AHE_STUDY_CT, 'MR': 'reshape_resample_ahe_initialresample_series_MR_1.nii.gz', 'PT': 'reshape_resample_ahe_initialresample_series_PT_1.nii.gz'}
+    assert sorted(p.name for p in study.iterdir()) == sorted([*names.values(), 'series.csv'])
+    for modality, name in names.items():
+        expected = reference_pipeline(sitk.ReadImage(str(folder / f'series_{modality}_1.nii.gz')), SMALL_AHE if modality == 'CT' else dataclasses.replace(SMALL_AHE, rescale=False))
+        done = sitk.ReadImage(str(study / name))
+        np.testing.assert_array_equal(sitk.GetArrayFromImage(done), sitk.GetArrayFromImage(expected))
+        assert header(done) == header(expected) and done.GetPixelID() == sitk.sitkFloat32
+
+
+def test_ac4_an_ahe_only_run_processes_an_mr_study_series(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder = write_study_tree(converted, series=(('MR', 1),), n=16)
+    report = pre.preprocess(converted, out, AHE)
+    assert imaging_rows(report) == [('study_1/series_MR_1', 'preprocessed', '', ['ahe_series_MR_1.nii.gz', 'series.csv'])]
+    source, done = sitk.ReadImage(str(folder / 'series_MR_1.nii.gz')), sitk.ReadImage(str(out / 'SYNTHETICPTA' / 'study_1' / 'ahe_series_MR_1.nii.gz'))
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(done), reference_equalize(source))
+    assert header(done) == header(source)
+
+
+def test_an_ahe_only_run_is_not_refused_as_no_step(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    ahe_plan(converted)
+    assert plan_row(pre.preprocess(converted, out, AHE)).outcome == 'preprocessed'
+
+
+def test_output_name_puts_ahe_between_resample_and_rescale_for_image_volumes_only():
+    assert pre.output_name('planning_ct.nii.gz', SMALL_AHE, ct=True, image=True) == AHE_CT_FILE
+    assert pre.output_name('series_MR_1.nii.gz', SMALL_AHE, image=True) == 'reshape_resample_ahe_initialresample_series_MR_1.nii.gz'
+    assert pre.output_name('planning_ct.nii.gz', AHE, ct=True, image=True) == 'ahe_planning_ct.nii.gz'
+    assert pre.output_name('dose.nii.gz', SMALL_AHE) == 'reshape_resample_initialresample_dose.nii.gz'
+    assert pre.output_name('ptv.nii.gz', AHE) == 'ptv.nii.gz'
+    assert pre.output_name('planning_ct.nii.gz', PreprocessSteps(rescale=True), image=True) == 'planning_ct.nii.gz'  # rescale_ still needs ct
+    assert pre.output_name('planning_ct.nii.gz', PreprocessSteps(rescale=True), ct=True, image=True) == 'rescale_planning_ct.nii.gz'
+    assert pre.output_name('series_MR_1.nii.gz', PreprocessSteps(), image=True) == 'series_MR_1.nii.gz'
+
+
+def test_study_file_reads_the_id_through_the_named_group():
+    assert pre.series_id('reshape_resample_ahe_initialresample_series_MR_1.nii.gz') == 'series_MR_1'
+    assert pre.series_id('reshape_resample_ahe_rescale_initialresample_series_CT_2.nii.gz') == 'series_CT_2'
+    assert pre.series_id('series_PT_3.nii.gz') == 'series_PT_3'
+    assert pre.series_id('ahe_ahe_series_MR_1.nii.gz') is None
+    assert pre.STUDY_FILE.pattern == r'(reshape_)?(resample_)?(ahe_)?(rescale_)?(initialresample_)?(?P<id>series_(CT|MR|PT)_[0-9]+)\.nii\.gz'
+
+
+def test_a_failing_equalize_is_one_fixed_internal_reason(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError('SYNTHETICPTA')
+    monkeypatch.setattr(pre, 'equalize_adapthist', boom)
+    with pytest.raises(CaseRefused) as caught:
+        pre.process_ct(make_image(np.linspace(0, 1, 8 ** 3).reshape(8, 8, 8)), AHE)
+    assert str(caught.value) == pre.REASON_INTERNAL
+
+
+def test_the_module_docstring_describes_ahe_and_not_geometric_only_series():
+    doc = getattr(pre, '__doc__')  # noqa: B009
+    assert 'ahe' in doc and 'geometric ones only' not in doc

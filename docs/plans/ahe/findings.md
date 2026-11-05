@@ -29,3 +29,16 @@ Suite: 790 passed, 4 skipped; ruff clean; no test changed.
 
 Gotchas: the venv is Python 3.13 although `requires-python` is `>=3.12`. The dependency lines added to `uv.lock` are
 indented (`{ name = "scikit-image" }`), so a name comparison must anchor on `^name = "` to see package entries only.
+
+## task-02
+
+Files changed: `src/rt_dataprep/preprocess.py`, `tests/test_preprocess.py`.
+
+Decisions: `equalize(image)` (module-level `from skimage.exposure import equalize_adapthist`, so tests monkeypatch
+`preprocess.equalize_adapthist`) runs in `process_ct` after rescale and before the final spacing; both step-count checks
+(REASON_NO_STEPS, REASON_NO_SERIES_STEPS) include `ahe`. `output_name(..., image=)`: `ahe_` needs `image`, `rescale_` needs `ct`
+(callers pass both for a CT). `STUDY_FILE` reads the id through `(?P<id>...)`. The aligned plan series name already carries `ahe_`
+but `process_series` does not equalize yet: task-03 (value change, zero fill).
+
+Gotchas: `write_plan` puts a 12^3 dose and masks on the CT grid, so AHE tests with another size pass `dose=None, masks={}`.
+The first preprocessed row of a study also lists `series.csv`.
