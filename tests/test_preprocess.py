@@ -46,7 +46,7 @@ def centroid_mm(mask):
     return np.array(mask.TransformContinuousIndexToPhysicalPoint(index.tolist()))
 
 
-def test_steps_defaults_and_the_four_step_combination():
+def test_steps_defaults():
     steps = PreprocessSteps()
     assert (steps.resample, steps.rescale, steps.harmonize_spacing, steps.reshape, steps.legacy_linear_masks) == (False,) * 5
     assert steps.new_spacing == (1, 1, 1) and steps.final_spacing == (1.25, 1.25, 1.25) and steps.new_shape == (701, 701, 433)

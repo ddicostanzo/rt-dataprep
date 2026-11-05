@@ -46,7 +46,7 @@ def main(argv=None):
     sub.add_argument('converted', help='converted root, from the convert command')
     sub.add_argument('out', help='output root, outside the converted root')
     sub.add_argument('--initial-resample', action='store_true', help='step: resample to 1 mm spacing; writes the initialresample_ prefix')
-    sub.add_argument('--rescale', action='store_true', help='step: rescale a CT to (HU + 1024) / 4096; writes the rescale_ prefix')
+    sub.add_argument('--rescale', action='store_true', help='step: rescale a CT to (HU + 1024) / 4096; writes the rescale_ prefix; as the only step, MR/PT study series are refused')
     sub.add_argument('--ahe', action='store_true', help='step: CLAHE adaptive histogram equalization of every image volume; writes the ahe_ prefix')
     sub.add_argument('--resample', action='store_true', help='step: resample to 1.25 mm spacing; writes the resample_ prefix')
     sub.add_argument('--reshape', action='store_true', help='step: centred crop/pad to 701 x 701 x 433 voxels; writes the reshape_ prefix')

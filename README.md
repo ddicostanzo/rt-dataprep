@@ -184,7 +184,8 @@ intensity clipping. `--reshape` without `--initial-resample` or `--resample` cro
 pad a large extent at native spacing.
 
 CT study series receive all enabled steps. MR/PT study series receive geometric steps and optional AHE, and skip HU rescaling. `--rescale`
-alone (or the same Python configuration) refuses MR/PT because it has no applicable step. Registered plan series are resampled onto
+alone (or the same Python configuration) refuses MR/PT because it has no applicable step. With no geometric step (`--rescale` and/or
+`--ahe` only), dose and masks are copied unchanged. Registered plan series are resampled onto
 the final planning CT grid; unusable alignment, no overlap, or unreadable data skips that series and increments the plan's
 `skipped_series`. Output `reg_matrix` is `identity` after alignment.
 

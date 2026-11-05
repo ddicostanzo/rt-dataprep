@@ -119,6 +119,8 @@ def test_preprocess_four_step_flags_run_end_to_end(tmp_path, converted):
     names = {p.name for p in (out / 'SYNTHETICPTA' / 'plan_1').iterdir()}
     assert {'reshape_resample_rescale_initialresample_planning_ct.nii.gz', 'reshape_resample_initialresample_dose.nii.gz'} <= names
     assert mask_pixel_type(out, SMALL) == sitk.sitkUInt8
+    # the PRE_RUN seam must shrink the output; a broken seam only shows up as a slow 701 x 701 x 433 run
+    assert sitk.ReadImage(str(out / 'SYNTHETICPTA' / 'plan_1' / 'reshape_resample_rescale_initialresample_planning_ct.nii.gz')).GetSize() == SMALL.new_shape
     assert str(tmp_path) not in result.stderr
 
 
