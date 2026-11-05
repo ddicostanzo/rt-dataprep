@@ -15,3 +15,6 @@ task-02: README and examples.
   AC4 test (passes it, expects exit 2) keep the string by necessity; a plan wording gap, not a code issue.
 - Gotcha: argparse prefix abbreviation means `--re` is ambiguous (usage error), never a silent wrong step.
 - Suite on the task branch: 842 passed, 4 skipped; ruff clean.
+
+## review-group-1
+PASS: no BLOCKING. NOTE (deferred): no test asserts the PRE_RUN seam shrinks output shape; a broken seam would only slow the end-to-end tests.
