@@ -1709,8 +1709,11 @@ FOV = dataclasses.replace(SMALL, series_fov_mask=True)
 FOV_OUT = f'fovmask_{MR_OUT}'
 
 
-def test_fov_mask_is_the_final_grid_uint8_where_the_series_lands_and_listed_right_after_its_series(tmp_path):
-    report, done, _ = run_plan(tmp_path, [mr_spec(np.full((8, 8, 8), 3.0), rigid(0, (4, 0, 0)))], steps=FOV)
+@pytest.mark.parametrize('matrix, geometry', [(rigid(0, (4, 0, 0)), MR_GRID),
+                                              (rigid(17, (2.3, -1.1, 0.6)), dict(MR_GRID, spacing=(1.1, 0.9, 1.7)))],
+                         ids=['translated', 'rotated_sub_voxel_odd_spacing'])
+def test_fov_mask_is_the_final_grid_uint8_where_the_series_lands_and_listed_right_after_its_series(tmp_path, matrix, geometry):
+    report, done, _ = run_plan(tmp_path, [mr_spec(np.full((8, 8, 8), 3.0), matrix, geometry)], steps=FOV)
     assert plan_row(report).files == [*BASE_FILES, MR_OUT, FOV_OUT, 'series.csv']
     assert [r['file'] for r in conv_rows(done)] == [*BASE_FILES, MR_OUT]  # no mask row in series.csv
     mask, ct, image = read_out(done, FOV_OUT), read_out(done, CT_FILE), read_out(done)
@@ -1759,6 +1762,7 @@ def test_the_fov_mask_leaves_every_other_output_unchanged(tmp_path):
     for name in off:
         if name.suffix == '.gz':
             a, b = sitk.ReadImage(str(outs[0] / name)), sitk.ReadImage(str(outs[1] / name))
-            assert (sitk.GetArrayFromImage(a) == sitk.GetArrayFromImage(b)).all() and a.GetOrigin() == b.GetOrigin()
+            assert (sitk.GetArrayFromImage(a) == sitk.GetArrayFromImage(b)).all()
+            assert (a.GetOrigin(), a.GetSpacing(), a.GetDirection(), a.GetPixelID()) == (b.GetOrigin(), b.GetSpacing(), b.GetDirection(), b.GetPixelID())
         else:
             assert (outs[0] / name).read_bytes() == (outs[1] / name).read_bytes()
