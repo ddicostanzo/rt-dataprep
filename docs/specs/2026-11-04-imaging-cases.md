@@ -100,7 +100,7 @@ training set and must pass through manifest, preprocess and split.
   study gives one row `folder = study_<n>` with the reason and writes nothing.
 - Each study row is one case: CT through `process_ct` with the steps that are on; MR/PT through `process_ct` with
   `rescale` off and named with `output_name(..., ct=False)`. A series that is not a 3D volume of one real value per voxel
-  (2D, 4D, multi-component or complex) is refused before `too_small` (`REASON_NOT_VOLUME`, #138). `too_small` refuses a series (`REASON_TOO_SMALL`), and so does a
+  (2D, 4D, multi-component or complex) is refused (`REASON_NOT_VOLUME`, #138). `too_small` runs first, on the header of a 3-axis series, so a too-small series is refused without a pixel read (`REASON_TOO_SMALL`, #141), and so does a
   `read_info` or `read_image` failure (`REASON_FILE_UNREADABLE`): that series only.
 - A refused series removes only its own output file, never the study folder. `series.csv` (written rows only, file
   names updated) is written after the study's last series; a study with every series refused leaves no folder.

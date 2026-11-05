@@ -1202,6 +1202,20 @@ def test_a_pixel_read_failure_refuses_that_series_only(tmp_path, monkeypatch):
     assert not list((out / 'SYNTHETICPTA' / 'study_1').glob('*MR*'))
 
 
+def test_a_too_small_series_is_refused_from_its_header_without_a_pixel_read(tmp_path, monkeypatch):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    two_bad_series(converted)
+    real, read = pre.read_image, []
+
+    def spy(path):
+        read.append(path.name)
+        return real(path)
+    monkeypatch.setattr(pre, 'read_image', spy)
+    report = pre.preprocess(converted, out, SMALL)
+    assert ('study_1/series_MR_1', 'refused', pre.REASON_TOO_SMALL) in [(f, o, r) for f, o, r, _ in imaging_rows(report)]
+    assert 'series_MR_1.nii.gz' not in read  # #141
+
+
 NOT_A_VOLUME = [  # convert writes 3D volumes of one real value per voxel only (#127, #138, #139)
     lambda: sitk.Image([4, 4], sitk.sitkFloat32),
     lambda: sitk.Image([4, 4, 4, 2], sitk.sitkFloat32),
