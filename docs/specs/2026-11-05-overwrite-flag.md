@@ -60,7 +60,8 @@ previous output while a swap is in progress). All three stages and `manifest` al
      would otherwise never remove).
 2. Without `--overwrite`: unchanged (skip an existing `<name>` with `REASON_EXISTS`).
 3. With `--overwrite`, the patient's build runs as if `<name>` did not exist. Then:
-   - The build produced at least one successful case (organize: `organized`; convert: a `converted` plan or study series
+   - The build produced at least one successful case (organize: `organized` with at least one plan folder, amended after
+     review: an unreadable RTPLAN sends files to `misc_files` and still yields an `organized` row with no plan; convert: a `converted` plan or study series
      row; preprocess: a `preprocessed` row): if `<name>` exists, rename `<name>` to `.<name>.old`, rename the partial to
      `<name>`, delete `.<name>.old`. Otherwise rename as today.
    - The build produced no successful case (every case refused or skipped, or the build stopped before a partial): if
@@ -73,6 +74,9 @@ previous output while a swap is in progress). All three stages and `manifest` al
    `.<name>.old` that step 1 restores on the next run.
 5. Deleting `.<name>.old` after a completed swap uses `ignore_errors=True`, as partial cleanup does today: the row keeps its
    real outcome because the new output is complete, and a leftover is removed by step 1 on the next run.
+5a. Root check (added after Codex review): with `--overwrite`, each stage refuses the whole run before writing anything
+   when its input root is the output root or inside it (`REASON_INPUT_INSIDE_OUTPUT`), because a replaced patient folder
+   could contain the input tree. Default runs are unchanged.
 6. Reporting: rows keep their normal outcome. Each stage's summary log line adds two counts: patient folders replaced, and
    existing folders kept because the new run had no successful case. No report column changes.
 7. CLI: `organize`, `convert` and `preprocess` gain `--overwrite` (help: replace a patient's existing output folder once its

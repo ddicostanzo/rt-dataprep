@@ -73,3 +73,15 @@ splits.json needs a fresh preprocess root, N1 IO-error and pre-name organize ref
 Deferred: N2 Python API section omits `overwrite=`; N3 organize's REASON_NAME_CLAIMED wording differs from convert/
 preprocess; N4 a dangling symlink at `<name>` under --overwrite is moved to `.<name>.old` and never removed (rmtree refuses
 links); N5 preprocess_patient now returns a pair.
+
+## review-loop-pass-1
+BLOCKING, fixed by the orchestrator:
+- Codex P1 (dicom_io.py:279 thread): output root above the input root let `--overwrite` delete the input tree inside a
+  replaced patient folder. All three stages now refuse the run under `--overwrite` when the input root is the output
+  root or inside it (`dicom_io.REASON_INPUT_INSIDE_OUTPUT`); CLI test for each stage.
+- Plan bug (bug review, owner approved the amendment): organize counted a zero-plan build (unreadable RTPLAN → misc_files)
+  as success, so `--overwrite` replaced plan folders with a misc-only folder. Now `success=bool(cases)`; test injects an
+  unreadable RTPLAN. Spec Behavior 3 amended; plan criteria left unchanged.
+Deferred (to file as hardening): bug-review F2 organize kept double count; spec-review 1-5 (kept double count, lexists
+default-path change, symlink `.old` leftover, weak same-run/unrelated-folder/sibling assertions, preprocess_patient
+claimed=None TypeError); review-1..3 deferred items.

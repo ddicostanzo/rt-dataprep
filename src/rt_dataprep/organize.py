@@ -52,6 +52,8 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
     src_root, out_root = Path(src_root), Path(out_root)
     if out_root.resolve().is_relative_to(src_root.resolve()):  # before any mkdir: it would be walked as a patient folder
         raise ValueError(REASON_OUTSIDE_SRC)
+    if overwrite and src_root.resolve().is_relative_to(out_root.resolve()):  # a replaced patient folder could hold the source
+        raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
     out_root.mkdir(parents=True, exist_ok=True)
     claimed = set()  # casefolded output names taken in this run: a case-insensitive filesystem would merge them
     rows, replaced, kept = [], 0, 0
@@ -129,7 +131,7 @@ def _organize_patient(folder, out_root, claimed, exclude_models, workers, overwr
             _copy_all(paths, partial / f'plan_{n}')
         _copy_all(misc, partial / 'misc_files')
         partial.mkdir(exist_ok=True)
-        status = dicom_io.publish(out_root, name, overwrite=overwrite, success=True)  # the row below is organized
+        status = dicom_io.publish(out_root, name, overwrite=overwrite, success=bool(cases))  # no plan (e.g. an unreadable RTPLAN) keeps the old folder
     except BaseException:  # Ctrl-C too: no hidden half-copied folder left behind
         # A second Ctrl-C during this rmtree leaves a partly deleted .partial: the source scan skips it and the next run removes it before copying.
         shutil.rmtree(partial, ignore_errors=True)

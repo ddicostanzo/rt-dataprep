@@ -17,6 +17,7 @@ import pydicom
 import SimpleITK as sitk
 
 REASON_UNREADABLE = 'DICOM header is unreadable'
+REASON_INPUT_INSIDE_OUTPUT = 'with --overwrite, the input root must not be the output root or inside it'
 ALLOCATION_FAILURE = re.compile(
     r'\b(?:failed to allocate\b[^\n]*\bmemory|cannot allocate memory|out of memory|'
     r'std::bad_alloc|bad allocation|memory allocation (?:has )?failed)\b', re.IGNORECASE)

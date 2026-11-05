@@ -817,6 +817,35 @@ def test_o6_a_patient_refused_after_its_name_is_known_keeps_its_folder_and_count
     assert counts(caplog) == (0, 1)
 
 
+def test_o6_an_unreadable_rtplan_under_overwrite_keeps_the_plan_folders(stale, monkeypatch, caplog):
+    # an unreadable RTPLAN goes to misc_files and the patient is still organized, with no plan: never a replacement
+    src, out, _ = stale
+    real = dicom_io.read_header_core
+
+    def flaky(path):
+        if os.path.basename(path) == 'plan.dcm':
+            raise OSError('share hiccup')
+        return real(path)
+
+    monkeypatch.setattr(dicom_io, 'read_header_core', flaky)
+    before = snapshot(out / PID)
+    caplog.set_level(logging.INFO)
+    report = organize(src, out, overwrite=True)
+    assert [(r.outcome, r.plans) for r in report.rows] == [(org.OUTCOME_ORGANIZED, 0)]
+    assert snapshot(out / PID) == before and hidden(out) == []
+    assert counts(caplog) == (0, 1)
+
+
+def test_overwrite_refuses_an_input_root_inside_the_output_root(tmp_path):
+    out = tmp_path / 'out'
+    src = out / 'SYNTHETICPT' / 'export'
+    planning_study(src / PID / 'p')
+    before = snapshot(out)
+    with pytest.raises(ValueError, match=dicom_io.REASON_INPUT_INSIDE_OUTPUT):
+        organize(src, out, overwrite=True)
+    assert snapshot(out) == before and hidden(out) == []
+
+
 def test_o6_a_refusal_with_no_existing_folder_is_not_kept_and_never_recovers(tree, caplog):
     src, out = tree
     planning_study(src / PID / 'p')
