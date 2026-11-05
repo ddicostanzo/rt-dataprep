@@ -8,6 +8,7 @@ import shutil
 
 import numpy as np
 import pytest
+import SimpleITK as sitk
 from test_convert import BOX, PID, dose_spec, make_plan
 from test_preprocess import MR_OUT, MR_SIZE, SMALL, box, grid, landmark, mr_spec, rigid, run_plan, save_rows, series_row, state, write_plan
 from test_series import STUDY_D1, STUDY_D2, STUDY_T1, STUDY_T2, put
@@ -333,17 +334,26 @@ def test_ac11_a_preprocessed_tree_lists_the_aligned_mr_by_output_name_and_the_co
     assert series_column(tmp_path / 'converted') == []  # a translated MR on its own grid
 
 
-def test_fov_mask_key_is_listed_when_the_file_exists_and_the_mask_header_is_not_read(tmp_path, monkeypatch):
+def test_fov_mask_key_is_listed_when_the_file_exists_on_the_ct_grid(tmp_path):
     spec = mr_spec(landmark(MR_SIZE, (3, 4, 2)), rigid(0, (1.25, 0, 0)))
     run_plan(tmp_path / 'off', [spec])
     run_plan(tmp_path / 'on', [spec], steps=dataclasses.replace(SMALL, series_fov_mask=True))
-    read_paths = []
-    real = man.read_info
-    monkeypatch.setattr(man, 'read_info', lambda path: read_paths.append(path.name) or real(path))
     assert series_column(tmp_path / 'on' / 'out') == [{'file': MR_OUT, 'modality': 'MR', 'fov_mask': f'fovmask_{MR_OUT}'}]
-    assert read_paths and not any(name.startswith('fovmask_') for name in read_paths)
     assert series_column(tmp_path / 'off' / 'out') == [{'file': MR_OUT, 'modality': 'MR'}]  # exactly two keys
     assert series_column(tmp_path / 'on' / 'converted') == [] == series_column(tmp_path / 'off' / 'converted')
+
+
+@pytest.mark.parametrize('how', ['off_grid', 'unreadable'])
+def test_a_fov_mask_off_the_ct_grid_or_unreadable_is_not_listed_and_its_series_is(tmp_path, how):
+    _, out, _ = run_plan(tmp_path, [mr_spec(landmark(MR_SIZE, (3, 4, 2)), rigid(0, (1.25, 0, 0)))],
+                         steps=dataclasses.replace(SMALL, series_fov_mask=True))
+    mask = out / f'fovmask_{MR_OUT}'
+    assert mask.is_file()
+    if how == 'off_grid':
+        sitk.WriteImage(sitk.Image([3, 3, 3], sitk.sitkUInt8), str(mask))
+    else:
+        mask.write_bytes(b'not a nifti')
+    assert series_column(tmp_path / 'out') == [{'file': MR_OUT, 'modality': 'MR'}]
 
 
 def test_ac11_a_translated_mr_with_the_ct_geometry_is_not_listed_but_an_identity_one_is(tmp_path):
