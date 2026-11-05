@@ -44,7 +44,7 @@ uv run python -m rt_dataprep split /tmp/rt-dataprep-cli-converted --test-size 0.
 
 ## Custom preprocessing
 
-Use the API example to select a practical grid rather than the CLI legacy preset's 701 × 701 × 433 grid:
+Use the API example to select a practical grid rather than the CLI `--reshape` 701 × 701 × 433 grid:
 
 ```bash
 uv run python examples/custom_preprocess.py /tmp/rt-dataprep-demo/converted /tmp/rt-dataprep-custom --shape 16 16 8 --spacing 1.25 1.25 2
@@ -60,7 +60,7 @@ or registered series are refused/skipped, or the input yields no cases, so that 
 plan series. `--help` on either script describes its accepted arguments.
 
 Add `--ahe` to the custom example to include adaptive histogram equalization. To try only AHE through the CLI, without
-resampling to the large legacy grid:
+resampling to the large `--reshape` grid:
 
 ```bash
 uv run python -m rt_dataprep preprocess /tmp/rt-dataprep-demo/converted /tmp/rt-dataprep-ahe --ahe
@@ -88,15 +88,15 @@ A complete supported RTPLAN → RTSTRUCT → planning CT chain produces `plan_<n
 produce `study_<n>/` output. Imaging-only patients use the same commands and do not need a dummy plan. Registered images
 can appear in both a plan and their study; they remain native-grid images during conversion.
 
-Optional legacy preprocessing aligns registered plan series to the final planning CT grid:
+Optional preprocessing with the four step flags (`--initial-resample --rescale --resample --reshape`) aligns registered plan series to the final planning CT grid:
 
 ```bash
-uv run python -m rt_dataprep preprocess /secure/converted /secure/preprocessed --legacy-rnt --series-fov-mask
+uv run python -m rt_dataprep preprocess /secure/converted /secure/preprocessed --initial-resample --rescale --resample --reshape --series-fov-mask
 uv run python -m rt_dataprep manifest /secure/preprocessed
 uv run python -m rt_dataprep split /secure/preprocessed --test-size 0.2 --val-size 0.2 --seed 42
 ```
 
-The legacy shape requires about 812 MiB per float32 volume before processing copies. Review report refusals/skips,
+The `--reshape` shape requires about 812 MiB per float32 volume before processing copies. Review report refusals/skips,
 geometry, dose units, masks, and cohort membership before accepting the result. CLI success can include refused cases.
 Use fresh roots for a changed configuration; existing patient outputs are skipped. Keep prior manifests and splits for
 provenance rather than deleting them to make a different split fit.
