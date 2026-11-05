@@ -26,3 +26,11 @@ an except block; logs carry counts and REASON_ constants only; tests use SYNTHET
 No BLOCKING. Deferred: W1 AC-H7 sibling shares no name prefix (a `.{name}*` glob would pass); N2 no symlink test;
 N3 publish assumes recover ran first (document); N4 no target + no partial raises (callers must not call publish then);
 N5 callers must never log str() of the re-raised OSError.
+
+## task-02
+- organize(): keyword-only overwrite; `_organize_patient(..., overwrite)` returns `(row, read_s, copy_s, walked, status)`.
+- recover runs after `claimed.add` at the old exists check; publish replaces `partial.rename(target)` inside the existing
+  `except BaseException` cleanup; success is always True there (a completed organize build is always organized).
+- Deviation: the exists check uses `os.path.lexists` so a dangling symlink at `<name>` skips (REASON_EXISTS) instead of
+  reaching publish's ValueError misuse guard. Untested.
+- Kept only from REASON_NO_SOP_UID / REASON_SPLIT_SERIES with an existing, unclaimed name. Summary ends `; N replaced, N kept`.
