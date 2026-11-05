@@ -454,7 +454,8 @@ def test_mask_and_applicator_files_are_listed_masks_first_in_rtstruct_order(tmp_
     ([dict(number=1, name='Ring', kind='channel', points=np.zeros((3, 3))),
       dict(number=2, name='RING', kind='channel', points=np.zeros((3, 3)))], None),  # two applicators, case differs
     ([dict(number=1, name='Ring', kind='channel', points=np.zeros((3, 3))),
-      box(2, 'ring', (1, 2), (1, 2), (1, 2))], None),  # applicator and mask
+      dict(number=2, name='x', kind='channel', points=np.zeros((4, 3)))],
+     [dict(applicator_id='Ring', dwells_mm=np.zeros((2, 3)), roi=2)]),  # an unreferenced twin with another point count
     ([dict(number=1, name='x', kind='channel', points=np.zeros((3, 3))),
       dict(number=2, name='y', kind='channel', points=np.zeros((3, 3)))],
      [dict(applicator_id='Same', dwells_mm=np.zeros((2, 3)), roi=1), dict(applicator_id='same', dwells_mm=np.zeros((2, 3)), roi=2)]),
@@ -465,6 +466,23 @@ def test_mask_and_applicator_files_are_listed_masks_first_in_rtstruct_order(tmp_
 ])
 def test_clashing_or_empty_applicator_names_refuse_the_plan(tmp_path, rois, channels):
     assert refused(tmp_path, make_plan(tmp_path, rois, channels)) == masks.REASON_ROI_NAMES
+
+
+def test_an_unreferenced_applicator_twin_of_a_plan_channel_is_dropped(tmp_path):
+    rois = [dict(number=1, name='Ch 1', kind='channel', points=channel_points(6)),
+            dict(number=2, name='Ring4', kind='channel', points=channel_points(6) + 1)]  # the twin: same count, other points
+    channels = [dict(applicator_id='Ring 4', dwells_mm=np.zeros((2, 3)), roi=1)]
+    result, case = run(tmp_path, make_plan(tmp_path, rois, channels))
+    assert result.files == ['planning_ct.nii.gz', 'Ring4.nii.gz']
+    assert np.allclose(np.loadtxt(case / 'Ring4.nii.gz'), channel_points(6), atol=1e-3)  # the referenced channel's points
+
+
+def test_an_applicator_named_like_a_mask_gets_the_channel_suffix(tmp_path):
+    rois = [box(1, 'Cylinder 1', (1, 2), (1, 2), (1, 2)), dict(number=2, name='x', kind='channel', points=channel_points(3))]
+    channels = [dict(applicator_id='Cylinder 1', dwells_mm=np.zeros((2, 3)), roi=2)]
+    result, case = run(tmp_path, make_plan(tmp_path, rois, channels))
+    assert result.files == ['planning_ct.nii.gz', 'cylinder1.nii.gz', 'Cylinder1_channel.nii.gz']
+    assert np.allclose(np.loadtxt(case / 'Cylinder1_channel.nii.gz'), channel_points(3), atol=1e-3)
 
 
 def test_applicator_text_goes_through_a_temp_name_that_ends_nii_gz(tmp_path, monkeypatch):

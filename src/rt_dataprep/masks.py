@@ -46,9 +46,12 @@ def classify(struct, plan, frame_uid, taken=()):
     The RoiPlan of an RTSTRUCT (and the RTPLAN naming its applicator channels).
 
     Not kept: ROIs with no contour data, POINT ROIs (every contour POINT) and names containing 'dose'. Of the rest, ROIs
-    with an OPEN_NONPLANAR contour or RTROIInterpretedType BRACHY_CHANNEL are applicators, the others masks. An empty
-    output name, or two names equal ignoring case (also with `taken`, names already used in the plan folder), refuse, as
-    does a mask or applicator ROI whose ReferencedFrameOfReferenceUID is not `frame_uid` (the planning CT's).
+    with an OPEN_NONPLANAR contour or RTROIInterpretedType BRACHY_CHANNEL are applicators, the others masks. An
+    applicator ROI no plan channel references is dropped when a referenced one has its name (ignoring case) and its
+    point count: the RTSTRUCT's library copy of that channel. An applicator named like a mask is written as
+    '<name>_channel.nii.gz'. Then an empty output name, or two names equal ignoring case (also with `taken`, names
+    already used in the plan folder), refuse, as does a mask or applicator ROI whose ReferencedFrameOfReferenceUID is
+    not `frame_uid` (the planning CT's).
     """
     contours = {int(c.ReferencedROINumber): c for c in struct.get('ROIContourSequence', [])}
     interpreted = {int(o.ReferencedROINumber): str(o.get('RTROIInterpretedType', ''))
@@ -58,7 +61,7 @@ def classify(struct, plan, frame_uid, taken=()):
         for channel in setup.get('ChannelSequence', []):
             if 'ReferencedROINumber' in channel and 'SourceApplicatorID' in channel:
                 channel_ids.setdefault(int(channel.ReferencedROINumber), str(channel.SourceApplicatorID))
-    result, names = RoiPlan(), [str(n).lower() for n in taken]
+    result, apps = RoiPlan(), []
     for roi in struct.get('StructureSetROISequence', []):
         number, name = int(roi.ROINumber), str(roi.ROIName)
         items = list(contours[number].get('ContourSequence', [])) if number in contours else []
@@ -70,12 +73,20 @@ def classify(struct, plan, frame_uid, taken=()):
             raise CaseRefused(REASON_ROI_FRAME)
         if 'OPEN_NONPLANAR' in types or interpreted.get(number) == 'BRACHY_CHANNEL':
             stem = ''.join(c for c in channel_ids.get(number, name) if c.isalnum())
-            result.applicators.append((stem + SUFFIX, np.concatenate(points), name))
-            names.append((stem + SUFFIX).lower())
+            apps.append((stem, np.concatenate(points), name, number in channel_ids))
         else:
             planar = [p for p, item in zip(points, items, strict=True) if str(item.ContourGeometricType) != 'POINT']
             result.kept.append((number, name, format_name(name) + SUFFIX, planar))
-            names.append((format_name(name) + SUFFIX).lower())
+    referenced = {(stem.lower(), len(points)) for stem, points, _, ref in apps if ref}
+    mask_files = {file.lower() for _, _, file, _ in result.kept}
+    for stem, points, name, ref in apps:
+        if not ref and (stem.lower(), len(points)) in referenced:
+            continue
+        if (stem + SUFFIX).lower() in mask_files:
+            stem += '_channel'
+        result.applicators.append((stem + SUFFIX, points, name))
+    names = [str(n).lower() for n in taken] + [file.lower() for _, _, file, _ in result.kept]
+    names += [file.lower() for file, _, _ in result.applicators]
     if any(name == SUFFIX for name in names) or len(set(names)) != len(names):
         raise CaseRefused(REASON_ROI_NAMES)
     return result
