@@ -368,6 +368,8 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, overwrite=F
     converted_root, out_root = Path(converted_root), Path(out_root)
     if out_root.resolve().is_relative_to(converted_root.resolve()):  # before any mkdir: nothing is written into the input
         raise ValueError(REASON_OUTSIDE_INPUT)
+    if overwrite and converted_root.resolve().is_relative_to(out_root.resolve()):  # a replaced patient folder could hold the input
+        raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
     if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape or steps.ahe):
         raise ValueError(REASON_NO_STEPS)
     if steps.ahe:

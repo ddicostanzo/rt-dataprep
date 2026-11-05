@@ -12,6 +12,7 @@ from test_convert import PID, make_plan
 from test_preprocess import FOUR_STEPS, SMALL, report_rows, write_plan
 
 from rt_dataprep import convert as conv
+from rt_dataprep import dicom_io
 from rt_dataprep import preprocess as pre
 from rt_dataprep import __main__ as cli
 from rt_dataprep import split as sp
@@ -453,3 +454,16 @@ def test_overwrite_help_lists_the_flag(command, capfd):
         cli.main([command, '--help'])
     text = ' '.join(capfd.readouterr().out.split())
     assert '--overwrite' in text and 'replace a patient\'s existing output folder once its new output holds at least one successful case' in text
+
+
+@pytest.mark.parametrize('command', [['organize'], ['convert'], ['preprocess', '--rescale']])
+def test_overwrite_refuses_an_input_root_inside_the_output_root(tmp_path, command):
+    # a replaced patient folder could hold the input itself, as `convert /data/P/organized /data --overwrite` would
+    out = tmp_path / 'out'
+    inner = out / 'SYNTHETICPT' / 'input'
+    inner.mkdir(parents=True)
+    result = subprocess.run([sys.executable, '-m', 'rt_dataprep', command[0], str(inner), str(out), *command[1:], '--overwrite'],
+                            capture_output=True, text=True)
+    assert result.returncode == 1 and result.stdout == ''
+    assert result.stderr == f'rt_dataprep: {dicom_io.REASON_INPUT_INSIDE_OUTPUT}\n'
+    assert sorted(p.name for p in out.rglob('*')) == ['SYNTHETICPT', 'input']

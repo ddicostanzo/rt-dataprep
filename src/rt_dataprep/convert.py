@@ -109,6 +109,8 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwr
     org_root, out_root = Path(org_root), Path(out_root)
     if out_root.resolve().is_relative_to(org_root.resolve()):  # before any mkdir: nothing is written into the input
         raise ValueError(REASON_OUTSIDE_ORG)
+    if overwrite and org_root.resolve().is_relative_to(out_root.resolve()):  # a replaced patient folder could hold the input
+        raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
     folders = sorted(p for p in org_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
     rows, aborted = [], False
