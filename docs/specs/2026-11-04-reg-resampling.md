@@ -143,5 +143,4 @@ parity run.
 ## Deferred
 
 - A FOV mask per aligned series (outside-FOV vs true 0).
-- A registered CT series with rescale off gets 0 (HU 0, not air) outside its FOV; the CLI always runs with rescale on (`--legacy-rnt`).
 - Deformable REGs (#41), SUV (#39), multi-echo split (#38), MR/PT normalization (#16).
