@@ -228,6 +228,7 @@ def _channel(number, dwells_mm, times=None, applicator_id=None, roi=None, step_s
     channel.BrachyControlPointSequence = points
     if applicator_id is not None:
         channel.SourceApplicatorID = applicator_id
+    if applicator_id is not None or roi is not None:
         channel.ReferencedROINumber = number if roi is None else roi
     if step_size is not None:
         channel.SourceApplicatorStepSize = float(step_size)
