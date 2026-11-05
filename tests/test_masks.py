@@ -492,6 +492,39 @@ def test_an_applicator_named_like_a_mask_gets_the_channel_suffix(tmp_path):
     assert np.allclose(np.loadtxt(case / 'Cylinder1_channel.nii.gz'), channel_points(3), atol=1e-3)
 
 
+# A reference line: one contour across the CT's slices (z 7..17 mm here), drawn on a reformatted plane.
+SPANNING = np.array([[-1.0, 8.0, 7.0], [-1.0, 8.0, 12.0], [-1.0, 8.0, 17.0]])
+
+
+@pytest.mark.parametrize('geometry', ['OPEN_PLANAR', 'CLOSED_PLANAR'])
+def test_an_roi_whose_every_contour_crosses_ct_slices_is_written_as_line_text(tmp_path, geometry):
+    rois = [box(1, 'Bladder', (1, 2), (1, 2), (1, 2)),
+            dict(number=2, name='RefLine 1 Lt', kind='line', lines=[SPANNING, SPANNING + [2.0, 0, 0]], geometry=geometry)]
+    result, case = run(tmp_path, make_plan(tmp_path, rois))
+    assert result.files == ['planning_ct.nii.gz', 'bladder.nii.gz', 'refline1lt.nii.gz']
+    assert np.allclose(np.loadtxt(case / 'refline1lt.nii.gz'), np.vstack([SPANNING, SPANNING + [2.0, 0, 0]]))
+    assert [(r['file'], r['kind'], r['roi_name']) for r in result.series_rows[1:]] == [
+        ('bladder.nii.gz', 'mask', 'Bladder'), ('refline1lt.nii.gz', 'line', 'RefLine 1 Lt')]
+
+
+def test_an_roi_mixing_axial_and_crossing_contours_still_refuses(tmp_path):
+    axial = np.array([[-1.0, 8.0, 9.0], [3.0, 8.0, 9.0], [3.0, 14.0, 9.0], [-1.0, 14.0, 9.0]])
+    rois = [dict(number=1, name='Odd', kind='line', lines=[axial, SPANNING], geometry='CLOSED_PLANAR')]
+    assert refused(tmp_path, make_plan(tmp_path, rois)) in (masks.REASON_MASK_SLICES, masks.REASON_MASK_EMPTY)
+
+
+def test_an_axial_contour_halfway_between_slices_stays_a_mask_and_refuses(tmp_path):
+    # z 8 mm is halfway between the slices at 7 and 9 mm; jitter rounds the points to both: a span of one slice, not a line
+    half = np.array([[-1.0, 8.0, 8.0001], [3.0, 8.0, 7.9999], [3.0, 14.0, 8.0001], [-1.0, 14.0, 7.9999]])
+    rois = [dict(number=1, name='Organ', kind='line', lines=[half, half + [0, 0, 2.0]], geometry='CLOSED_PLANAR')]
+    assert refused(tmp_path, make_plan(tmp_path, rois)) == masks.REASON_MASK_SLICES
+
+
+def test_a_line_named_like_a_mask_refuses(tmp_path):
+    rois = [box(1, 'Ref Line', (1, 2), (1, 2), (1, 2)), dict(number=2, name='refline', kind='line', lines=[SPANNING])]
+    assert refused(tmp_path, make_plan(tmp_path, rois)) == masks.REASON_ROI_NAMES
+
+
 def test_applicator_text_goes_through_a_temp_name_that_ends_nii_gz(tmp_path, monkeypatch):
     names = []
     original = np.savetxt

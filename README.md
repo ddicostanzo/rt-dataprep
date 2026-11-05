@@ -153,7 +153,9 @@ use `study_<n>/` and ignore the old `images/` layout.
   coordinate text**, despite their legacy `.nii.gz` extension; consult `kind` in `series.csv` before opening a file as NIfTI.
   An applicator ROI that no plan channel references is dropped when a referenced channel has the same name and point
   count (the structure set's copy of that channel). An applicator named like a mask is written as `<name>_channel.nii.gz`.
-  Any other output name clash refuses the plan.
+  An ROI whose every contour crosses CT slices (a reference line drawn on a reformatted plane) is not a mask: its points
+  are written as the same coordinate text with `kind` `line`, and preprocess copies it unchanged. An ROI that mixes axial
+  and crossing contours refuses the plan. Any other output name clash refuses the plan.
 - Other eligible CT/MR/PT series are written into their study folders, even without a plan. Eligible registered series are
   also written in matching plan folders, on their native grids, with the transform recorded in `reg_matrix`.
 - Image series must form a supported, uniform single-frame 3D volume. Localizers, excluded model studies, incomplete or
