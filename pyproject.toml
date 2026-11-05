@@ -3,6 +3,8 @@ name = "rt-dataprep"
 version = "0.1.0"
 description = "Turn radiotherapy DICOM exports into ML-ready cases"
 readme = "README.md"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "pydicom>=3",
@@ -13,6 +15,10 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest", "ruff"]
+
+[project.urls]
+Repository = "https://github.com/ddicostanzo/rt-dataprep"
+Issues = "https://github.com/ddicostanzo/rt-dataprep/issues"
 
 [build-system]
 requires = ["hatchling"]
