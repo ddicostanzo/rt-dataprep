@@ -16,3 +16,16 @@ Known traps (verified 2026-11-04, skimage 0.26.0):
 - STUDY_FILE: adding a group shifts numbered groups silently; use the named group `id`.
 - `test_preprocess_help_says_the_preset_is_required_for_any_output` is the one pre-existing test A8 replaces.
 - Tests use SMALL (new_shape 10^3), never full-size LEGACY_RNT.
+
+## task-01
+
+Files changed: `pyproject.toml` (+`"scikit-image>=0.26.0"` in `[project] dependencies`), `uv.lock` (+2 lines: the
+`rt-dataprep` package's dependency entry and its `requires-dist` specifier).
+
+Decisions: `uv add scikit-image` picked the lower bound `>=0.26.0` from the already-locked version (0.26.0); kept as is.
+
+Check: sorted `^name = "` entries of `uv.lock` (25) are identical before and after, so no new package entered the lock.
+Suite: 790 passed, 4 skipped; ruff clean; no test changed.
+
+Gotchas: the venv is Python 3.13 although `requires-python` is `>=3.12`. The dependency lines added to `uv.lock` are
+indented (`{ name = "scikit-image" }`), so a name comparison must anchor on `^name = "` to see package entries only.
