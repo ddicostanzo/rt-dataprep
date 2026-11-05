@@ -513,6 +513,13 @@ def test_an_roi_mixing_axial_and_crossing_contours_still_refuses(tmp_path):
     assert refused(tmp_path, make_plan(tmp_path, rois)) in (masks.REASON_MASK_SLICES, masks.REASON_MASK_EMPTY)
 
 
+def test_an_axial_contour_halfway_between_slices_stays_a_mask_and_refuses(tmp_path):
+    # z 8 mm is halfway between the slices at 7 and 9 mm; jitter rounds the points to both: a span of one slice, not a line
+    half = np.array([[-1.0, 8.0, 8.0001], [3.0, 8.0, 7.9999], [3.0, 14.0, 8.0001], [-1.0, 14.0, 7.9999]])
+    rois = [dict(number=1, name='Organ', kind='line', lines=[half, half + [0, 0, 2.0]], geometry='CLOSED_PLANAR')]
+    assert refused(tmp_path, make_plan(tmp_path, rois)) == masks.REASON_MASK_SLICES
+
+
 def test_a_line_named_like_a_mask_refuses(tmp_path):
     rois = [box(1, 'Ref Line', (1, 2), (1, 2), (1, 2)), dict(number=2, name='refline', kind='line', lines=[SPANNING])]
     assert refused(tmp_path, make_plan(tmp_path, rois)) == masks.REASON_ROI_NAMES

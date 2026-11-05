@@ -52,7 +52,7 @@ def classify(struct, plan, frame_uid, taken=(), ct=None):
     point count: the RTSTRUCT's library copy of that channel. An applicator named like a mask is written as
     '<name>_channel.nii.gz'. With `ct` (the planning CT image), a would-be mask ROI whose every non-POINT contour crosses
     CT slices (a reference line drawn on a reformatted plane) is a line instead: its points go to a text file like an
-    applicator's. A mix of axial and crossing contours stays a mask (and build_masks refuses it). Then an empty output name, or two names equal ignoring case (also with `taken`, names
+    applicator's (crossing: its points span at least 2 slices). A mix of axial and crossing contours stays a mask (and build_masks refuses it). Then an empty output name, or two names equal ignoring case (also with `taken`, names
     already used in the plan folder), refuse, as does a mask or applicator ROI whose ReferencedFrameOfReferenceUID is
     not `frame_uid` (the planning CT's).
     """
@@ -81,7 +81,8 @@ def classify(struct, plan, frame_uid, taken=(), ct=None):
             apps.append((stem, np.concatenate(points), name, number in referenced_rois))
         else:
             planar = [p for p, item in zip(points, items, strict=True) if str(item.ContourGeometricType) != 'POINT']
-            if ct is not None and planar and all(_crosses_slices(p, ct) for p in planar):
+            # A span of at least 2 slices: a contour halfway between two slices can round to both and must stay a mask
+            if ct is not None and planar and all(np.ptp(_slice_indices(p, ct)) >= 2 for p in planar):
                 result.lines.append((format_name(name) + SUFFIX, np.concatenate(planar), name))
             else:
                 result.kept.append((number, name, format_name(name) + SUFFIX, planar))
