@@ -1552,7 +1552,7 @@ def test_a_series_whose_nonzero_voxels_all_miss_the_ct_is_kept_when_its_fov_over
     report, done, _ = run_plan(tmp_path, [mr_spec(ends[0], rigid(0, (4, 0, 0))), mr_spec(ends[1], rigid(0, (4, 0, 0)), file='series_MR_2.nii.gz')])
     assert plan_row(report).skipped_series == 0
     assert plan_row(report).files == [*BASE_FILES, MR_OUT, pre.output_name('series_MR_2.nii.gz', SMALL), 'series.csv']
-    assert any(not sitk.GetArrayFromImage(read_out(done, name)).any() for name in (MR_OUT, pre.output_name('series_MR_2.nii.gz', SMALL)))  # a copy: a view of a temporary image reads freed memory
+    assert sorted(not sitk.GetArrayFromImage(read_out(done, name)).any() for name in (MR_OUT, pre.output_name('series_MR_2.nii.gz', SMALL))) == [False, True]  # a copy: a view of a temporary image reads freed memory
 
 
 def test_an_all_zero_series_is_left_out_by_where_it_sits_not_its_values(tmp_path):
@@ -1578,6 +1578,19 @@ def test_a_registered_ct_without_rescale_is_filled_with_its_own_minimum_outside_
     _, done, _ = run_plan(tmp_path, [mr_spec(values, matrix, geometry, 'series_CT_1.nii.gz', 'CT')], steps=steps)
     _, outside = coverage(read_out(done, name), geometry, (8, 8, 8), matrix)
     assert (sitk.GetArrayFromImage(read_out(done, name))[outside] == -3024.0).all()
+
+
+@pytest.mark.parametrize('image', [
+    lambda: sitk.Image([4, 4], sitk.sitkFloat32),
+    lambda: sitk.Image([4, 4, 4, 2], sitk.sitkFloat32),
+    lambda: sitk.Image([4, 4, 4], sitk.sitkVectorFloat32, 3),
+], ids=['2d', '4d', 'multi-component'])
+def test_a_series_that_is_not_a_3d_scalar_volume_is_left_out_and_counted(tmp_path, image):
+    path = tmp_path / 'SYNTHETIC_series.nii.gz'
+    sitk.WriteImage(image(), str(path))
+    report, done, _ = run_plan(tmp_path, [mr_spec(path.read_bytes(), 'identity')])
+    assert (plan_row(report).outcome, plan_row(report).skipped_series) == ('preprocessed', 1)
+    assert plan_row(report).files == [*BASE_FILES, 'series.csv'] and not (done / MR_OUT).exists()
 
 
 def test_ac7_an_unreadable_series_file_is_left_out_and_counted(tmp_path):
