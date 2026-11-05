@@ -1543,6 +1543,25 @@ def test_ac6_a_series_entirely_outside_the_ct_is_left_out_and_one_partly_outside
     assert np.abs(values[interior] - 1.0).max() < 1e-4 and (values[outside] == 0).all() and [r['file'] for r in conv_rows(done)][-1] == kept
 
 
+def test_a_series_whose_nonzero_voxels_all_miss_the_ct_is_kept_when_its_fov_overlaps_it(tmp_path):
+    ends = []
+    for x in (0, 7):  # the overlap of one of the two is zero-valued background only
+        end = np.zeros((8, 8, 8))
+        end[:, :, x] = 1.0
+        ends.append(end)
+    report, done, _ = run_plan(tmp_path, [mr_spec(ends[0], rigid(0, (4, 0, 0))), mr_spec(ends[1], rigid(0, (4, 0, 0)), file='series_MR_2.nii.gz')])
+    assert plan_row(report).skipped_series == 0
+    assert plan_row(report).files == [*BASE_FILES, MR_OUT, pre.output_name('series_MR_2.nii.gz', SMALL), 'series.csv']
+
+
+def test_an_all_zero_series_is_left_out_by_where_it_sits_not_its_values(tmp_path):
+    zeros = np.zeros((8, 8, 8))
+    report, done, _ = run_plan(tmp_path, [mr_spec(zeros, rigid(0, (500, 0, 0))), mr_spec(zeros, rigid(0, (4, 0, 0)), file='series_MR_2.nii.gz')])
+    kept = pre.output_name('series_MR_2.nii.gz', SMALL)
+    assert plan_row(report).skipped_series == 1 and plan_row(report).files == [*BASE_FILES, kept, 'series.csv']
+    assert not sitk.GetArrayViewFromImage(read_out(done, kept)).any()
+
+
 def test_ac7_an_unreadable_series_file_is_left_out_and_counted(tmp_path):
     report, done, _ = run_plan(tmp_path, [mr_spec(b'SYNTHETIC not a nifti', 'identity')])
     assert (plan_row(report).outcome, plan_row(report).skipped_series) == ('preprocessed', 1)
