@@ -692,3 +692,177 @@ def test_no_timing_line_on_ctrl_c(tree, monkeypatch, caplog, workers):
         organize(src, out, workers=workers)
     assert not [r for r in caplog.records if ' s total' in r.getMessage()]
 
+
+
+# ---------------------------------------------------------------- --overwrite (spec 2026-11-05-overwrite-flag)
+
+SUMMARY = re.compile(r'organize: \d+ patient folders, .*; (\d+) replaced, (\d+) kept')
+
+
+def hidden(root):
+    return sorted(p.name for p in root.iterdir() if p.name.startswith('.'))
+
+
+def counts(caplog):
+    """(replaced, kept) from the stage's summary line."""
+    line = next(r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.organize' and 'patient folders' in r.getMessage())
+    return tuple(int(n) for n in SUMMARY.fullmatch(line).groups())
+
+
+@pytest.fixture
+def stale(tree, tmp_path):
+    """(src, out, fresh): `out` holds a first run's PID folder, then a marker added and a copied file removed."""
+    src, out = tree
+    planning_study(src / PID / 'p')
+    organize(src, out)
+    organize(src, tmp_path / 'fresh')
+    (out / PID / 'marker.txt').write_text('stale')
+    next((out / PID / 'plan_1').glob('ct*.dcm')).unlink()
+    return src, out, tmp_path / 'fresh'
+
+
+def test_o1_without_overwrite_an_existing_folder_is_skipped_and_untouched(stale, caplog):
+    src, out, fresh = stale
+    before = snapshot(out / PID)
+    caplog.set_level(logging.INFO)
+    report = organize(src, out)
+    assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_SKIPPED, org.REASON_EXISTS)]
+    assert snapshot(out / PID) == before and hidden(out) == []
+    assert counts(caplog) == (0, 0)
+
+
+def test_o2_overwrite_replaces_a_stale_folder_with_a_fresh_run(stale, caplog):
+    src, out, fresh = stale
+    caplog.set_level(logging.INFO)
+    report = organize(src, out, overwrite=True)
+    assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_ORGANIZED, '')]
+    assert snapshot(out / PID) == snapshot(fresh / PID)
+    assert hidden(out) == []
+    assert counts(caplog) == (1, 0)
+
+
+def test_o2_overwrite_with_no_existing_folder_is_a_plain_new_run(tree, caplog):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    caplog.set_level(logging.INFO)
+    assert organize(src, out, overwrite=True).rows[0].outcome == org.OUTCOME_ORGANIZED
+    assert hidden(out) == [] and counts(caplog) == (0, 0)
+
+
+def test_o3_a_copy_failure_under_overwrite_keeps_the_old_folder(stale, monkeypatch, caplog):
+    src, out, fresh = stale
+    before, real, calls = snapshot(out / PID), org.shutil.copy2, []
+
+    def failing_copy(source, target):
+        calls.append(target)
+        if len(calls) == 3:
+            raise OSError(f'disk full writing {target}')
+        return real(source, target)
+
+    monkeypatch.setattr(org.shutil, 'copy2', failing_copy)
+    caplog.set_level(logging.INFO)
+    report = organize(src, out, overwrite=True)
+    assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_REFUSED, org.REASON_IO_ERROR)]
+    assert snapshot(out / PID) == before and hidden(out) == []
+    assert counts(caplog) == (0, 0)  # a patient that raised adds nothing
+
+
+def test_o4_a_failed_move_into_place_rolls_back_and_leaks_nothing(stale, monkeypatch, caplog):
+    src, out, fresh = stale
+    before, real = snapshot(out / PID), dicom_io.rename_dir
+
+    def failing_rename(source, target):
+        if source.name == f'.{PID}.partial':
+            raise OSError(f'cannot rename {source} to {target}')
+        return real(source, target)
+
+    monkeypatch.setattr(dicom_io, 'rename_dir', failing_rename)
+    caplog.set_level(logging.DEBUG)
+    report = organize(src, out, overwrite=True)
+    assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_REFUSED, org.REASON_IO_ERROR)]
+    assert snapshot(out / PID) == before and hidden(out) == []
+    assert caplog.text and PID not in caplog.text and str(out.parent) not in caplog.text
+
+
+def test_o5_recovery_restores_or_deletes_the_old_folder_with_or_without_overwrite(stale):
+    src, out, fresh = stale
+    before = snapshot(out / PID)
+    (out / PID).rename(out / f'.{PID}.old')  # killed between the two swap renames
+    (out / f'.{PID}.partial').mkdir()
+    report = organize(src, out)
+    assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_SKIPPED, org.REASON_EXISTS)]
+    assert snapshot(out / PID) == before and hidden(out) == []
+    (out / f'.{PID}.old').mkdir()  # killed after the swap, before the delete
+    (out / f'.{PID}.old' / 'old.txt').write_text('old')
+    organize(src, out)
+    assert snapshot(out / PID) == before and hidden(out) == []
+
+
+@pytest.mark.parametrize('refusal', ['sop', 'split'])
+def test_o6_a_patient_refused_after_its_name_is_known_keeps_its_folder_and_counts_as_kept(stale, caplog, refusal):
+    src, out, fresh = stale
+    first = next((src / PID / 'p').glob('ct*.dcm'))
+    if refusal == 'sop':
+        ds = pydicom.dcmread(first)
+        del ds.SOPInstanceUID
+        ds.save_as(first)
+    else:
+        blank_id(first)
+    before = snapshot(out / PID)
+    caplog.set_level(logging.INFO)
+    report = organize(src, out, overwrite=True)
+    assert [(r.outcome, r.reason) for r in report.rows] == [
+        (org.OUTCOME_REFUSED, org.REASON_NO_SOP_UID if refusal == 'sop' else org.REASON_SPLIT_SERIES)]
+    assert snapshot(out / PID) == before and hidden(out) == []
+    assert counts(caplog) == (0, 1)
+
+
+def test_o6_a_refusal_with_no_existing_folder_is_not_kept_and_never_recovers(tree, caplog):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    ds = pydicom.dcmread(next((src / PID / 'p').glob('ct*.dcm')))
+    del ds.SOPInstanceUID
+    ds.save_as(next((src / PID / 'p').glob('ct*.dcm')))
+    (out / f'.{PID}.old').mkdir(parents=True)  # refused before the claimed check: recovery never runs
+    caplog.set_level(logging.INFO)
+    organize(src, out, overwrite=True)
+    assert hidden(out) == [f'.{PID}.old'] and not (out / PID).exists()
+    assert counts(caplog) == (0, 0)
+
+
+def test_o7_a_later_same_name_folder_is_refused_and_never_touches_the_first_output(tree, caplog):
+    src, out = tree
+    name = 'SYNTHETIC_a_b'
+    planning_study(src / 'p1', pid='SYNTHETIC_a b', date=EARLY)
+    planning_study(src / 'p2', pid=name, date=LATE)  # same folder name, claimed by p1
+    planning_study(src / 'p3', pid=name, date=LATE, tag='x')
+    ds = pydicom.dcmread(next((src / 'p3').glob('ctx*.dcm')))
+    del ds.SOPInstanceUID  # refused before the claimed check
+    ds.save_as(next((src / 'p3').glob('ctx*.dcm')))
+    (out / name).mkdir(parents=True)
+    (out / name / 'marker.txt').write_text('stale')
+    caplog.set_level(logging.INFO)
+    report = organize(src, out, overwrite=True)
+    assert [(r.outcome, r.reason) for r in report.rows[:2]] == [(org.OUTCOME_ORGANIZED, ''), (org.OUTCOME_REFUSED, org.REASON_NAME_CLAIMED)]
+    assert report.rows[2].reason == org.REASON_NO_SOP_UID
+    assert [p.name for p in (out / name).glob('plan_*')] == ['plan_1'] and not (out / name / 'marker.txt').exists()
+    assert hidden(out) == [] and counts(caplog) == (1, 0)  # p3 was refused after p1 claimed the name: not kept
+
+
+def test_o8_an_output_folder_with_no_input_patient_is_untouched(stale):
+    src, out, fresh = stale
+    (out / 'SYNTHETIC_other').mkdir()
+    (out / 'SYNTHETIC_other' / 'a.txt').write_text('other')
+    (out / '.SYNTHETIC_other.old').mkdir()
+    before = snapshot(out)
+    organize(src, out, overwrite=True)
+    after = snapshot(out)
+    assert {k: v for k, v in after.items() if 'SYNTHETIC_other' in k} == {k: v for k, v in before.items() if 'SYNTHETIC_other' in k}
+    assert (out / '.SYNTHETIC_other.old').is_dir()
+
+
+def test_o9_the_source_tree_is_unchanged_by_an_overwrite_run(stale):
+    src, out, fresh = stale
+    before = snapshot(src)
+    organize(src, out, overwrite=True)
+    assert snapshot(src) == before
