@@ -18,3 +18,7 @@ task-02: README and examples.
 
 ## review-group-1
 PASS: no BLOCKING. NOTE (deferred): no test asserts the PRE_RUN seam shrinks output shape; a broken seam would only slow the end-to-end tests.
+
+## task-02
+- README/examples now show the five step flags, a flag/step/prefix table and the four-flag full pipeline; the "--rescale alone refuses MR/PT" and reshape-at-native-spacing notes added.
+- Suite on the session branch: 842 passed, 4 skipped; ruff clean.
