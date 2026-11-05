@@ -38,7 +38,7 @@ series as channels (rnt_transformer / vision_transformer), as for reg-resampling
   in the plan output folder. The plan row's `files` in `preprocess_report.csv` lists it right after its series. The
   output `series.csv` does not list it: no new kind, so `check_rows` and every series.csv reader are unchanged.
 - M5 Manifest: a series entry in the `series` JSON column gains `"fov_mask": "<file>"` when
-  `fovmask_<series file>` exists in the plan folder (no header read: preprocess wrote it onto that grid). Entries without one keep exactly `{"file", "modality"}`, so a tree
+  `fovmask_<series file>` exists in the plan folder and its header is on the CT grid (#146; an unreadable or off-grid mask is not listed). Entries without one keep exactly `{"file", "modality"}`, so a tree
   preprocessed without the option (and every converted tree) gives byte-identical manifests.
 - M6 Memory: the mask is written and released with its series (reg-resampling D13). Peak memory gains one uint8 image
   of the final CT's size. With the option off, the mask image is released right after the coverage check, so a
@@ -88,4 +88,4 @@ Merged by `/dev` after a clean review round (owner allowed auto-merge). Real-dat
 - FOV/pad mask for study series and for the planning CT's reshape pad.
 - A mask for a native converted series listed by the manifest on the CT grid (D10 identity case): not resampled, so
   there is no outside-FOV fill.
-- Manifest check that a listed `fov_mask` header is on the CT grid (owner: hardening issue).
+- Manifest check that a listed `fov_mask` header is on the CT grid (owner: hardening issue; done in #146).
