@@ -74,3 +74,14 @@ mask byte-identical to the input), `--ahe --legacy-rnt` (full CT name), and the 
 
 Gotchas: a help reworded as "at least one of ... is required for any output" still fails the "does not appear" criterion; avoid the phrase.
 The module docstring of `preprocess.py` (named in spec A8) has no such wording, and that file is out of scope here.
+
+## task-05
+
+Files changed: `tests/test_manifest.py`, `README.md`. No change to `src/`.
+
+Decisions: three manifest tests (AC5): a CT + MR study series pair (`SMALL_AHE`, 24^3 ramps from `write_study_tree`) listed as `study_1/series_CT_1` and
+`study_1/series_MR_1` with their `ahe_` image names; an AHE-only MR study series (`ahe_series_MR_1.nii.gz`); an aligned MR plan series (`MR_RAMP`) listed in the
+`series` column as `AHE_MR_OUT`. They reuse `AHE_MR_OUT`, `AHE_STUDY_CT`, `MR_RAMP`, `SMALL_AHE`, `write_study_tree` from `test_preprocess`.
+README: new `--ahe` bullet in the output-layout list; the MR/PT line now says geometric steps plus ahe. The README never said `--legacy-rnt` is required, so nothing else changed there.
+
+Gotchas: the tests passed as soon as written (task-02 had already put `ahe_` into the names, and `manifest.py` reads them through `series_id`).

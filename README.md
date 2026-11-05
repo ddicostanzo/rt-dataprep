@@ -43,8 +43,11 @@ SYNTHETIC_P1/
   `skipped_series` column of `preprocess_report.csv`.
 - An imaging `case_dir` is a case id, `<patient>/study_<n>/series_<MOD>_<k>`, not a path. Open
   `<root>/<patient>/study_<n>/<image>`, where `image` is the volume file name (it has the step prefixes in a preprocessed tree).
-- `preprocess` runs study series one at a time. CT gets every step that is on; MR and PT get the geometric steps only
-  (resample, harmonize, reshape), never the HU rescale.
+- `preprocess` runs study series one at a time. CT gets every step that is on; MR and PT get the geometric steps
+  (resample, harmonize, reshape) plus ahe, never the HU rescale.
+- `preprocess --ahe` (opt-in, alone or with `--legacy-rnt`) runs CLAHE on every image volume (planning CT, aligned and study
+  series; never dose or masks): skimage `equalize_adapthist`, kernel 1/8 per axis, 128 bins, clip 0.05, output float32 in
+  [0, 1]. Outputs get the prefix `ahe_` between `resample_` and `rescale_`; the manifest lists them under those names.
 - With imaging patients in the manifest the same `--seed` gives a different split, so an existing `splits.json` is refused.
 - Trees converted before this change hold `images/`, which is ignored: re-convert them.
 
