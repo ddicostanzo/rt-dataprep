@@ -85,3 +85,6 @@ Decisions: three manifest tests (AC5): a CT + MR study series pair (`SMALL_AHE`,
 README: new `--ahe` bullet in the output-layout list; the MR/PT line now says geometric steps plus ahe. The README never said `--legacy-rnt` is required, so nothing else changed there.
 
 Gotchas: the tests passed as soon as written (task-02 had already put `ahe_` into the names, and `manifest.py` reads them through `series_id`).
+
+## review-loop-pass-1
+Code review: no BLOCKING, one DEFERRED (module-level skimage import). Spec axis: all criteria met, no PLAN-BUG. Codex: reviewed 31beb9b, no threads. Deferred filed: #154.
