@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "preprocess: write an opt-in FOV mask per aligned plan series",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_preprocess.py with the existing synthetic plan/series fixtures (SYNTHETIC_ ids, built at test time), via run_plan(tmp_path, [mr_spec(...)], steps=replace(SMALL, series_fov_mask=True)) \u2014 SMALL, never the full LEGACY_RNT 701x701x433 grid; 'LEGACY_RNT' in the criteria only names the step set. Assert on the mask read back from disk. Run each new test against the unchanged code first and confirm it fails.",
+      "criteria": [
+        "PreprocessSteps gains series_fov_mask: bool = False; it is not a step: preprocess() with only series_fov_mask on raises ValueError(REASON_NO_STEPS) and out_root does not exist (add PreprocessSteps(series_fov_mask=True) to the loop in test_no_step_on_raises_before_any_write_even_with_linear_masks); the preprocess_series no-step check needs no code change (spec M1, AC5).",
+        "With series_fov_mask on, a plan with one registered MR (constant small integer v > 0, a pure translation rigid(0, ...) partly outside the CT) under replace(SMALL, series_fov_mask=True) writes fovmask_<MR output name>: uint8, with size, origin, spacing and direction equal to the final CT output's header read back from disk; over all voxels (mask == 1) == (MR output != 0) and MR output[mask == 1] == v exactly; the mask holds both 0s and 1s (spec AC1). Do not reuse coverage()'s interior band or 1e-4 tolerance; this exact-equality clause is never loosened.",
+        "The mask is the nearest-neighbour resample of an all-ones uint8 copy of the series with the series' transform (the image covers_ct builds), never derived from series values; covers_ct builds the image and computes has_voxels inside its quiet_call, returning both, so coverage is has_voxels of that same image (spec M3, vault [[sitk-fov-overlap-by-resampling-an-all-ones-mask]]).",
+        "The plan row's files lists the mask right after its series; the output series.csv has no mask row (spec M4, AC2).",
+        "Under replace(SMALL, rescale=False, series_fov_mask=True), a registered CT series of constant -1000 HU (so its fill, its minimum, is nonzero) on the same native grid and reg_matrix as the MR gets a mask array equal to the MR's mask array (spec AC2).",
+        "A series left out (reg_matrix '', no overlap, unreadable file) gets no fovmask_ file and skipped_series is unchanged (spec AC3).",
+        "With series_fov_mask off (default and LEGACY_RNT), no fovmask_ file is written and every existing test passes unchanged (spec AC4). Review check, not tested: with the option off the mask image is released right after the coverage check, not held through process_series (spec M6).",
+        "With the option on, study series, dose and mask outputs and the aligned series' values are unchanged (spec AC7).",
+        "Guardrail: no sitk.GetArrayViewFromImage of a temporary image (vault [[simpleitk-array-view-of-temporary-image-reads-freed-memory]]); bind the image to a name or use GetArrayFromImage.",
+        "Guardrail: the mask build and write run inside quiet_call / the existing write path, so an unexpected error is REASON_INTERNAL; no raise inside an except block."
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "CLI: preprocess --series-fov-mask",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/__main__.py",
+        "tests/test_cli.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_cli.py": "modify"
+      },
+      "test_approach": "In tests/test_cli.py, monkeypatch cli.preprocess to record its steps (as the calls fixture does) and assert on them; add ['--series-fov-mask'] to the flags loop of test_preprocess_without_the_preset_exits_1_with_no_steps. The --series-fov-mask help says it needs --legacy-rnt and covers aligned plan series only.",
+      "criteria": [
+        "`preprocess --legacy-rnt --series-fov-mask` passes steps == replace(LEGACY_RNT, series_fov_mask=True) to preprocess, and with --legacy-linear-masks too both fields are set (spec AC5).",
+        "`preprocess --series-fov-mask` without --legacy-rnt exits 1 with REASON_NO_STEPS and creates no output root (spec AC5).",
+        "Without the flag, steps.series_fov_mask is False."
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "manifest: fov_mask key on aligned series entries",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/manifest.py",
+        "tests/test_manifest.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/manifest.py": "modify",
+        "tests/test_manifest.py": "modify"
+      },
+      "test_approach": "In tests/test_manifest.py, preprocess a synthetic plan with a registered MR with and without series_fov_mask, then run manifest on each output tree and on the converted tree.",
+      "criteria": [
+        "On a tree preprocessed with series_fov_mask, the plan's series entry is {\"file\": <MR output>, \"modality\": \"MR\", \"fov_mask\": \"fovmask_<MR output>\"}, keyed on the file fovmask_<series file> existing in the plan folder, with no header read of the mask (spec M5, AC6).",
+        "On a tree preprocessed without it, the entry is exactly {\"file\", \"modality\"} as today; converted-tree and imaging-row manifests are unchanged; existing manifest tests pass unchanged (spec AC6)."
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02",
+      "task-03"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-04",
+    "spec": "docs/specs/2026-11-04-series-fov-mask.md",
+    "profile": "project-profile.yml",
+    "issue": 129,
+    "guardrails": [
+      "Merge (2.10): profile merge is squash; use gh pr merge --squash --match-head-commit <head> only after the Codex state comment's commit_sha equals the head SHA and the GraphQL query shows no unresolved Codex threads. Never a local git merge onto main.",
+      "Pre-push (vault Memory/rt-dataprep/pre-push-uses-stale-dotvenv-pytest): the pre-push gate runs .venv/bin/pytest; run `uv run --group dev pytest -q` first so .venv has the dev group.",
+      "No CI in this repo; commit gate at most 5 staged files; no raise inside an except block; PHI: log counts and REASON_ constants only, test data SYNTHETIC_; use uv run; no GetArrayViewFromImage of a temporary; no arithmetic on a 4D float test image.",
+      "Closing keyword: the PR body uses 'Closes #129' so the issue closes on merge."
+    ]
+  }
+}
