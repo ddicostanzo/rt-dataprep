@@ -43,6 +43,7 @@ REASON_DOSE_COUNT = 'series.csv lists more than one dose file'
 REASON_KIND = 'series.csv has a row of an unknown kind'
 REASON_SERIES_CSV = 'series.csv is malformed: columns, row length, encoding, or one file named twice'
 REASON_TOO_SMALL = 'the image is shorter than one output voxel along an axis'
+REASON_NOT_VOLUME = 'the image is not a 3D volume of one real value per voxel'
 REASON_FILE_MISSING = 'a series.csv row names a file that is not in the case folder'
 REASON_STUDY_MODALITY = 'a series.csv series row has a modality other than CT, MR or PT, or one that differs from its file name'
 REASON_STUDY_NAME = 'a series.csv series row names a file that is not a series volume'
@@ -203,6 +204,12 @@ def covers_ct(native, final_ct, matrix):
         fov.CopyInformation(native)
         return has_voxels(sitk.Resample(fov, final_ct, series_transform(matrix), sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8))
     return quiet_call(run, REASON_INTERNAL)
+
+
+def is_volume(image):
+    """Whether `image` is a 3D volume of one real value per voxel, the only kind convert writes (#127, #138, #139)."""
+    return (image.GetDimension() == 3 and image.GetNumberOfComponentsPerPixel() == 1
+            and image.GetPixelID() not in (sitk.sitkComplexFloat32, sitk.sitkComplexFloat64))
 
 
 def read_series(path):
@@ -367,9 +374,12 @@ def preprocess_series(study_dir, out_dir, row, steps):
     if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape):
         raise CaseRefused(REASON_NO_SERIES_STEPS)  # a rescale-only run has nothing to do to an MR or PT: no read, no copy under another name
     source = study_dir / row['file']
+    image = read_image(source)
+    if not is_volume(image):  # before too_small, which assumes three axes
+        raise CaseRefused(REASON_NOT_VOLUME)
     if too_small(read_info(source), steps):
         raise CaseRefused(REASON_TOO_SMALL)
-    image = process_ct(read_image(source), steps)
+    image = process_ct(image, steps)
     name = output_name(row['file'], steps, ct=is_ct)
     out_dir.mkdir(exist_ok=True)
     conv.write_atomic(image, out_dir / name)
@@ -514,7 +524,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
     for row in series:  # one series at a time, after the CT: read, resampled, written, released
         matrix = reg_matrix_array(row['reg_matrix'])
         native = None if matrix is None else read_series(plan_dir / row['file'])
-        if native is None or native.GetDimension() != 3 or native.GetNumberOfComponentsPerPixel() != 1:  # D8: convert writes 3D scalar volumes only
+        if native is None or not is_volume(native):  # D8
             skipped += 1
             continue
         is_ct = row['modality'] == 'CT'
