@@ -376,13 +376,7 @@ def check_rows(plan_dir):
         raise CaseRefused(REASON_DOSE_COUNT)
     if len({row['file'] for row in rows}) != len(rows):  # after the counts: two ct or dose rows are refused as such
         raise CaseRefused(REASON_SERIES_CSV)
-    if any(row['modality'] not in IMAGE_MODALITIES for row in series):
-        raise CaseRefused(REASON_STUDY_MODALITY)
-    ids = [series_id(row['file']) for row in series]
-    if None in ids:
-        raise CaseRefused(REASON_STUDY_NAME)
-    if any(i.split('_')[1] != row['modality'] for i, row in zip(ids, series, strict=True)):
-        raise CaseRefused(REASON_STUDY_MODALITY)
+    check_series_rows(series)
     present = {p.name for p in plan_dir.iterdir() if p.is_file() and not p.is_symlink()}  # a value with a separator or '..' is never in it
     if any(row['file'] not in present for row in (*kept, *series)):
         raise CaseRefused(REASON_FILE_MISSING)
@@ -400,6 +394,19 @@ def series_id(name):
     """`series_<MOD>_<k>` of a study volume's file name (a full match, so no newline tail), or None when the name is not one."""
     match = STUDY_FILE.fullmatch(name)
     return match.group(5) if match else None
+
+
+def check_series_rows(series):
+    """The kind=series row checks plans and studies share: an image modality, a series_<MOD>_<k> name whose MOD matches it, no id twice."""
+    if any(row['modality'] not in IMAGE_MODALITIES for row in series):
+        raise CaseRefused(REASON_STUDY_MODALITY)
+    ids = [series_id(row['file']) for row in series]
+    if None in ids:
+        raise CaseRefused(REASON_STUDY_NAME)
+    if any(i.split('_')[1] != row['modality'] for i, row in zip(ids, series, strict=True)):
+        raise CaseRefused(REASON_STUDY_MODALITY)
+    if len(set(ids)) != len(ids):
+        raise CaseRefused(REASON_SERIES_CSV)
 
 
 def read_series_csv(folder):
@@ -428,15 +435,7 @@ def check_study_rows(study_dir, parsed=None):
         raise CaseRefused(REASON_SERIES_CSV)
     if any(row['kind'] != 'series' for row in rows):
         raise CaseRefused(REASON_KIND)
-    if any(row['modality'] not in IMAGE_MODALITIES for row in rows):
-        raise CaseRefused(REASON_STUDY_MODALITY)
-    ids = [series_id(row['file']) for row in rows]
-    if None in ids:
-        raise CaseRefused(REASON_STUDY_NAME)
-    if any(i.split('_')[1] != row['modality'] for i, row in zip(ids, rows, strict=True)):
-        raise CaseRefused(REASON_STUDY_MODALITY)
-    if len(set(ids)) != len(ids):
-        raise CaseRefused(REASON_SERIES_CSV)
+    check_series_rows(rows)
     present = {p.name for p in study_dir.iterdir() if p.is_file() and not p.is_symlink()}
     if any(row['file'] not in present for row in rows):
         raise CaseRefused(REASON_FILE_MISSING)

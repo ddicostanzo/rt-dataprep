@@ -425,6 +425,12 @@ def test_a_bad_series_row_refuses_the_plan(tmp_path, file, modality, reason):
     refuse(tmp_path, reason, lambda folder, rows: add_series(folder, rows, file, modality, write=False))
 
 
+def test_two_series_rows_with_one_series_id_refuse_the_plan(tmp_path):
+    def change(folder, rows):
+        add_series(folder, [*rows, add_series(folder, rows)], 'resample_series_MR_1.nii.gz')
+    refuse(tmp_path, pre.REASON_SERIES_CSV, change)
+
+
 def test_a_series_file_with_step_prefixes_passes_check_rows(tmp_path):
     folder, rows = write_plan(tmp_path)
     add_series(folder, rows, 'reshape_resample_initialresample_series_MR_1.nii.gz')
@@ -876,7 +882,7 @@ def test_reasons_hold_no_separator_digit_run_or_uid():
     reasons = {name: value for name, value in vars(pre).items() if name.startswith('REASON_')}
     assert {'REASON_OUTSIDE_INPUT', 'REASON_NO_STEPS', 'REASON_EXISTS', 'REASON_NO_CASES', 'REASON_NO_CT', 'REASON_DOSE_COUNT',
             'REASON_KIND', 'REASON_FILE_MISSING', 'REASON_FILE_UNREADABLE', 'REASON_GRID', 'REASON_CROP', 'REASON_IO_ERROR',
-            'REASON_INTERNAL'} <= set(reasons)
+            'REASON_INTERNAL', 'REASON_NO_SERIES_STEPS'} <= set(reasons)
     assert len(set(reasons.values())) == len(reasons)
     assert 'REASON_NO_PLANS' not in reasons
     for value in reasons.values():
