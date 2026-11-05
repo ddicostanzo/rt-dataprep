@@ -514,7 +514,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
     for row in series:  # one series at a time, after the CT: read, resampled, written, released
         matrix = reg_matrix_array(row['reg_matrix'])
         native = None if matrix is None else read_series(plan_dir / row['file'])
-        if native is None:
+        if native is None or native.GetDimension() != 3 or native.GetNumberOfComponentsPerPixel() != 1:  # D8: convert writes 3D scalar volumes only
             skipped += 1
             continue
         is_ct = row['modality'] == 'CT'
