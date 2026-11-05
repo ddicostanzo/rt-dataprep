@@ -510,3 +510,154 @@ def test_read_pooled_raises_the_ctrl_c_of_the_join_even_when_every_step_succeede
     with pytest.raises(KeyboardInterrupt):  # not a list of results
         read_pooled(lambda path: path, ['SYNTHETIC_1', 'SYNTHETIC_2'], 2)
     assert len(shutdowns) == 2
+
+
+# recover / publish: the --overwrite swap helper. Folders are SYNTHETIC_ names in tmp_path.
+NAME = 'SYNTHETIC_pt'
+
+
+def _make(path, files):
+    for rel, data in files.items():
+        (path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (path / rel).write_bytes(data)
+
+
+def _snap(path):
+    return {p.relative_to(path).as_posix(): p.read_bytes() for p in sorted(path.rglob('*')) if p.is_file()}
+
+
+def _scene(tmp_path, target=None, old=None, partial=None):
+    """An output root holding the given contents (dicts of relative path -> bytes) and an untouched sibling with hidden twins."""
+    root = tmp_path / 'out'
+    for folder, files in {NAME: target, f'.{NAME}.old': old, f'.{NAME}.partial': partial}.items():
+        if files is not None:
+            (root / folder).mkdir(parents=True)
+            _make(root / folder, files)
+    for folder in ('SYNTHETIC_other', '.SYNTHETIC_other.old', '.SYNTHETIC_other.partial'):
+        _make(root / folder, {'a.bin': b'SYNTHETIC_sibling'})
+    return root
+
+
+def _others(root):
+    return {p.name: _snap(p) for p in root.iterdir() if NAME not in p.name}
+
+
+def _names(root):
+    return sorted(p.name for p in root.iterdir() if NAME in p.name)
+
+
+def _failing_rename(monkeypatch, *sources):
+    real = dicom_io.rename_dir
+
+    def fake(src, dst):
+        if src.name in sources:
+            raise OSError('SYNTHETIC_ rename failed')
+        real(src, dst)
+    monkeypatch.setattr(dicom_io, 'rename_dir', fake)
+
+
+OLD = {'a.bin': b'SYNTHETIC_old', 'sub/b.bin': b'SYNTHETIC_old_b'}
+NEW = {'a.bin': b'SYNTHETIC_new', 'c.bin': b'SYNTHETIC_new_c'}
+
+
+@pytest.mark.parametrize('target, old, partial, expected', [
+    (None, OLD, None, OLD),                       # interrupted swap: restore
+    (None, OLD, NEW, OLD),                        # restore, and the leftover partial goes
+    ({'a.bin': b'SYNTHETIC_kept'}, OLD, None, {'a.bin': b'SYNTHETIC_kept'}),  # finished swap: old goes
+    ({'a.bin': b'SYNTHETIC_kept'}, OLD, NEW, {'a.bin': b'SYNTHETIC_kept'}),
+    ({'a.bin': b'SYNTHETIC_kept'}, None, NEW, {'a.bin': b'SYNTHETIC_kept'}),  # only a partial
+    (None, None, NEW, None),
+    (None, None, None, None),
+])
+def test_recover(tmp_path, target, old, partial, expected):
+    root = _scene(tmp_path, target, old, partial)
+    before = _others(root)
+    dicom_io.recover(root, NAME)
+    assert _names(root) == ([NAME] if expected is not None else [])
+    if expected is not None:
+        assert _snap(root / NAME) == expected
+    assert _others(root) == before
+
+
+@pytest.mark.parametrize('overwrite, success', [(False, False), (False, True), (True, False), (True, True)])
+def test_publish_without_a_target_is_new(tmp_path, overwrite, success):
+    root = _scene(tmp_path, partial=NEW)
+    before = _others(root)
+    assert dicom_io.publish(root, NAME, overwrite=overwrite, success=success) == 'new'
+    assert _names(root) == [NAME] and _snap(root / NAME) == NEW
+    assert _others(root) == before
+
+
+def test_publish_without_a_target_publishes_an_empty_partial(tmp_path):
+    root = _scene(tmp_path, partial={})
+    assert dicom_io.publish(root, NAME, overwrite=False, success=False) == 'new'
+    assert _names(root) == [NAME] and _snap(root / NAME) == {}
+
+
+def test_publish_replaces_an_existing_target(tmp_path):
+    root = _scene(tmp_path, OLD, partial=NEW)
+    before = _others(root)
+    assert dicom_io.publish(root, NAME, overwrite=True, success=True) == 'replaced'
+    assert _names(root) == [NAME] and _snap(root / NAME) == NEW
+    assert _others(root) == before
+
+
+@pytest.mark.parametrize('partial', [NEW, None])
+def test_publish_keeps_the_target_when_the_build_had_no_success(tmp_path, partial):
+    root = _scene(tmp_path, OLD, partial=partial)
+    before = _others(root)
+    assert dicom_io.publish(root, NAME, overwrite=True, success=False) == 'kept'
+    assert _names(root) == [NAME] and _snap(root / NAME) == OLD
+    assert _others(root) == before
+
+
+@pytest.mark.parametrize('success', [True, False])
+def test_publish_refuses_an_existing_target_without_overwrite(tmp_path, success):
+    root = _scene(tmp_path, OLD, partial=NEW)
+    before = _others(root)
+    with pytest.raises(ValueError):
+        dicom_io.publish(root, NAME, overwrite=False, success=success)
+    assert _names(root) == [f'.{NAME}.partial', NAME]
+    assert _snap(root / NAME) == OLD and _snap(root / f'.{NAME}.partial') == NEW
+    assert _others(root) == before
+
+
+def test_publish_rolls_back_when_the_partial_cannot_be_moved_in(tmp_path, monkeypatch, caplog):
+    root = _scene(tmp_path, OLD, partial=NEW)
+    before = _others(root)
+    _failing_rename(monkeypatch, f'.{NAME}.partial')
+    with caplog.at_level(logging.DEBUG), pytest.raises(OSError):
+        dicom_io.publish(root, NAME, overwrite=True, success=True)
+    assert _snap(root / NAME) == OLD
+    assert _names(root) == [f'.{NAME}.partial', NAME]  # the stage's own cleanup removes the partial
+    assert _others(root) == before
+    assert caplog.records == []
+
+
+def test_publish_leaves_the_old_folder_for_recover_when_the_rollback_also_fails(tmp_path, monkeypatch, caplog):
+    root = _scene(tmp_path, OLD, partial=NEW)
+    before = _others(root)
+    _failing_rename(monkeypatch, f'.{NAME}.partial', f'.{NAME}.old')
+    with caplog.at_level(logging.DEBUG), pytest.raises(OSError):
+        dicom_io.publish(root, NAME, overwrite=True, success=True)
+    assert _names(root) == [f'.{NAME}.old', f'.{NAME}.partial']
+    assert _snap(root / f'.{NAME}.old') == OLD
+    assert _others(root) == before
+    assert caplog.records == []
+    monkeypatch.undo()
+    dicom_io.recover(root, NAME)
+    assert _names(root) == [NAME] and _snap(root / NAME) == OLD
+
+
+def test_publish_ignores_a_failed_delete_of_the_old_folder(tmp_path, caplog):
+    if os.geteuid() == 0:
+        pytest.skip('root ignores directory permissions')
+    root = _scene(tmp_path, {'locked/a.bin': b'SYNTHETIC_old'}, partial=NEW)
+    (root / NAME / 'locked').chmod(0o500)  # r-x: its file cannot be unlinked
+    try:
+        with caplog.at_level(logging.DEBUG):
+            assert dicom_io.publish(root, NAME, overwrite=True, success=True) == 'replaced'
+        assert _snap(root / NAME) == NEW
+        assert caplog.records == []
+    finally:
+        (root / f'.{NAME}.old' / 'locked').chmod(0o700)
