@@ -8,7 +8,9 @@ import re
 import operator
 import os
 import subprocess
+import shutil
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -809,6 +811,150 @@ def test_a2_11_the_organized_tree_keeps_its_hashes_and_a_rerun_skips_every_patie
     assert tree_hashes(org) == before
     assert {k: v for k, v in tree_hashes(out).items() if not str(k).startswith('convert_report')} == {
         k: v for k, v in after_first.items() if not str(k).startswith('convert_report')}
+
+
+# ---------------------------------------------------------------- --overwrite
+
+PAST = 1_000_000_000  # an mtime long before any run of these tests
+
+
+def stale_output(tree):
+    """One converted patient, then a marker added and every file aged: the state a rerun after a code fix finds."""
+    org, out = tree
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')], rois=[BOX])
+    conv.convert(org, out)
+    (out / PID / 'marker.txt').write_text('stale')
+    for p in (out / PID).rglob('*'):
+        os.utime(p, (PAST, PAST))
+    return org, out
+
+
+def no_hidden(out):
+    return [n for n in listing(out) if n.startswith('.')]
+
+
+def test_overwrite_without_the_flag_skips_and_treats_names_differing_in_case_as_today(tree):
+    org, out = stale_output(tree)
+    before = tree_hashes(out / PID)
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'skipped', conv.REASON_EXISTS)]
+    assert tree_hashes(out / PID) == before
+    other = tree[0].parent / 'org2'
+    for name in (PID, PID.lower()):
+        make_plan(other / name / 'plan_1', patient=name)
+    rows = conv.convert(other, tree[0].parent / 'out2').rows
+    assert [(r.patient, r.outcome) for r in rows if r.folder == 'plan_1'] == [(PID, 'converted'), (PID.lower(), 'converted')]
+
+
+def test_overwrite_replaces_a_stale_folder_with_a_fresh_run(tree, caplog):
+    org, out = stale_output(tree)
+    started = time.time()
+    caplog.set_level(logging.INFO)
+    rows = conv.convert(org, out, overwrite=True).rows
+    assert row_of(rows).outcome == 'converted'
+    fresh = tree[0].parent / 'fresh'
+    conv.convert(org, fresh)
+    assert sorted(tree_hashes(out / PID)) == sorted(tree_hashes(fresh / PID))
+    assert not (out / PID / 'marker.txt').exists()
+    written = [p for p in (out / PID).rglob('*') if p.is_file()]
+    assert written and all(p.stat().st_mtime >= started - 1 for p in written)  # nothing of the old folder was merged in
+    assert no_hidden(out) == []
+    assert any(m.endswith('; 1 replaced, 0 kept') for m in caplog.messages)
+
+
+def test_overwrite_with_a_failed_build_keeps_the_old_folder(tree, monkeypatch, caplog):
+    org, out = stale_output(tree)
+    before = tree_hashes(out / PID)
+
+    def fail(*args, **kwargs):
+        raise OSError(f'disk full writing under {out} for {PID}')
+    monkeypatch.setattr(conv.sitk, 'WriteImage', fail)
+    caplog.set_level(logging.INFO)
+    rows = conv.convert(org, out, overwrite=True).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'refused', conv.REASON_IO_ERROR)]
+    assert tree_hashes(out / PID) == before
+    assert no_hidden(out) == []
+    assert any(m.endswith('; 0 replaced, 0 kept') for m in caplog.messages)
+
+
+def test_overwrite_with_a_failed_partial_rename_restores_the_old_folder(tree, monkeypatch, caplog):
+    org, out = stale_output(tree)
+    before = tree_hashes(out / PID)
+    real = dicom_io.rename_dir
+
+    def rename(src, dst):
+        if Path(src).name == f'.{PID}.partial':
+            raise OSError(f'cannot move {src} to {dst} for {PID}')
+        real(src, dst)
+    monkeypatch.setattr(dicom_io, 'rename_dir', rename)
+    caplog.set_level(logging.DEBUG)
+    rows = conv.convert(org, out, overwrite=True).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'refused', conv.REASON_IO_ERROR)]
+    assert tree_hashes(out / PID) == before
+    assert no_hidden(out) == []
+    assert [m for m in caplog.messages if PID in m or str(out.parent) in m] == []
+
+
+def test_recovery_restores_or_deletes_the_old_folder_with_or_without_overwrite(tree):
+    org, out = stale_output(tree)
+    before = tree_hashes(out / PID)
+    (out / PID).rename(out / f'.{PID}.old')
+    (out / f'.{PID}.partial').mkdir()
+    rows = conv.convert(org, out).rows
+    assert [(r.outcome, r.reason) for r in rows] == [('skipped', conv.REASON_EXISTS)]
+    assert tree_hashes(out / PID) == before and no_hidden(out) == []
+    (out / f'.{PID}.old').mkdir()
+    (out / f'.{PID}.old' / 'x').write_text('x')
+    conv.convert(org, out)
+    assert tree_hashes(out / PID) == before and no_hidden(out) == []
+
+
+def unreadable(monkeypatch):
+    def fail(path):
+        raise OSError('unreadable')
+    monkeypatch.setattr(dicom_io, 'read_header_core', fail)
+
+
+def test_overwrite_keeps_the_old_folder_when_every_plan_is_refused(tree, monkeypatch, caplog):
+    org, out = stale_output(tree)
+    before = tree_hashes(out / PID)
+    unreadable(monkeypatch)
+    caplog.set_level(logging.INFO)
+    rows = conv.convert(org, out, overwrite=True).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('plan_1', 'refused', conv.REASON_FILE_UNREADABLE)]
+    assert tree_hashes(out / PID) == before and no_hidden(out) == []
+    assert any(m.endswith('; 0 replaced, 1 kept') for m in caplog.messages)
+
+
+def test_overwrite_keeps_the_old_folder_of_a_patient_without_plan_folders(tree, caplog):
+    org, out = stale_output(tree)
+    before = tree_hashes(out / PID)
+    shutil.rmtree(org / PID)
+    (org / PID).mkdir()
+    caplog.set_level(logging.INFO)
+    rows = conv.convert(org, out, overwrite=True).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'skipped', conv.REASON_NO_PLANS)]
+    assert tree_hashes(out / PID) == before and no_hidden(out) == []
+    assert any(m.endswith('; 0 replaced, 1 kept') for m in caplog.messages)
+
+
+def test_overwrite_refuses_a_second_folder_whose_name_differs_only_in_case(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    make_plan(org / PID.lower() / 'plan_1', patient=PID.lower())
+    rows = conv.convert(org, out, overwrite=True).rows
+    first, second = sorted(rows, key=lambda r: r.patient)
+    assert (first.patient, first.outcome) == (PID, 'converted')
+    assert (second.patient, second.folder, second.outcome, second.reason) == (PID.lower(), '', 'refused', conv.REASON_NAME_CLAIMED)
+    assert (out / PID / 'plan_1').is_dir() and no_hidden(out) == []
+
+
+def test_overwrite_leaves_an_unrelated_output_folder_alone(tree):
+    org, out = stale_output(tree)
+    (out / 'SYNTHETICOTHER').mkdir()
+    (out / 'SYNTHETICOTHER' / 'keep.txt').write_text('keep')
+    conv.convert(org, out, overwrite=True)
+    assert (out / 'SYNTHETICOTHER' / 'keep.txt').read_text() == 'keep'
 
 
 # ---------------------------------------------------------------- guardrails on the source

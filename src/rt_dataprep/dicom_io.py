@@ -17,6 +17,7 @@ import pydicom
 import SimpleITK as sitk
 
 REASON_UNREADABLE = 'DICOM header is unreadable'
+REASON_INPUT_INSIDE_OUTPUT = 'with --overwrite, the input root must not be the output root or inside it'
 ALLOCATION_FAILURE = re.compile(
     r'\b(?:failed to allocate\b[^\n]*\bmemory|cannot allocate memory|out of memory|'
     r'std::bad_alloc|bad allocation|memory allocation (?:has )?failed)\b', re.IGNORECASE)
@@ -221,3 +222,60 @@ def write_report(out_root, name, header, rows):
     finally:
         with contextlib.suppress(OSError):  # gone after a replace; a failed copy leaves no hidden temp (#81)
             latest.unlink()
+
+
+def rename_dir(src, dst):
+    """The one place the swap renames a folder, so a test can fail a single step."""
+    Path(src).rename(dst)
+
+
+def recover(out_root, name):
+    """
+    Settle what an interrupted --overwrite swap left for `name` under out_root: `.<name>.old` goes back to `<name>` when
+    that is missing, else it is deleted (the swap had finished); a leftover `.<name>.partial` is deleted. Only those three
+    direct children are touched. A failed restore raises OSError. Logs nothing.
+    """
+    out_root = Path(out_root)
+    target, old, partial = out_root / name, out_root / f'.{name}.old', out_root / f'.{name}.partial'
+    if os.path.lexists(old):
+        if os.path.lexists(target):
+            shutil.rmtree(old, ignore_errors=True)  # a leftover is retried by the next recover
+        else:
+            rename_dir(old, target)
+    shutil.rmtree(partial, ignore_errors=True)
+
+
+def publish(out_root, name, *, overwrite, success):
+    """
+    Move the finished `.<name>.partial` into place as `<name>`; returns 'new', 'replaced' or 'kept'.
+
+    No target: the partial becomes the target ('new'), whatever `overwrite` and `success` say. A target with overwrite=False
+    is misuse: ValueError, nothing touched. A target with overwrite=True: when `success` (the build had a successful case)
+    the target moves to `.<name>.old`, the partial moves in, `.<name>.old` is deleted ('replaced'); otherwise the target
+    stays and the partial is deleted ('kept'). If the partial cannot move in, the target is moved back and that OSError
+    is raised; if the move back fails too, `.<name>.old` stays for recover and the same OSError is raised. Logs nothing.
+    """
+    out_root = Path(out_root)
+    target, old, partial = out_root / name, out_root / f'.{name}.old', out_root / f'.{name}.partial'
+    if not os.path.lexists(target):
+        rename_dir(partial, target)
+        return 'new'
+    if not overwrite:
+        raise ValueError('output folder exists and overwrite is off')
+    if not success:
+        shutil.rmtree(partial, ignore_errors=True)
+        return 'kept'
+    rename_dir(target, old)  # a failure here moved nothing
+    failure = None
+    try:
+        rename_dir(partial, target)
+    except OSError as exc:
+        failure = exc
+    if failure is not None:  # raised after the except block, as elsewhere in this module
+        try:
+            rename_dir(old, target)
+        except OSError:
+            pass  # .<name>.old stays; recover restores it on the next run
+        raise failure
+    shutil.rmtree(old, ignore_errors=True)  # the new output is complete: a leftover is removed by the next recover
+    return 'replaced'

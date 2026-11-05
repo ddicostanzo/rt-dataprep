@@ -3,7 +3,10 @@ import ast
 import csv
 import dataclasses
 import inspect
+import logging
+import os
 import re
+import time
 import traceback
 import weakref
 
@@ -12,6 +15,7 @@ import pytest
 import SimpleITK as sitk
 
 from rt_dataprep import convert as conv
+from rt_dataprep import dicom_io
 from rt_dataprep import preprocess as pre
 from rt_dataprep.dicom_io import CaseRefused
 from rt_dataprep.preprocess import PreprocessSteps
@@ -1337,7 +1341,7 @@ def test_the_run_log_counts_plan_rows_and_imaging_rows_separately(tmp_path, capl
         pre.preprocess(converted, out, SMALL)
     messages = [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.preprocess' and r.getMessage().startswith('preprocess: ')]
     summary = [m for m in messages if 'plan rows' in m]
-    assert summary == ['preprocess: 1 plan rows (1 preprocessed, 0 refused), 4 imaging rows (2 preprocessed, 2 refused), 1 patient rows (0 refused, 1 skipped); 0 registered series skipped']
+    assert summary == ['preprocess: 1 plan rows (1 preprocessed, 0 refused), 4 imaging rows (2 preprocessed, 2 refused), 1 patient rows (0 refused, 1 skipped); 0 registered series skipped; 0 replaced, 0 kept']
 
 
 def test_study_refusals_log_only_reasons(tmp_path, caplog):
@@ -2005,3 +2009,148 @@ def test_a_failing_equalize_in_process_series_is_one_fixed_internal_reason(monke
     with pytest.raises(CaseRefused) as caught:
         pre.process_series(make_image(MR_RAMP, **MR_GRID), FINAL, np.eye(4), False, False, True)
     assert str(caught.value) == pre.REASON_INTERNAL
+
+
+# ---------------------------------------------------------------- --overwrite
+
+PAST = 1_000_000_000  # an mtime long before any run of these tests
+
+
+def tree_state(root):
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob('*')) if p.is_file()}
+
+
+def no_hidden(out):
+    return [n for n in listing(out) if n.startswith('.')]
+
+
+def stale_output(tmp_path):
+    """One preprocessed patient, then a marker added and every file aged: the state a rerun after a code fix finds."""
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    pre.preprocess(converted, out, SMALL)
+    (out / 'SYNTHETICPTA' / 'marker.txt').write_text('stale')
+    for p in (out / 'SYNTHETICPTA').rglob('*'):
+        os.utime(p, (PAST, PAST))
+    return converted, out
+
+
+def test_overwrite_without_the_flag_skips_an_existing_folder_and_leaves_it_alone(tmp_path):
+    converted, out = stale_output(tmp_path)
+    before = tree_state(out / 'SYNTHETICPTA')
+    rows = pre.preprocess(converted, out, SMALL).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'skipped', pre.REASON_EXISTS)]
+    assert tree_state(out / 'SYNTHETICPTA') == before
+
+
+def test_overwrite_replaces_a_stale_folder_with_a_fresh_run(tmp_path, caplog):
+    converted, out = stale_output(tmp_path)
+    started = time.time()
+    caplog.set_level(logging.INFO)
+    report = pre.preprocess(converted, out, SMALL, overwrite=True)
+    assert plan_row(report).outcome == 'preprocessed'
+    fresh = tmp_path / 'fresh'
+    pre.preprocess(converted, fresh, SMALL)
+    assert sorted(tree_state(out / 'SYNTHETICPTA')) == sorted(tree_state(fresh / 'SYNTHETICPTA'))
+    assert not (out / 'SYNTHETICPTA' / 'marker.txt').exists()
+    written = [p for p in (out / 'SYNTHETICPTA').rglob('*') if p.is_file()]
+    assert written and all(p.stat().st_mtime >= started - 1 for p in written)  # nothing of the old folder was merged in
+    assert no_hidden(out) == []
+    assert any(m.endswith('; 1 replaced, 0 kept') for m in caplog.messages)
+
+
+def test_overwrite_with_a_failed_build_keeps_the_old_folder(tmp_path, monkeypatch, caplog):
+    converted, out = stale_output(tmp_path)
+    before = tree_state(out / 'SYNTHETICPTA')
+
+    def fail(image, path):
+        raise OSError(f'disk full writing {path} under {out}')
+    monkeypatch.setattr(conv, 'write_atomic', fail)
+    caplog.set_level(logging.DEBUG)
+    rows = pre.preprocess(converted, out, SMALL, overwrite=True).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'refused', pre.REASON_IO_ERROR)]
+    assert tree_state(out / 'SYNTHETICPTA') == before
+    assert no_hidden(out) == []
+    assert [m for m in caplog.messages if 'SYNTHETICPTA' in m or str(tmp_path) in m] == []
+    assert any(m.endswith('; 0 replaced, 0 kept') for m in caplog.messages)
+
+
+def test_overwrite_with_a_failed_partial_rename_restores_the_old_folder(tmp_path, monkeypatch, caplog):
+    converted, out = stale_output(tmp_path)
+    before = tree_state(out / 'SYNTHETICPTA')
+    real = dicom_io.rename_dir
+
+    def rename(src, dst):
+        if src.name == '.SYNTHETICPTA.partial':
+            raise OSError(f'cannot move {src} to {dst}')
+        real(src, dst)
+    monkeypatch.setattr(dicom_io, 'rename_dir', rename)
+    caplog.set_level(logging.DEBUG)
+    rows = pre.preprocess(converted, out, SMALL, overwrite=True).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'refused', pre.REASON_IO_ERROR)]
+    assert tree_state(out / 'SYNTHETICPTA') == before
+    assert no_hidden(out) == []
+    assert [m for m in caplog.messages if 'SYNTHETICPTA' in m or str(tmp_path) in m] == []
+
+
+def test_recovery_restores_or_deletes_the_old_folder_with_or_without_overwrite(tmp_path):
+    converted, out = stale_output(tmp_path)
+    before = tree_state(out / 'SYNTHETICPTA')
+    (out / 'SYNTHETICPTA').rename(out / '.SYNTHETICPTA.old')
+    (out / '.SYNTHETICPTA.partial').mkdir()
+    rows = pre.preprocess(converted, out, SMALL).rows
+    assert [(r.outcome, r.reason) for r in rows] == [('skipped', pre.REASON_EXISTS)]
+    assert tree_state(out / 'SYNTHETICPTA') == before and no_hidden(out) == []
+    (out / '.SYNTHETICPTA.old').mkdir()
+    (out / '.SYNTHETICPTA.old' / 'x').write_text('x')
+    pre.preprocess(converted, out, SMALL)
+    assert tree_state(out / 'SYNTHETICPTA') == before and no_hidden(out) == []
+
+
+def test_overwrite_keeps_the_old_folder_when_every_plan_is_refused(tmp_path, caplog):
+    converted, out = stale_output(tmp_path)
+    before = tree_state(out / 'SYNTHETICPTA')
+    (converted / 'SYNTHETICPTA' / 'plan_1' / 'ptv.nii.gz').unlink()
+    caplog.set_level(logging.INFO)
+    rows = pre.preprocess(converted, out, SMALL, overwrite=True).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('plan_1', 'refused', pre.REASON_FILE_MISSING)]
+    assert tree_state(out / 'SYNTHETICPTA') == before and no_hidden(out) == []
+    assert any(m.endswith('; 0 replaced, 1 kept') for m in caplog.messages)
+
+
+def test_overwrite_keeps_the_old_folder_of_a_patient_without_cases(tmp_path, caplog):
+    converted, out = stale_output(tmp_path)
+    before = tree_state(out / 'SYNTHETICPTA')
+    (converted / 'SYNTHETICPTA' / 'plan_1' / conv.SERIES_NAME).unlink()
+    caplog.set_level(logging.INFO)
+    rows = pre.preprocess(converted, out, SMALL, overwrite=True).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'skipped', pre.REASON_NO_CASES)]
+    assert tree_state(out / 'SYNTHETICPTA') == before and no_hidden(out) == []
+    assert any(m.endswith('; 0 replaced, 1 kept') for m in caplog.messages)
+
+
+def test_overwrite_refuses_a_second_folder_whose_name_differs_only_in_case(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    write_plan(converted, patient='syntheticpta')
+    rows = pre.preprocess(converted, out, SMALL, overwrite=True).rows
+    first, second = sorted(rows, key=lambda r: r.patient)
+    assert (first.patient, first.outcome) == ('SYNTHETICPTA', 'preprocessed')
+    assert (second.patient, second.folder, second.outcome, second.reason) == ('syntheticpta', '', 'refused', pre.REASON_NAME_CLAIMED)
+    assert (out / 'SYNTHETICPTA' / 'plan_1').is_dir() and no_hidden(out) == []
+
+
+def test_without_overwrite_names_differing_in_case_are_both_built_as_today(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    write_plan(converted, patient='syntheticpta')
+    rows = pre.preprocess(converted, out, SMALL).rows
+    assert sorted((r.patient, r.outcome) for r in rows) == [('SYNTHETICPTA', 'preprocessed'), ('syntheticpta', 'preprocessed')]
+
+
+def test_overwrite_leaves_an_unrelated_output_folder_alone(tmp_path):
+    converted, out = stale_output(tmp_path)
+    (out / 'SYNTHETICOTHER').mkdir()
+    (out / 'SYNTHETICOTHER' / 'keep.txt').write_text('keep')
+    pre.preprocess(converted, out, SMALL, overwrite=True)
+    assert (out / 'SYNTHETICOTHER' / 'keep.txt').read_text() == 'keep'

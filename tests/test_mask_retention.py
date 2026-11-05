@@ -94,7 +94,7 @@ def test_retention_cli_validation_is_fixed_text_and_writes_nothing(tmp_path):
 def test_retention_cli_option_reaches_the_steps(monkeypatch):
     from rt_dataprep import __main__ as cli
     seen = []
-    monkeypatch.setattr(cli, 'preprocess', lambda *args: seen.append(args))
+    monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: seen.append(args))
     cli.main(['preprocess', 'converted', 'out', '--resample', '--min-mask-retention', '0.75'])
     assert len(seen) == 1 and seen[0][2].min_mask_retention == 0.75
     assert seen[0][2].harmonize_spacing and not seen[0][2].resample

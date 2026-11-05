@@ -3,6 +3,7 @@ import logging
 import sys
 from pathlib import Path
 
+from rt_dataprep.dicom_io import REASON_INPUT_INSIDE_OUTPUT
 from rt_dataprep.convert import REASON_INTERNAL, REASON_OUTSIDE_ORG, ConvertAborted, convert, crash_site
 from rt_dataprep.manifest import MANIFEST_NAME, manifest
 from rt_dataprep.organize import REASON_OUTSIDE_SRC, organize
@@ -21,6 +22,7 @@ from rt_dataprep.split import REASON_COLUMNS, REASON_EXISTS, REASON_NO_TRAIN, RE
 
 PREPROCESS_HELP = 'resample, rescale and crop/pad a converted tree into a separate output tree; give at least one step flag to write anything'
 WORKERS_HELP = 'number of threads reading headers; output is the same for any value'
+OVERWRITE_HELP = "replace a patient's existing output folder once its new output holds at least one successful case"
 MAX_WORKERS = 64
 
 
@@ -38,13 +40,16 @@ def main(argv=None):
     sub.add_argument('src', help='export root, one folder per patient')
     sub.add_argument('out', help='output root')
     sub.add_argument('--workers', type=positive_int, default=1, help=WORKERS_HELP)
+    sub.add_argument('--overwrite', action='store_true', help=OVERWRITE_HELP)
     sub = commands.add_parser('convert', help='turn an organized tree into NIfTI files on the native CT grid, one folder per plan and one per study')
     sub.add_argument('org', help='organized root, from the organize command')
     sub.add_argument('out', help='output root, outside the organized root')
     sub.add_argument('--workers', type=positive_int, default=1, help=WORKERS_HELP)
+    sub.add_argument('--overwrite', action='store_true', help=OVERWRITE_HELP)
     sub = commands.add_parser('preprocess', help=PREPROCESS_HELP, description=PREPROCESS_HELP)
     sub.add_argument('converted', help='converted root, from the convert command')
     sub.add_argument('out', help='output root, outside the converted root')
+    sub.add_argument('--overwrite', action='store_true', help=OVERWRITE_HELP)
     sub.add_argument('--initial-resample', action='store_true', help='step: resample to 1 mm spacing; writes the initialresample_ prefix')
     sub.add_argument('--rescale', action='store_true', help='step: rescale a CT to (HU + 1024) / 4096; writes the rescale_ prefix; as the only step, MR/PT study series are refused')
     sub.add_argument('--ahe', action='store_true', help='step: CLAHE adaptive histogram equalization of every image volume; writes the ahe_ prefix')
@@ -69,7 +74,7 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format='%(message)s')
     try:
         if args.command == 'convert':
-            convert(args.org, args.out, workers=args.workers)
+            convert(args.org, args.out, workers=args.workers, overwrite=args.overwrite)
         elif args.command == 'preprocess':
             if not args.ahe and any(v is not None for v in (args.ahe_kernel_mm, args.ahe_bins, args.ahe_clip_limit)):
                 parser.error('AHE options require --ahe')
@@ -80,7 +85,7 @@ def main(argv=None):
                 min_mask_retention=args.min_mask_retention,
                 ahe_kernel_mm=None if args.ahe_kernel_mm is None else tuple(args.ahe_kernel_mm),
                 ahe_bins=128 if args.ahe_bins is None else args.ahe_bins,
-                ahe_clip_limit=0.05 if args.ahe_clip_limit is None else args.ahe_clip_limit))
+                ahe_clip_limit=0.05 if args.ahe_clip_limit is None else args.ahe_clip_limit), overwrite=args.overwrite)
         elif args.command == 'manifest':
             written, refused = manifest(args.root)
             print(f'manifest: {written} written, {refused} refused')
@@ -89,10 +94,10 @@ def main(argv=None):
             for name in SPLIT_NAMES:  # counts only, never the ids
                 print(f'{name}: {len(splits[name])} patients, {sum(map(len, splits[name].values()))} cases')
         else:
-            organize(args.src, args.out, workers=args.workers)
+            organize(args.src, args.out, workers=args.workers, overwrite=args.overwrite)
     except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug, reported as below
         if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_AHE_OPTIONS,
-                            REASON_MASK_RETENTION_LIMIT, REASON_OUTSIDE_SRC,
+                            REASON_MASK_RETENTION_LIMIT, REASON_OUTSIDE_SRC, REASON_INPUT_INSIDE_OUTPUT,
                             REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS):
             parser.exit(1, unexpected(exc))
         parser.exit(1, f'rt_dataprep: {exc}\n')

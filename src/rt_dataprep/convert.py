@@ -46,6 +46,7 @@ PLAN_COLUMNS = ('rtplan_uid', 'rtplan_label', 'rtplan_date', 'fractions_planned'
 
 REASON_OUTSIDE_ORG = 'output root is the organized root or inside it'
 REASON_EXISTS = 'output folder already exists'
+REASON_NAME_CLAIMED = 'another folder of this run already maps to this output name (case-insensitive)'
 REASON_NO_PLANS = 'patient folder holds no plan folder'
 REASON_NO_STUDIES = 'every other series was skipped; no study folder was written'
 REASON_IO_ERROR = 'file system error while reading or writing; nothing kept for this patient'
@@ -97,28 +98,34 @@ class PlanResult:
     series_rows: list  # dicts of SERIES_COLUMNS for the plan's series.csv, which the patient level writes last
 
 
-def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1):
+def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwrite=False):
     """
     Convert every <patient>/plan_<n>/ under org_root into out_root/<patient>/plan_<n>/ and write convert_report.csv.
 
     exclude_models: a study that holds a file whose ManufacturerModelName contains one of these is left out of the other series.
     workers: threads that read the headers of one folder; the output is the same for any value.
+    overwrite: replace a patient's existing output folder once the new output holds a converted row; otherwise the old one is kept.
     """
     org_root, out_root = Path(org_root), Path(out_root)
     if out_root.resolve().is_relative_to(org_root.resolve()):  # before any mkdir: nothing is written into the input
         raise ValueError(REASON_OUTSIDE_ORG)
+    if overwrite and org_root.resolve().is_relative_to(out_root.resolve()):  # a replaced patient folder could hold the input
+        raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
     folders = sorted(p for p in org_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
     rows, aborted = [], False
+    claimed = set()  # casefolded folder names of this run, read only under overwrite: a case-insensitive root would merge them
+    replaced = kept = 0
     reading = 0.0  # seconds and header files of the patients that finished; a refused or aborted patient adds none
     files = 0
     started = time.monotonic()
     try:
         for folder in folders:
             try:
-                found, read_s, read_files = _convert_patient(folder, out_root, exclude_models, workers)
+                found, read_s, read_files, status = _convert_patient(folder, out_root, exclude_models, workers, overwrite, claimed)
                 rows += found
                 reading, files = reading + read_s, files + read_files
+                replaced, kept = replaced + (status == 'replaced'), kept + (status == 'kept')
             except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
                 rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_IO_ERROR))
                 log.warning('convert: %s', REASON_IO_ERROR)
@@ -133,10 +140,10 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1):
                      ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows))
     plan_rows = [r for r in rows if re.fullmatch(PLAN_FOLDER, r.folder)]
     patient_rows = [r for r in rows if r.folder == '']
-    log.info('convert: %d plan rows (%d converted, %d refused, %d skipped), %d imaging rows, %d studies rows, %d patient rows (%d refused, %d skipped)',
+    log.info('convert: %d plan rows (%d converted, %d refused, %d skipped), %d imaging rows, %d studies rows, %d patient rows (%d refused, %d skipped); %d replaced, %d kept',
              len(plan_rows), *(sum(r.outcome == o for r in plan_rows) for o in (OUTCOME_CONVERTED, OUTCOME_REFUSED, OUTCOME_SKIPPED)),
              sum(bool(re.fullmatch(STUDY_SERIES, r.folder)) for r in rows), sum(r.folder == STUDIES_NAME for r in rows), len(patient_rows),
-             *(sum(r.outcome == o for r in patient_rows) for o in (OUTCOME_REFUSED, OUTCOME_SKIPPED)))
+             *(sum(r.outcome == o for r in patient_rows) for o in (OUTCOME_REFUSED, OUTCOME_SKIPPED)), replaced, kept)
     total = time.monotonic() - started
     log.info('convert: %.1f s total, %.1f s reading, %.1f s converting, %d files, workers %d', total, reading, total - reading, files, workers)
     if aborted:  # raised here, after the except blocks: nothing of the original is chained
@@ -156,11 +163,17 @@ def crash_site(tb):
     return site
 
 
-def _convert_patient(folder, out_root, exclude_models, workers):
-    """(rows, reading seconds, header files read); a raise means the patient adds neither of the last two."""
+def _convert_patient(folder, out_root, exclude_models, workers, overwrite, claimed):
+    """(rows, reading seconds, header files read, status None/'new'/'replaced'/'kept'); a raise adds neither of the middle two."""
+    if overwrite:  # first: a repeat of a name written this run must not recover, rename or replace anything
+        if folder.name.casefold() in claimed:
+            return [ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_NAME_CLAIMED)], 0.0, 0, None
+        claimed.add(folder.name.casefold())
     target = out_root / folder.name
-    if target.exists():
-        return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_EXISTS)], 0.0, 0
+    dicom_io.recover(out_root, folder.name)
+    exists = os.path.lexists(target)  # lexists, as publish: a dangling link is an existing target
+    if exists and not overwrite:
+        return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_EXISTS)], 0.0, 0, None
     plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(PLAN_FOLDER, p.name)),
                    key=lambda p: (int(p.name.split('_')[1]), p.name))  # plan_1 and fx_1: a fixed order
     # Headers are read once per patient. An unreadable file in misc_files/ is not a series and is ignored: only its count
@@ -189,12 +202,12 @@ def _convert_patient(folder, out_root, exclude_models, workers):
     series_of = lambda items: {u for ds in items if (u := _tag(ds, 'SeriesInstanceUID')).strip()}  # noqa: E731
     split = series_of(ds for ds in blank if pair(ds) not in present) & series_of(ds for _, ds in headers)
     if not plans and not ser.candidates(headers, exclude_models)[0]:
-        return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_NO_PLANS)], reading, files
+        return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_NO_PLANS)], reading, files, 'kept' if exists else None
     # Built under a hidden name and renamed at the end: a run that dies part-way leaves no folder that a later run would
     # skip as done. The flag, not an except block, decides the cleanup, so any failure (and Ctrl-C) removes the partial.
     partial = out_root / f'.{folder.name}.partial'
     shutil.rmtree(partial, ignore_errors=True)
-    rows, done = [], False
+    rows, done, status = [], False, None
     try:
         partial.mkdir()
         outcomes = [_convert_one(plan_dir, found, unreadable, partial)
@@ -215,12 +228,14 @@ def _convert_patient(folder, out_root, exclude_models, workers):
         for row, result in outcomes:  # series.csv of each converted plan folder goes in last
             if result is not None:
                 write_series_csv(result.series_rows, partial / row.folder / SERIES_NAME)
-        partial.rename(target)  # an empty partial (every plan refused) is renamed too: the patient has its outcome
+        # An empty partial (every plan refused) is renamed too when there is no old folder: the patient has its outcome.
+        status = dicom_io.publish(out_root, folder.name, overwrite=overwrite,
+                                  success=any(row.outcome == OUTCOME_CONVERTED for row in rows))
         done = True
     finally:
         if not done:
             shutil.rmtree(partial, ignore_errors=True)
-    return rows, reading, files
+    return rows, reading, files, status
 
 
 def _salvage_study(path):

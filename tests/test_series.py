@@ -1037,7 +1037,7 @@ def test_the_closing_log_line_counts_imaging_rows_and_studies_rows_apart_from_pl
     assert [(r.patient, r.folder, r.outcome) for r in rows] == [
         (PID, 'plan_1', 'converted'), (PID, 'studies', 'converted'), (PID, 'study_1/series_MR_1', 'converted'),
         (PID_B, 'studies', 'converted'), (PID_B, 'study_1/series_MR_1', 'converted'), ('SYNTHETICPTC', '', 'skipped')]
-    assert ('convert: 1 plan rows (1 converted, 0 refused, 0 skipped), 2 imaging rows, 2 studies rows, 1 patient rows (0 refused, 1 skipped)'
+    assert ('convert: 1 plan rows (1 converted, 0 refused, 0 skipped), 2 imaging rows, 2 studies rows, 1 patient rows (0 refused, 1 skipped); 0 replaced, 0 kept'
             in caplog.messages)
 
 

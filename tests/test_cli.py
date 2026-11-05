@@ -12,6 +12,7 @@ from test_convert import PID, make_plan
 from test_preprocess import FOUR_STEPS, SMALL, report_rows, write_plan
 
 from rt_dataprep import convert as conv
+from rt_dataprep import dicom_io
 from rt_dataprep import preprocess as pre
 from rt_dataprep import __main__ as cli
 from rt_dataprep import split as sp
@@ -86,7 +87,7 @@ PRE_RUN = """
 import dataclasses, runpy, sys
 from rt_dataprep import preprocess
 real = preprocess.preprocess
-preprocess.preprocess = lambda converted, out, steps: real(converted, out, dataclasses.replace(steps, new_shape=%r))
+preprocess.preprocess = lambda converted, out, steps, **kw: real(converted, out, dataclasses.replace(steps, new_shape=%r), **kw)
 %s
 sys.argv = ['rt_dataprep', 'preprocess', *sys.argv[1:]]
 runpy.run_module('rt_dataprep', run_name='__main__')
@@ -207,7 +208,7 @@ def test_preprocess_ahe_with_the_four_step_flags_writes_the_full_ct_name(tmp_pat
 ])
 def test_ahe_flag_reaches_preprocess_steps(flags, want, monkeypatch):
     seen = []
-    monkeypatch.setattr(cli, 'preprocess', lambda *args: seen.append(args))
+    monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: seen.append(args))
     cli.main(['preprocess', 'a', 'b', *flags])
     assert seen == [('a', 'b', want)]
     assert seen[0][2].ahe is ('--ahe' in flags)
@@ -220,7 +221,7 @@ STEP_FIELDS = {'--initial-resample': 'resample', '--rescale': 'rescale', '--ahe'
 @pytest.mark.parametrize('flags', [[flag] for flag in STEP_FIELDS] + [list(STEP_FIELDS)])
 def test_each_step_flag_sets_exactly_its_field(flags, monkeypatch):
     seen = []
-    monkeypatch.setattr(cli, 'preprocess', lambda *args: seen.append(args))
+    monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: seen.append(args))
     cli.main(['preprocess', 'a', 'b', *flags])
     assert seen == [('a', 'b', pre.PreprocessSteps(**{STEP_FIELDS[flag]: True for flag in flags}))]
 
@@ -386,7 +387,7 @@ def calls(monkeypatch):
 ])
 def test_series_fov_mask_flag_reaches_preprocess_steps(flags, want, monkeypatch):
     seen = []
-    monkeypatch.setattr(cli, 'preprocess', lambda *args: seen.append(args))
+    monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: seen.append(args))
     cli.main(['preprocess', 'a', 'b', *flags])
     assert seen == [('a', 'b', want)]
     assert seen[0][2].series_fov_mask is ('--series-fov-mask' in flags)
@@ -396,13 +397,13 @@ def test_series_fov_mask_flag_reaches_preprocess_steps(flags, want, monkeypatch)
 @pytest.mark.parametrize('flag, workers', [([], 1), (['--workers', '3'], 3)])
 def test_workers_reaches_organize_and_convert_and_defaults_to_one(command, flag, workers, calls):
     cli.main([command, 'a', 'b', *flag])
-    assert calls == [(command, ('a', 'b'), {'workers': workers})]
+    assert calls == [(command, ('a', 'b'), {'workers': workers, 'overwrite': False})]
 
 
 @pytest.mark.parametrize('command', ['organize', 'convert'])
 def test_workers_accepts_the_cap(command, calls):
     cli.main([command, 'a', 'b', '--workers', '64'])
-    assert calls == [(command, ('a', 'b'), {'workers': 64})]
+    assert calls == [(command, ('a', 'b'), {'workers': 64, 'overwrite': False})]
 
 
 @pytest.mark.parametrize('command', ['organize', 'convert'])
@@ -428,3 +429,41 @@ def test_workers_help_says_threads_and_same_output(command, capfd):
         cli.main([command, '--help'])
     text = ' '.join(capfd.readouterr().out.split())
     assert 'number of threads reading headers; output is the same for any value' in text
+
+
+# --overwrite on organize, convert and preprocess: passed through as a keyword; split and manifest reject it.
+@pytest.mark.parametrize('command', ['organize', 'convert', 'preprocess'])
+@pytest.mark.parametrize('flag, want', [([], False), (['--overwrite'], True)])
+def test_overwrite_reaches_each_stage_and_defaults_to_false(command, flag, want, calls, monkeypatch):
+    monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: calls.append(('preprocess', args[:2], kwargs)))
+    cli.main([command, 'a', 'b', *flag])
+    assert len(calls) == 1 and calls[0][0] == command and calls[0][1] == ('a', 'b') and calls[0][2]['overwrite'] is want
+
+
+@pytest.mark.parametrize('argv', [['manifest', 'a'], ['split', 'a', '--test-size', '0', '--val-size', '0', '--seed', '0']])
+def test_manifest_and_split_reject_overwrite(argv, calls, capfd):
+    with pytest.raises(SystemExit) as exc:
+        cli.main([*argv, '--overwrite'])
+    assert exc.value.code == 2 and calls == []
+    assert 'unrecognized arguments: --overwrite' in capfd.readouterr().err
+
+
+@pytest.mark.parametrize('command', ['organize', 'convert', 'preprocess'])
+def test_overwrite_help_lists_the_flag(command, capfd):
+    with pytest.raises(SystemExit):
+        cli.main([command, '--help'])
+    text = ' '.join(capfd.readouterr().out.split())
+    assert '--overwrite' in text and 'replace a patient\'s existing output folder once its new output holds at least one successful case' in text
+
+
+@pytest.mark.parametrize('command', [['organize'], ['convert'], ['preprocess', '--rescale']])
+def test_overwrite_refuses_an_input_root_inside_the_output_root(tmp_path, command):
+    # a replaced patient folder could hold the input itself, as `convert /data/P/organized /data --overwrite` would
+    out = tmp_path / 'out'
+    inner = out / 'SYNTHETICPT' / 'input'
+    inner.mkdir(parents=True)
+    result = subprocess.run([sys.executable, '-m', 'rt_dataprep', command[0], str(inner), str(out), *command[1:], '--overwrite'],
+                            capture_output=True, text=True)
+    assert result.returncode == 1 and result.stdout == ''
+    assert result.stderr == f'rt_dataprep: {dicom_io.REASON_INPUT_INSIDE_OUTPUT}\n'
+    assert sorted(p.name for p in out.rglob('*')) == ['SYNTHETICPT', 'input']

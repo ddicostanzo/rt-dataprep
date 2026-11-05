@@ -79,9 +79,9 @@ count before accepting the cohort. Successful process completion can include ref
 
 | Command | Inputs and output | Main options |
 | --- | --- | --- |
-| `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers 1..64` (default 1) |
-| `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers 1..64` (default 1) |
-| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | At least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--legacy-linear-masks`, `--series-fov-mask` |
+| `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers 1..64` (default 1); `--overwrite` |
+| `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers 1..64` (default 1); `--overwrite` |
+| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | At least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
 | `manifest ROOT` | Write `ROOT/manifest.csv` and a dated copy. | Works on converted or preprocessed trees. |
 | `split ROOT` | Read `ROOT/manifest.csv`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
 
@@ -286,7 +286,7 @@ class/module/line details. Reports and per-folder CSVs are sensitive artifacts a
 
 | Symptom | What to check |
 | --- | --- |
-| A patient is skipped on rerun | Its destination patient folder already exists. Use a fresh output root to recompute. |
+| A patient is skipped on rerun | Its destination patient folder already exists. Add `--overwrite` to replace it (see below), or use a fresh output root to recompute. |
 | A plan is refused | Read its fixed reason in the conversion report; verify the RTPLAN → RTSTRUCT → CT reference chain and geometry. |
 | Fewer images than expected | Review study summary skips, series eligibility, model exclusions, localizers, and readable pixel data. |
 | Preprocessing reports no step is on | Pass a step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`), or enable applicable `PreprocessSteps` in Python. |
@@ -296,7 +296,39 @@ class/module/line details. Reports and per-folder CSVs are sensitive artifacts a
 
 Patient outputs are staged under hidden partial directories and promoted when finished. Individual files are written
 atomically. This supports interrupted-run recovery; it does not provide coordination for simultaneous writers. Run only
-one pipeline writer against an output root. Review outputs before deleting or replacing any prior result.
+one pipeline writer against an output root. Review outputs before deleting or replacing any prior result, and use
+`--overwrite` only when you mean to replace them.
+
+### Replacing existing output with `--overwrite`
+
+By default a patient whose output folder already exists is skipped. `organize`, `convert`, and `preprocess` accept
+`--overwrite` to replace such a folder instead:
+
+```bash
+uv run python -m rt_dataprep convert /secure/organized /secure/converted --overwrite
+```
+
+- **When it replaces.** The patient is rebuilt in a hidden partial folder. The old folder is replaced only once the new
+  output holds at least one successful case. If every case was refused or skipped (for example after a transient read
+  error), the old folder is kept unchanged. That patient's report row shows the refusal, and the summary line counts it
+  as kept. Each summary line ends with `N replaced, N kept`. A patient refused for a file system error, or an `organize`
+  patient refused before its name is known, also keeps its old folder but is not counted. Replacement is per patient
+  folder: when one case succeeds, cases refused in the new run are not carried over from the old folder, so check the
+  report before discarding any copy of the old output.
+- **Only this run's patients.** Output folders with no matching input patient are never touched.
+- **Interrupted runs.** During a swap the old output sits in a hidden `.<name>.old` folder. If a run is interrupted, the
+  next run of the same stage restores it when `<name>` is missing, or deletes it when `<name>` was already replaced. This
+  happens with or without `--overwrite`. An `organize` patient that is refused before its name is claimed (no SOP
+  instance UID, split series, or a name already claimed in the same run) never runs this recovery, so its `.<name>.old`
+  stays until a run that reaches that name.
+- **Same-run guard.** A folder name written earlier in the same run is never replaced by a later input folder.
+  `organize` always refuses such a folder. `convert` and `preprocess` do the same under `--overwrite`, including names
+  that differ only in letter case, because a case-insensitive file system would map them to one folder.
+- **Downstream outputs are not updated.** After replacing converted output, rerun `preprocess` (into a fresh or
+  `--overwrite` output root), `manifest`, and `split`. `manifest.csv` and `splits.json` are not regenerated for you, and
+  `split` still refuses changed content: once a root holds a `splits.json`, preprocess the new cohort into a fresh root
+  rather than overwriting that one.
+- **One writer per output root.** `--overwrite` does not coordinate simultaneous runs.
 
 ## Python API
 
