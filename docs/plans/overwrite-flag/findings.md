@@ -66,3 +66,10 @@ dangling-symlink target and recover failing to restore; N4 organize's redundant 
   list); same one-line fix.
 - README: commands table, a "Replacing existing output with `--overwrite`" subsection, troubleshooting row, reworded
   review-before-replacing line.
+
+## review-3 (task-05 wave + integration)
+No BLOCKING. Fixed in README: W1 replacement is per patient folder (refused cases are not carried over), W2 a root holding
+splits.json needs a fresh preprocess root, N1 IO-error and pre-name organize refusals keep the old folder uncounted.
+Deferred: N2 Python API section omits `overwrite=`; N3 organize's REASON_NAME_CLAIMED wording differs from convert/
+preprocess; N4 a dangling symlink at `<name>` under --overwrite is moved to `.<name>.old` and never removed (rmtree refuses
+links); N5 preprocess_patient now returns a pair.
