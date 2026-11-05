@@ -34,6 +34,7 @@ REASON_MASK_SLICES = 'a mask does not lie on exactly the CT slices its contours 
 class RoiPlan:
     kept: list = field(default_factory=list)  # [(ROINumber, ROIName, '<format_name>.nii.gz', [(N, 3) non-POINT contours in patient mm])] in RTSTRUCT order
     applicators: list = field(default_factory=list)  # [('<name>.nii.gz', (N, 3) points in patient mm, ROIName)] in RTSTRUCT order
+    lines: list = field(default_factory=list)  # [('<format_name>.nii.gz', (N, 3) points in patient mm, ROIName)] in RTSTRUCT order
 
 
 def format_name(text):
@@ -41,7 +42,7 @@ def format_name(text):
     return ''.join(c for c in str(text).lower() if c.isalnum())
 
 
-def classify(struct, plan, frame_uid, taken=()):
+def classify(struct, plan, frame_uid, taken=(), ct=None):
     """
     The RoiPlan of an RTSTRUCT (and the RTPLAN naming its applicator channels).
 
@@ -49,7 +50,9 @@ def classify(struct, plan, frame_uid, taken=()):
     with an OPEN_NONPLANAR contour or RTROIInterpretedType BRACHY_CHANNEL are applicators, the others masks. An
     applicator ROI no plan channel references is dropped when a referenced one has its name (ignoring case) and its
     point count: the RTSTRUCT's library copy of that channel. An applicator named like a mask is written as
-    '<name>_channel.nii.gz'. Then an empty output name, or two names equal ignoring case (also with `taken`, names
+    '<name>_channel.nii.gz'. With `ct` (the planning CT image), a would-be mask ROI whose every non-POINT contour crosses
+    CT slices (a reference line drawn on a reformatted plane) is a line instead: its points go to a text file like an
+    applicator's. A mix of axial and crossing contours stays a mask (and build_masks refuses it). Then an empty output name, or two names equal ignoring case (also with `taken`, names
     already used in the plan folder), refuse, as does a mask or applicator ROI whose ReferencedFrameOfReferenceUID is
     not `frame_uid` (the planning CT's).
     """
@@ -78,7 +81,10 @@ def classify(struct, plan, frame_uid, taken=()):
             apps.append((stem, np.concatenate(points), name, number in referenced_rois))
         else:
             planar = [p for p, item in zip(points, items, strict=True) if str(item.ContourGeometricType) != 'POINT']
-            result.kept.append((number, name, format_name(name) + SUFFIX, planar))
+            if ct is not None and planar and all(_crosses_slices(p, ct) for p in planar):
+                result.lines.append((format_name(name) + SUFFIX, np.concatenate(planar), name))
+            else:
+                result.kept.append((number, name, format_name(name) + SUFFIX, planar))
     referenced = {(stem.lower(), len(points)) for stem, points, _, ref in apps if ref}
     mask_files = {file.lower() for _, _, file, _ in result.kept}
     for stem, points, name, ref in apps:
@@ -88,7 +94,7 @@ def classify(struct, plan, frame_uid, taken=()):
             stem += '_channel'
         result.applicators.append((stem + SUFFIX, points, name))
     names = [str(n).lower() for n in taken] + [file.lower() for _, _, file, _ in result.kept]
-    names += [file.lower() for file, _, _ in result.applicators]
+    names += [file.lower() for file, _, _ in result.applicators + result.lines]
     if any(name == SUFFIX for name in names) or len(set(names)) != len(names):
         raise CaseRefused(REASON_ROI_NAMES)
     return result
@@ -165,6 +171,16 @@ def _run(folder, names, ct_series_uid):
     return reader, hits
 
 
+def _slice_indices(points, ct):
+    """The nearest CT slice index of each (N, 3) patient-mm point, by the CT's full geometry."""
+    return np.rint([ct.TransformPhysicalPointToContinuousIndex(tuple(float(v) for v in p))[2] for p in points])
+
+
+def _crosses_slices(points, ct):
+    index = _slice_indices(points, ct)
+    return index.min() != index.max()
+
+
 def _checked(image, ct, contours, origin_atol, direction_atol):
     """
     `image` as {0,1} uint8 with `ct`'s geometry; it must have a voxel, match the CT grid within tolerance, and have voxels
@@ -181,10 +197,9 @@ def _checked(image, ct, contours, origin_atol, direction_atol):
     # DicomRTTool 6.2 picks a contour's slice by patient z alone; the CT's full geometry says where each contour belongs.
     slices = set()
     for points in contours:
-        index = np.rint([ct.TransformPhysicalPointToContinuousIndex(tuple(float(v) for v in p))[2] for p in points])
-        if index.min() != index.max():
+        if _crosses_slices(points, ct):
             raise CaseRefused(REASON_MASK_SLICES)
-        slices.add(int(index[0]))
+        slices.add(int(_slice_indices(points, ct)[0]))
     if slices != set(np.flatnonzero(values.any(axis=(1, 2))).tolist()):
         raise CaseRefused(REASON_MASK_SLICES)
     out = sitk.GetImageFromArray(values.astype(np.uint8))

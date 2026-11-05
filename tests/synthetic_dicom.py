@@ -293,6 +293,7 @@ def write_rtstruct_rois(path, ct, rois, contour_images=True, sop_uid=None, **met
       'point': point=(x, y, z) patient mm; a POINT contour.
       'empty': an ROIContourSequence item with no ContourSequence.
       'channel': points=(N, 3) patient mm; OPEN_NONPLANAR contours of at most 10 points.
+      'line': lines=[(N, 3) patient mm, ...]; one contour per array, type geometry (default OPEN_PLANAR), on any plane.
     contour_images=False leaves the ContourImageSequence (the slice list) out of the referenced series item.
     Axial CT only (what write_ct_series writes; a flipped or feet-first orientation is fine for 'box'). Returns its SOPInstanceUID.
     """
@@ -328,6 +329,9 @@ def write_rtstruct_rois(path, ct, rois, contour_images=True, sop_uid=None, **met
             contour.ContourSequence = [_contour_item(1, 'POINT', roi['point'])]
         elif kind == 'channel':
             contour.ContourSequence = _contour_items(roi['points'], 'OPEN_NONPLANAR')
+        elif kind == 'line':
+            contour.ContourSequence = [_contour_item(k + 1, roi.get('geometry', 'OPEN_PLANAR'), [tuple(p) for p in points])
+                                       for k, points in enumerate(roi['lines'])]
         elif kind != 'empty':
             raise ValueError(f'unknown ROI kind {kind!r}')
         contours_out.append(contour)
