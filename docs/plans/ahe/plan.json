@@ -1,0 +1,155 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "Declare scikit-image as a direct dependency",
+      "depends_on": [],
+      "files": [
+        "pyproject.toml",
+        "uv.lock"
+      ],
+      "file_ops": {
+        "pyproject.toml": "modify",
+        "uv.lock": "modify"
+      },
+      "test_approach": "Run `uv add scikit-image` (owner-approved 2026-11-04, spec A1), then compare the sorted `name = ` entries of uv.lock before and after; run the full suite.",
+      "criteria": [
+        "pyproject.toml [project] dependencies lists scikit-image (spec AC9)",
+        "The set of package names in uv.lock is unchanged: no new package enters the lock (spec AC9)",
+        "The full suite passes with no test changed"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "AHE step for the planning CT and study series",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_preprocess.py with synthetic varying volumes (a linear gradient; a landmark only on top of a gradient, never a two-level volume, which skimage returns all 1; generated at test time, SYNTHETIC_ ids as in the existing helpers). The reference equalize in tests calls skimage.exposure.equalize_adapthist directly with kernel default, nbins 128, clip_limit 0.05 on a float32 min-max-scaled array; it never calls the code under test. Read docs/specs/2026-11-04-ahe.md (A1-A8) first. The min-max is `(a - a.min()) / (a.max() - a.min())` on a float32 numpy array in both the code and the reference; compare with np.testing.assert_array_equal. Geometry checks compare the output's (origin, spacing, direction) against the input file read back from disk (both through NIfTI), as the existing FOV tests compare two read-back images.",
+      "criteria": [
+        "PreprocessSteps has an `ahe` field, default False; LEGACY_RNT is unchanged (spec A6)",
+        "AHE-only (PreprocessSteps(ahe=True)) on a plan whose varying CT is on a non-default grid (fractional origin, non-unit spacing): the CT output array equals the test's reference equalize of the input CT; it is float32 with minimum exactly 0 and maximum exactly 1; its origin, spacing and direction equal the input CT's (spec AC1a)",
+        "SMALL (the test preset: LEGACY_RNT with new_shape (10, 10, 10)) plus ahe: the CT output equals the test's reference pipeline initial resample -> rescale -> reference equalize -> final spacing -> reshape, float32 with all values within [0, 1] (spec AC1b)",
+        "The volume is cast to float32 before the min-max; an int16 input CT gives a float32 output (spec A4)",
+        "AHE-only: a constant CT becomes all 0, float32, and the plan is preprocessed (spec A4, AC7)",
+        "With ahe, a study MR, a study PT and a study CT series are each equalized (their output equals the reference pipeline for their steps); an AHE-only run processes an MR study series instead of refusing it with REASON_NO_SERIES_STEPS (spec AC4)",
+        "An AHE-only preprocess() run is accepted, not refused with REASON_NO_STEPS (spec A6)",
+        "output_name gains an `image` argument separate from `ct`: `ahe_` sits between `resample_` and `rescale_` for image volumes (CT, MR, PT) and never appears for dose or masks; `rescale_` still needs ct (spec A5, AC5)",
+        "STUDY_FILE is `(reshape_)?(resample_)?(ahe_)?(rescale_)?(initialresample_)?(?P<id>series_(CT|MR|PT)_[0-9]+)\\.nii\\.gz` and series_id reads the id through the named group; series_id returns the series id for `reshape_resample_ahe_initialresample_series_MR_1.nii.gz`, `reshape_resample_ahe_rescale_initialresample_series_CT_2.nii.gz` and the plain name (spec A5)",
+        "With `preprocess.equalize_adapthist` monkeypatched to raise, process_ct(ct, PreprocessSteps(ahe=True)) raises CaseRefused(REASON_INTERNAL) (spec Failure handling)",
+        "With ahe off, every pre-existing test passes unchanged (spec AC8)",
+        "The preprocess module docstring describes the ahe step and no longer says MR or PT series get the geometric steps only (spec A8)"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "AHE for aligned plan series and the zero fill",
+      "depends_on": [
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify"
+      },
+      "test_approach": "TDD with the existing run_plan / mr_spec / rigid helpers, using a varying MR on MR_GRID (np.full constants become all 0 under ahe, so do not reuse them for value checks). Reference: sitk.Resample(reference_equalize(native), final_ct, series_transform(matrix), linear, 0, float32). Geometry checks compare read-back images on both sides, as in t2.",
+      "criteria": [
+        "An aligned MR series on MR_GRID with a translated reg_matrix and ahe on: inside its FOV the output equals Resample(reference equalize(native)) with the series transform; outside its FOV it is 0 (spec AC3)",
+        "A non-rescaled aligned CT series with ahe on is filled with 0 outside its FOV, not its own minimum (spec A7, AC3)",
+        "The equalized series keeps the native origin, spacing and direction through the numpy round trip: an off-center landmark or the AC3 comparison lands at the same place with ahe on and off (spec A4)",
+        "Aligned plan series output names carry `ahe_` at the A5 position for MR, PT and CT series (spec AC5)",
+        "Dose and mask outputs (arrays, origin, spacing, direction, pixel ID) are identical between LEGACY_RNT and SMALL (the test preset: LEGACY_RNT with new_shape (10, 10, 10)) plus ahe (spec AC2)",
+        "With series_fov_mask also on, the fovmask_ file is written for the ahe series and its values are unchanged by ahe",
+        "With `preprocess.equalize_adapthist` monkeypatched to raise, process_series on an ahe run raises CaseRefused(REASON_INTERNAL) (spec Failure handling)",
+        "With ahe off, every pre-existing test passes unchanged (spec AC8)"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "CLI --ahe flag and help text",
+      "depends_on": [
+        "task-03"
+      ],
+      "files": [
+        "src/rt_dataprep/__main__.py",
+        "tests/test_cli.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_cli.py": "modify"
+      },
+      "test_approach": "CLI tests through the existing run_pre(converted, out, *flags) subprocess helper in tests/test_cli.py, which patches new_shape to SMALL's; never a full-size LEGACY_RNT run.",
+      "criteria": [
+        "`preprocess --ahe` alone writes the CT as `ahe_<ct file>`, and dose and masks under their unprefixed names with unchanged values (spec AC6, A6)",
+        "`preprocess --ahe --legacy-rnt` writes the CT as reshape_resample_ahe_rescale_initialresample_<ct name> (spec AC6, A5)",
+        "Without --ahe, --legacy-rnt output is unchanged (spec AC8)",
+        "PREPROCESS_HELP and the --legacy-rnt and --series-fov-mask help no longer say --legacy-rnt is required for any output and name --ahe (spec A8)",
+        "test_preprocess_help_says_the_preset_is_required_for_any_output is replaced by a test that `--ahe` appears in `preprocess --help` and 'required for any output' does not; this is the one pre-existing test A8 changes, and all other pre-existing tests pass unchanged (AC8)"
+      ]
+    },
+    {
+      "id": "task-05",
+      "title": "Manifest reads ahe names; README documents --ahe",
+      "depends_on": [
+        "task-04"
+      ],
+      "files": [
+        "tests/test_manifest.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "tests/test_manifest.py": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "Manifest tests through the existing run_plan + series_column helpers in tests/test_manifest.py with steps SMALL plus ahe; no code change expected in manifest.py (it reads names through series_id).",
+      "criteria": [
+        "manifest lists an ahe study series under its series id and an ahe aligned plan series under its ahe_ output name (spec AC5)",
+        "README names `--ahe` and says MR/PT series get the geometric steps plus ahe (spec A8)"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ],
+    [
+      "task-03"
+    ],
+    [
+      "task-04"
+    ],
+    [
+      "task-05"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-04",
+    "spec": "docs/specs/2026-11-04-ahe.md",
+    "profile": "project-profile.yml",
+    "issue": 16,
+    "guardrails": [
+      "At most 5 staged files per commit (commit gate).",
+      "Tests use synthetic data generated at test time; no imaging file is committed.",
+      "No raise inside an except block (guard test).",
+      "Private attributes in tests via getattr(module, '_name')  # noqa: B009.",
+      "Run the suite with uv run --group dev pytest -q --tb=short; there is no `python` on PATH.",
+      "Commit gate: more than 5 staged files fails; findings.md counts. Each task stays at <=4 source files.",
+      "Before Step 2.10, wait until the codex-review-state:v1 comment's code_review.commit_sha matches the PR head (watcher <= 7 min); reply to and resolve every Codex thread per CLAUDE.md; a thread that cannot be resolved is STUCK -> 2.11."
+    ]
+  }
+}
