@@ -341,6 +341,19 @@ def plan_row(report, patient='SYNTHETICPTA', folder='plan_1'):
     return next(r for r in report.rows if (r.patient, r.folder) == (patient, folder))
 
 
+def test_a_line_file_is_copied_unchanged_under_its_own_name(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, rows = write_plan(converted)
+    (folder / 'refline.nii.gz').write_bytes(APPLICATOR_BYTES)
+    save_rows(folder, rows + [series_row('refline.nii.gz', 'line', modality='RTSTRUCT', roi_name='RefLine')])
+    report = pre.preprocess(converted, out, SMALL)
+    assert plan_row(report).outcome == 'preprocessed'
+    done = out / 'SYNTHETICPTA' / 'plan_1'
+    assert (done / 'refline.nii.gz').read_bytes() == APPLICATOR_BYTES
+    with open(done / 'series.csv', newline='') as f:
+        assert [r['kind'] for r in csv.DictReader(f) if r['file'] == 'refline.nii.gz'] == ['line']
+
+
 def test_four_steps_write_the_prefixed_files_and_leave_the_input_alone(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     folder, rows = write_plan(converted)
