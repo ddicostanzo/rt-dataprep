@@ -51,3 +51,9 @@ N5 callers must never log str() of the re-raised OSError.
 - recover runs on every patient (plain runs too) and cleans leftover `.old`/`.partial`. Skip check uses `os.path.lexists`.
 - Failure injection: OSError via `conv.write_atomic` (build) and `dicom_io.rename_dir` (swap); tests use `SMALL`.
 - Untested: dangling symlink at the target; recover raising on a failed restore.
+
+## review-2
+No BLOCKING. Deferred: W1 convert/preprocess case-guard tests would not catch recover running before the guard (add a
+`.<lowercase>.old` canary); W2 AC-O7 second half only checked indirectly; N1 `preprocess_patient(overwrite=True)` without
+`claimed` raises TypeError (default `frozenset()`); N2 convert failed-build test lacks the caplog name check; N3 untested
+dangling-symlink target and recover failing to restore; N4 organize's redundant `rmtree(partial)` after recover.
