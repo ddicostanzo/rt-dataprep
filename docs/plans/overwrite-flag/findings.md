@@ -34,3 +34,13 @@ N5 callers must never log str() of the re-raised OSError.
 - Deviation: the exists check uses `os.path.lexists` so a dangling symlink at `<name>` skips (REASON_EXISTS) instead of
   reaching publish's ValueError misuse guard. Untested.
 - Kept only from REASON_NO_SOP_UID / REASON_SPLIT_SERIES with an existing, unclaimed name. Summary ends `; N replaced, N kept`.
+
+## task-03
+- convert(): keyword-only overwrite; `_convert_patient(folder, out_root, exclude_models, workers, overwrite, claimed)`
+  returns `(rows, reading, files, status)`. Under overwrite: casefold guard (new convert.REASON_NAME_CLAIMED, one
+  patient-level row, status None) → recover → `os.path.lexists` check.
+- publish replaces `partial.rename(target)` in the `done`-flag finally; success = any converted row. Kept from the
+  REASON_NO_PLANS early return or publish('kept'). Summary ends `; N replaced, N kept` (tests/test_series.py updated).
+- Failure injection: OSError via `conv.sitk.WriteImage` (build) and `dicom_io.rename_dir` (swap); unreadable via
+  `dicom_io.read_header_core`.
+- Untested: claimed untouched without overwrite (indirect only); recover raising on a failed restore.
