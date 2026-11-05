@@ -61,7 +61,7 @@ class PreprocessSteps:
     harmonize_spacing: bool = False  # final resample to final_spacing, linear
     reshape: bool = False  # centred crop/pad to new_shape
     legacy_linear_masks: bool = False
-    series_fov_mask: bool = False  # not a step: also write fovmask_<series> (uint8, 1 inside the series FOV) per aligned plan series
+    series_fov_mask: bool = False  # not a step: write fovmask_<series> (uint8, 1 in its FOV) per aligned plan series
     new_spacing: tuple = (1, 1, 1)  # mm, (x, y, z)
     final_spacing: tuple = (1.25, 1.25, 1.25)
     new_shape: tuple = (701, 701, 433)  # voxels, (x, y, z)
