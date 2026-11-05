@@ -8,6 +8,7 @@ from rt_dataprep.manifest import MANIFEST_NAME, manifest
 from rt_dataprep.organize import REASON_OUTSIDE_SRC, organize
 from rt_dataprep.preprocess import (
     REASON_AHE_OPTIONS,
+    REASON_MASK_RETENTION_LIMIT,
     REASON_NO_STEPS,
     REASON_OUTSIDE_INPUT,
     PreprocessAborted,
@@ -53,6 +54,7 @@ def main(argv=None):
     sub.add_argument('--ahe-bins', type=int, default=None, help='AHE histogram bins (default 128, at least 2); requires --ahe')
     sub.add_argument('--ahe-clip-limit', type=float, default=None, help='AHE clip limit (default 0.05, from 0 to 1); requires --ahe')
     sub.add_argument('--legacy-linear-masks', action='store_true', help='resample masks linearly to float32, not nearest to uint8')
+    sub.add_argument('--min-mask-retention', type=float, help='optional minimum output/input mask volume fraction, greater than 0 and at most 1')
     sub.add_argument('--series-fov-mask', action='store_true',
                      help='with a step flag, write uint8 FOV/padding masks for planning CT, study images and aligned plan series')
     sub = commands.add_parser('manifest', help='write manifest.csv in a converted or preprocessed root, one row per plan folder or study series')
@@ -75,6 +77,7 @@ def main(argv=None):
             preprocess(args.converted, args.out, PreprocessSteps(
                 resample=args.initial_resample, rescale=args.rescale, ahe=args.ahe, harmonize_spacing=args.resample, reshape=args.reshape,
                 legacy_linear_masks=args.legacy_linear_masks, series_fov_mask=args.series_fov_mask,
+                min_mask_retention=args.min_mask_retention,
                 ahe_kernel_mm=None if args.ahe_kernel_mm is None else tuple(args.ahe_kernel_mm),
                 ahe_bins=128 if args.ahe_bins is None else args.ahe_bins,
                 ahe_clip_limit=0.05 if args.ahe_clip_limit is None else args.ahe_clip_limit))
@@ -88,7 +91,8 @@ def main(argv=None):
         else:
             organize(args.src, args.out, workers=args.workers)
     except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug, reported as below
-        if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_AHE_OPTIONS, REASON_OUTSIDE_SRC,
+        if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_AHE_OPTIONS,
+                            REASON_MASK_RETENTION_LIMIT, REASON_OUTSIDE_SRC,
                             REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS):
             parser.exit(1, unexpected(exc))
         parser.exit(1, f'rt_dataprep: {exc}\n')

@@ -52,6 +52,8 @@ REASON_STUDY_MODALITY = 'a series.csv series row has a modality other than CT, M
 REASON_STUDY_NAME = 'a series.csv series row names a file that is not a series volume'
 REASON_GRID = 'a dose or mask is not on the planning CT grid'
 REASON_CROP = 'a dose or mask would lose voxels to the final grid'
+REASON_MASK_RETENTION = 'a resampled mask retains less than the configured minimum physical volume'
+REASON_MASK_RETENTION_LIMIT = 'minimum mask retention must be finite, greater than 0 and at most 1'
 REASON_IO_ERROR = 'file system error while reading or writing; nothing kept for this patient'
 REASON_FILE_UNREADABLE = 'an input NIfTI file is unreadable'
 REASON_INTERNAL = 'an unexpected error stopped the preprocessing; the report lists what was finished'
@@ -67,6 +69,7 @@ class PreprocessSteps:
     ahe_kernel_mm: tuple | None = None  # optional physical window, x/y/z mm; None keeps skimage's voxel default
     ahe_bins: int = 128
     ahe_clip_limit: float = 0.05
+    min_mask_retention: float | None = None  # optional minimum output/input physical foreground volume; no clinical default
     legacy_linear_masks: bool = False
     series_fov_mask: bool = False  # not a step: uint8 support masks for planning CT, study and aligned plan images
     new_spacing: tuple = (1, 1, 1)  # mm, (x, y, z)
@@ -238,6 +241,19 @@ def process_mask(mask, final_ct, steps):
     return quiet_call(lambda: sitk.Resample(mask, final_ct, sitk.Transform(), interpolator, 0, pixel), REASON_INTERNAL)
 
 
+def mask_retention(native, image, linear=False):
+    """Output/input physical foreground volume; linear masks use fractional occupancy, not nonzero voxel counts."""
+    def run():
+        before = sum(plane.sum(dtype=np.float64) if linear else np.count_nonzero(plane)
+                     for plane in sitk.GetArrayViewFromImage(native)) * np.prod(native.GetSpacing())
+        if not before:
+            return 1.0  # an originally empty mask has no foreground to lose
+        values = sitk.GetArrayViewFromImage(image)
+        after = sum(plane.sum(dtype=np.float64) if linear else np.count_nonzero(plane) for plane in values)
+        return float(after * np.prod(image.GetSpacing()) / before)
+    return quiet_call(run, REASON_INTERNAL)
+
+
 def process_series(native, final_ct, matrix, rescale_hu, ct, ahe, options=(None, 128, 0.05)):
     """`native` (HU-rescaled first when rescale_hu, then equalized on its own grid when ahe) linearly resampled once onto final_ct as float32;
     0 outside its FOV, or its own minimum for a CT that is neither rescaled nor equalized (#125: 0 would be water; the planning CT pads with its minimum too).
@@ -349,6 +365,9 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps()):  # noqa: B008
         raise ValueError(REASON_NO_STEPS)
     if steps.ahe:
         check_ahe_options(*ahe_options(steps))
+    if steps.min_mask_retention is not None:
+        if not np.isfinite(steps.min_mask_retention) or not 0 < steps.min_mask_retention <= 1:
+            raise ValueError(REASON_MASK_RETENTION_LIMIT)
     folders = sorted(p for p in converted_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
     rows, aborted = [], False
@@ -612,6 +631,10 @@ def preprocess_plan(plan_dir, out_dir, steps):
             image = process_dose(native, final) if kind == 'dose' else process_mask(native, final, steps)
             if kind == 'mask' and has_voxels(native) and not has_voxels(image):
                 raise CaseRefused(REASON_CROP)
+            if kind == 'mask' and steps.min_mask_retention is not None:
+                retained = mask_retention(native, image, steps.legacy_linear_masks)
+                if retained < steps.min_mask_retention and not np.isclose(retained, steps.min_mask_retention, rtol=1e-6, atol=0):
+                    raise CaseRefused(REASON_MASK_RETENTION)
             conv.write_atomic(image, out_dir / name)
             del native, image
         files.append(name)
