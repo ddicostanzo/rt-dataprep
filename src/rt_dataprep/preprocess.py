@@ -1,13 +1,14 @@
 """
 Legacy RNT preprocessing of a converted tree (spec: f2b-preprocess): the CT pipeline, the resampling of dose and masks, and the walk.
 
-The CT runs initial resample -> rescale -> final spacing -> reshape, each resample linear with default value 0. The grid
+The CT runs initial resample -> rescale -> ahe -> final spacing -> reshape, each resample linear with default value 0. The ahe step
+(opt-in) min-max scales the volume in float32 to [0, 1] and equalizes it with skimage's CLAHE (default kernel, 128 bins, clip 0.05). The grid
 and the crop/pad follow torchio 1.2.1 (floor size, centre-preserving origin, ceil(d/2) at the start of the axis). The final
 CT image is the one reference grid: dose and masks are each resampled once onto it. Direction is never re-derived.
 Every compute call in the three process_* entry points runs inside dicom_io.quiet_call; a failure is one fixed REASON_.
 
 preprocess() reads each plan's series.csv (kinds ct, dose, mask, applicator, and the registered series, each resampled once onto the final CT) and each study folder's
-(<patient>/study_<n>/, one case per series: a CT through every step that is on, an MR or PT through the geometric ones only),
+(<patient>/study_<n>/, one case per series: a CT through every step that is on, an MR or PT through all but the HU rescale),
 and writes a separate tree plus preprocess_report.csv in the output root. Log lines and exceptions carry fixed REASON_ constants only; the report
 is the one place the patient folder names appear.
 """
@@ -21,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import SimpleITK as sitk
+from skimage.exposure import equalize_adapthist
 
 from rt_dataprep import convert as conv
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
@@ -60,6 +62,7 @@ class PreprocessSteps:
     rescale: bool = False  # CT only: (HU + 1024) / 4096
     harmonize_spacing: bool = False  # final resample to final_spacing, linear
     reshape: bool = False  # centred crop/pad to new_shape
+    ahe: bool = False  # CLAHE of every image volume: float32 min-max to [0, 1], then skimage equalize_adapthist
     legacy_linear_masks: bool = False
     series_fov_mask: bool = False  # not a step: write fovmask_<series> (uint8, 1 in its FOV) per aligned plan series
     new_spacing: tuple = (1, 1, 1)  # mm, (x, y, z)
@@ -126,6 +129,18 @@ def rescale(image):
     return sitk.ShiftScale(sitk.Cast(image, sitk.sitkFloat32), 1024.0, 1 / 4096)  # arithmetic with a float would promote to float64
 
 
+def equalize(image):
+    """`image` as float32 min-max scaled to [0, 1], then CLAHE (default kernel, 128 bins, clip 0.05); a constant volume is all 0 and never reaches skimage. Geometry is kept."""
+    array = sitk.GetArrayFromImage(image).astype(np.float32, copy=False)
+    if array.max() == array.min():
+        equalized = np.zeros_like(array)
+    else:
+        equalized = equalize_adapthist((array - array.min()) / (array.max() - array.min()), nbins=128, clip_limit=0.05)
+    result = sitk.GetImageFromArray(equalized)
+    result.CopyInformation(image)
+    return result
+
+
 def crop_or_pad(image, shape, pad_value):
     """`image` cropped or padded with `pad_value` to `shape` (x, y, z): ceil(d/2) voxels at the start of an axis, floor(d/2) at the end."""
     diff = np.array(shape) - np.array(image.GetSize())
@@ -147,6 +162,8 @@ def process_ct(ct, steps):
             image = resample_to(image, steps.new_spacing)
         if steps.rescale:
             image = rescale(image)
+        if steps.ahe:
+            image = equalize(image)
         if steps.harmonize_spacing:
             image = resample_to(image, steps.final_spacing)
         if steps.reshape:
@@ -175,14 +192,16 @@ def process_mask(mask, final_ct, steps):
     return quiet_call(lambda: sitk.Resample(mask, final_ct, sitk.Transform(), interpolator, 0, pixel), REASON_INTERNAL)
 
 
-def process_series(native, final_ct, matrix, rescale_hu, ct):
-    """`native` (HU-rescaled first when rescale_hu) linearly resampled once onto final_ct as float32; 0 outside its FOV,
-    or its own minimum for a CT that is not rescaled (#125: 0 would be water; the planning CT pads with its minimum too).
+def process_series(native, final_ct, matrix, rescale_hu, ct, ahe):
+    """`native` (HU-rescaled first when rescale_hu, then equalized on its own grid when ahe) linearly resampled once onto final_ct as float32;
+    0 outside its FOV, or its own minimum for a CT that is neither rescaled nor equalized (#125: 0 would be water; the planning CT pads with its minimum too).
     `matrix` is series frame -> CT frame (series_transform)."""
     transform = series_transform(matrix)
     def run():
         image = rescale(native) if rescale_hu else native
-        fill = minimum(native) if ct and not rescale_hu else 0.0
+        if ahe:
+            image = equalize(image)
+        fill = minimum(native) if ct and not rescale_hu and not ahe else 0.0
         return sitk.Resample(image, final_ct, transform, sitk.sitkLinear, fill, sitk.sitkFloat32)
     return quiet_call(run, REASON_INTERNAL)
 
@@ -226,9 +245,9 @@ def read_series(path):
     return None
 
 
-def output_name(name, steps, ct=False):
-    """`name` with the prefixes of the steps that are on, newest first; dose and masks (ct=False) get the geometric ones only."""
-    prefixes = [('reshape', steps.reshape), ('resample', steps.harmonize_spacing),
+def output_name(name, steps, ct=False, image=False):
+    """`name` with the prefixes of the steps that are on, newest first: ahe needs an image volume (CT, MR, PT), rescale a CT; dose and masks get the geometric ones only."""
+    prefixes = [('reshape', steps.reshape), ('resample', steps.harmonize_spacing), ('ahe', image and steps.ahe),
                 ('rescale', ct and steps.rescale), ('initialresample', steps.resample)]
     return ''.join(f'{prefix}_' for prefix, on in prefixes if on) + name
 
@@ -257,7 +276,7 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps()):  # noqa: B008
     converted_root, out_root = Path(converted_root), Path(out_root)
     if out_root.resolve().is_relative_to(converted_root.resolve()):  # before any mkdir: nothing is written into the input
         raise ValueError(REASON_OUTSIDE_INPUT)
-    if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape):
+    if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape or steps.ahe):
         raise ValueError(REASON_NO_STEPS)
     folders = sorted(p for p in converted_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
@@ -373,7 +392,7 @@ def preprocess_series(study_dir, out_dir, row, steps):
     """Write one study series into `out_dir` (made on the first write) and return its output name; a CaseRefused refuses this series only and writes nothing."""
     is_ct = row['modality'] == 'CT'
     steps = steps if is_ct else replace(steps, rescale=False)  # the HU rescale is for CT only
-    if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape):
+    if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape or steps.ahe):
         raise CaseRefused(REASON_NO_SERIES_STEPS)  # a rescale-only run has nothing to do to an MR or PT: no read, no copy under another name
     source = study_dir / row['file']
     info = read_info(source)  # header first: a too-small series is refused without a pixel read (#141)
@@ -383,7 +402,7 @@ def preprocess_series(study_dir, out_dir, row, steps):
     if not is_volume(image):
         raise CaseRefused(REASON_NOT_VOLUME)
     image = process_ct(image, steps)
-    name = output_name(row['file'], steps, ct=is_ct)
+    name = output_name(row['file'], steps, ct=is_ct, image=True)
     out_dir.mkdir(exist_ok=True)
     conv.write_atomic(image, out_dir / name)
     return name
@@ -421,13 +440,13 @@ def check_rows(plan_dir):
     return kept, ct, series
 
 
-STUDY_FILE = re.compile(r'(reshape_)?(resample_)?(rescale_)?(initialresample_)?(series_(CT|MR|PT)_[0-9]+)\.nii\.gz')  # output_name's prefixes, in order
+STUDY_FILE = re.compile(r'(reshape_)?(resample_)?(ahe_)?(rescale_)?(initialresample_)?(?P<id>series_(CT|MR|PT)_[0-9]+)\.nii\.gz')  # output_name's prefixes, in order
 
 
 def series_id(name):
     """`series_<MOD>_<k>` of a study volume's file name (a full match, so no newline tail), or None when the name is not one."""
     match = STUDY_FILE.fullmatch(name)
-    return match.group(5) if match else None
+    return match.group('id') if match else None
 
 
 def check_series_rows(series):
@@ -507,7 +526,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
     files, series_rows = [], []
     for row in kept:  # the CT first: its final grid is the reference of the rest
         kind, source = row['kind'], plan_dir / row['file']
-        name = row['file'] if kind == 'applicator' else output_name(row['file'], steps, ct=kind == 'ct')
+        name = row['file'] if kind == 'applicator' else output_name(row['file'], steps, ct=kind == 'ct', image=kind == 'ct')
         if kind == 'ct':
             final = process_ct(read_image(source), steps)
             conv.write_atomic(final, out_dir / name)
@@ -537,8 +556,8 @@ def preprocess_plan(plan_dir, out_dir, steps):
         if not covered:  # entirely outside the CT: never resampled
             skipped += 1
         else:
-            image = process_series(native, final, matrix, is_ct and steps.rescale, is_ct)
-            name = output_name(row['file'], steps, ct=is_ct)
+            image = process_series(native, final, matrix, is_ct and steps.rescale, is_ct, steps.ahe)
+            name = output_name(row['file'], steps, ct=is_ct, image=True)
             conv.write_atomic(image, out_dir / name)
             files.append(name)
             if fov is not None:  # the mask is listed after its series, not in series.csv

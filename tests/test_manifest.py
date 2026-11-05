@@ -10,7 +10,8 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 from test_convert import BOX, PID, dose_spec, make_plan
-from test_preprocess import MR_OUT, MR_SIZE, SMALL, box, grid, landmark, mr_spec, rigid, run_plan, save_rows, series_row, state, write_plan
+from test_preprocess import (AHE_MR_OUT, AHE_STUDY_CT, MR_OUT, MR_RAMP, MR_SIZE, SMALL, SMALL_AHE, box, grid, landmark, mr_spec, rigid, run_plan,
+                             save_rows, series_row, state, write_plan, write_study_tree)
 from test_series import STUDY_D1, STUDY_D2, STUDY_T1, STUDY_T2, put
 
 from rt_dataprep import convert as conv
@@ -376,3 +377,31 @@ def test_the_series_column_keeps_series_csv_order_and_skips_an_unreadable_header
 def test_imaging_rows_hold_an_empty_series_list(converted):
     man.manifest(converted)
     assert [r['series'] for r in read(converted)[1:]] == ['[]'] * 3
+
+
+# ---- AHE task-05: the ahe_ names go through series_id, so the manifest reads them for study series and aligned plan series (spec AC5) ----
+
+def test_ac5_an_ahe_study_series_is_listed_under_its_series_id_with_its_ahe_file_name(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_study_tree(converted, series=(('CT', 1), ('MR', 1)), n=24)  # 24^3 ramps: smaller volumes equalize to all 1
+    pre.preprocess(converted, out, SMALL_AHE)
+    assert man.manifest(out) == (2, 0)
+    rows = read(out)
+    assert [(r['case_dir'], r['case_type'], r['modality'], r['image'], r['series']) for r in rows] == [
+        ('SYNTHETICPTA/study_1/series_CT_1', 'imaging', 'CT', AHE_STUDY_CT, '[]'),
+        ('SYNTHETICPTA/study_1/series_MR_1', 'imaging', 'MR', AHE_MR_OUT, '[]')]
+    assert all((out / 'SYNTHETICPTA' / 'study_1' / r['image']).is_file() for r in rows)
+
+
+def test_ac5_an_ahe_only_study_series_is_listed_under_its_series_id(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_study_tree(converted, series=(('MR', 1),), n=24)
+    pre.preprocess(converted, out, pre.PreprocessSteps(ahe=True))
+    assert man.manifest(out) == (1, 0)
+    assert [(r['case_dir'], r['image']) for r in read(out)] == [('SYNTHETICPTA/study_1/series_MR_1', 'ahe_series_MR_1.nii.gz')]
+
+
+def test_ac5_an_ahe_aligned_plan_series_is_listed_under_its_ahe_output_name(tmp_path):
+    run_plan(tmp_path, [mr_spec(MR_RAMP, rigid(0, (4, 0, 0)))], steps=SMALL_AHE)
+    assert series_column(tmp_path / 'out') == [{'file': AHE_MR_OUT, 'modality': 'MR'}]
+    assert AHE_MR_OUT != MR_OUT

@@ -397,6 +397,7 @@ dependencies = [
     { name = "dicomrttool" },
     { name = "numpy" },
     { name = "pydicom" },
+    { name = "scikit-image" },
     { name = "simpleitk" },
 ]
 
@@ -411,6 +412,7 @@ requires-dist = [
     { name = "dicomrttool", specifier = "==6.2.0" },
     { name = "numpy" },
     { name = "pydicom", specifier = ">=3" },
+    { name = "scikit-image", specifier = ">=0.26.0" },
     { name = "simpleitk", specifier = ">=2.5.7" },
 ]
 

@@ -162,10 +162,45 @@ def test_preprocess_unexpected_error_exits_1_with_its_own_fixed_text(tmp_path, c
     assert [(r['outcome'], r['reason']) for r in report_rows(out)] == [(conv.OUTCOME_REFUSED, pre.REASON_INTERNAL)]
 
 
-def test_preprocess_help_says_the_preset_is_required_for_any_output():
+def test_preprocess_help_names_ahe_and_no_longer_requires_the_preset():
     result = subprocess.run([sys.executable, '-m', 'rt_dataprep', 'preprocess', '--help'], capture_output=True, text=True)
     assert result.returncode == 0
-    assert 'required for any output' in ' '.join(result.stdout.split())
+    text = ' '.join(result.stdout.split())
+    assert '--ahe' in text and 'required for any output' not in text
+
+
+def test_preprocess_ahe_alone_equalizes_the_ct_and_copies_dose_and_masks(tmp_path, converted):
+    out = tmp_path / 'out'
+    result = run_pre(converted, out, '--ahe')
+    assert result.returncode == 0 and result.stdout == '' and str(tmp_path) not in result.stderr
+    src, dst = converted / 'SYNTHETICPTA' / 'plan_1', out / 'SYNTHETICPTA' / 'plan_1'
+    assert [(r['outcome']) for r in report_rows(out)] == [pre.OUTCOME_PREPROCESSED]
+    assert (dst / f'ahe_{conv.CT_NAME}').is_file() and not (dst / conv.CT_NAME).exists()
+    for name in (conv.DOSE_NAME, 'ptv.nii.gz'):  # geometry-free run: dose and masks are copied as they are
+        assert (dst / name).read_bytes() == (src / name).read_bytes()
+
+
+def test_preprocess_ahe_with_legacy_rnt_writes_the_full_ct_name(tmp_path, converted):
+    out = tmp_path / 'out'
+    result = run_pre(converted, out, '--ahe', '--legacy-rnt')
+    assert result.returncode == 0 and result.stdout == ''
+    names = {p.name for p in (out / 'SYNTHETICPTA' / 'plan_1').iterdir()}
+    assert f'reshape_resample_ahe_rescale_initialresample_{conv.CT_NAME}' in names
+    assert f'reshape_resample_rescale_initialresample_{conv.CT_NAME}' not in names
+
+
+@pytest.mark.parametrize('flags, want', [
+    (['--ahe'], pre.PreprocessSteps(ahe=True)),
+    (['--ahe', '--series-fov-mask'], pre.PreprocessSteps(ahe=True, series_fov_mask=True)),
+    (['--ahe', '--legacy-rnt'], dataclasses.replace(pre.LEGACY_RNT, ahe=True)),
+    (['--legacy-rnt'], pre.LEGACY_RNT),
+])
+def test_ahe_flag_reaches_preprocess_steps(flags, want, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, 'preprocess', lambda *args: seen.append(args))
+    cli.main(['preprocess', 'a', 'b', *flags])
+    assert seen == [('a', 'b', want)]
+    assert seen[0][2].ahe is ('--ahe' in flags) and pre.LEGACY_RNT.ahe is False
 
 
 # convert itself raises outside the patient loop, so the CLI's own handler reports it; argv comes after -c.

@@ -54,10 +54,22 @@ uv run python -m rt_dataprep split /tmp/rt-dataprep-custom --test-size 0.2 --val
 Dimensions are x/y/z voxels and spacing is x/y/z in mm. The script enables initial resampling, CT HU rescaling, final
 spacing, and centered crop/pad; it then writes a manifest. Inspect the resulting geometry and field of view before choosing
 a grid for real data. Cropping a plan's nonzero dose or masks can refuse that plan. The script exits with status 1 if cases
-or registered series are refused/skipped so that subsequent automation can stop for review.
+or registered series are refused/skipped, or the input yields no cases, so that subsequent automation can stop for review.
 
 `--series-fov-mask` writes masks only for registered series of plan cases; the imaging-only synthetic cohort has no such
 plan series. `--help` on either script describes its accepted arguments.
+
+Add `--ahe` to the custom example to include adaptive histogram equalization. To try only AHE through the CLI, without
+resampling to the large legacy grid:
+
+```bash
+uv run python -m rt_dataprep preprocess /tmp/rt-dataprep-demo/converted /tmp/rt-dataprep-ahe --ahe
+uv run python -m rt_dataprep manifest /tmp/rt-dataprep-ahe
+```
+
+AHE is opt-in for CT/MR/PT image volumes and never equalizes dose or masks. It min-max scales each volume and applies
+CLAHE with 128 bins and clip limit 0.05, producing float32 values in [0, 1]. Those values are no longer HU or SUV. Outputs
+receive an `ahe_` prefix. See the [preprocessing guide](../README.md#preprocessing) for step order and memory considerations.
 
 ## Clinical export workflow
 

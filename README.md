@@ -29,7 +29,7 @@ See [Security and data handling](SECURITY.md) before processing clinical exports
 
 Requirements: Python **3.12 or newer**, Git, and [uv](https://docs.astral.sh/uv/getting-started/installation/).
 The repository includes `uv.lock` for reproducible dependency installation. Runtime dependencies include pydicom, NumPy,
-SimpleITK, and DicomRTTool; no GPU is required.
+SimpleITK, DicomRTTool, and scikit-image; no GPU is required.
 
 ```bash
 git clone https://github.com/ddicostanzo/rt-dataprep.git
@@ -81,7 +81,7 @@ count before accepting the cohort. Successful process completion can include ref
 | --- | --- | --- |
 | `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers 1..64` (default 1) |
 | `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers 1..64` (default 1) |
-| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--legacy-rnt` required; `--legacy-linear-masks`; `--series-fov-mask` |
+| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | At least `--legacy-rnt` or `--ahe`; also `--legacy-linear-masks`, `--series-fov-mask` |
 | `manifest ROOT` | Write `ROOT/manifest.csv` and a dated copy. | Works on converted or preprocessed trees. |
 | `split ROOT` | Read `ROOT/manifest.csv`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
 
@@ -161,7 +161,7 @@ use `study_<n>/` and ignore the old `images/` layout.
 
 ## Preprocessing
 
-The CLI requires an explicit legacy preset:
+The CLI accepts the legacy preset, adaptive histogram equalization (`--ahe`), or both. To use the legacy preset:
 
 ```bash
 uv run python -m rt_dataprep preprocess /secure/converted /secure/preprocessed --legacy-rnt --series-fov-mask
@@ -173,7 +173,7 @@ uv run python -m rt_dataprep split /secure/preprocessed --test-size 0.2 --val-si
 **701 × 701 × 433 voxels (x, y, z)**. One float32 image at that size occupies about **812 MiB** before processing copies
 and other volumes; plan memory and storage accordingly. The CT formula is not intensity clipping.
 
-CT study series receive all enabled steps. MR/PT study series receive geometric steps and skip HU rescaling. A Python
+CT study series receive all enabled steps. MR/PT study series receive geometric steps and optional AHE, and skip HU rescaling. A Python
 rescale-only configuration refuses MR/PT because it has no applicable step. Registered plan series are resampled onto
 the final planning CT grid; unusable alignment, no overlap, or unreadable data skips that series and increments the plan's
 `skipped_series`. Output `reg_matrix` is `identity` after alignment.
@@ -182,7 +182,24 @@ Masks use nearest-neighbor interpolation and uint8 by default. `--legacy-linear-
 behavior. `--series-fov-mask` adds a uint8 `fovmask_<series filename>` for each aligned plan series: 1 inside that series'
 field of view and 0 outside. The manifest lists a matching mask only when its header matches the CT grid.
 
-Output filenames acquire step prefixes such as `reshape_resample_rescale_initialresample_`. Generate a new manifest
+Optional `--ahe` applies per-volume min-max scaling followed by scikit-image CLAHE (default kernel of one eighth of each
+axis, 128 bins, clip limit 0.05) to planning CT and CT/MR/PT image series. It is off by default and never equalizes dose,
+masks, or applicator coordinates. It produces float32 image values in [0, 1]; these are contrast values, not HU or SUV.
+The step runs before final resampling/cropping, after any CT rescale. Registered plan series are equalized on their native
+grids before alignment. Constant volumes become zero. This is not a numerical parity port of legacy mclahe.
+
+For AHE without the large legacy grid, use a fresh output root:
+
+```bash
+uv run python -m rt_dataprep preprocess /secure/converted /secure/equalized --ahe
+uv run python -m rt_dataprep manifest /secure/equalized
+```
+
+Combine `--ahe --legacy-rnt` to enable both. AHE can require several additional volume-sized arrays; include those in
+memory planning. Its parameters are currently fixed; it does not add CLI controls for kernel, bins, or clip limit.
+
+Output filenames acquire step prefixes such as `reshape_resample_rescale_initialresample_`; when enabled, `ahe_` sits
+between `resample_` and `rescale_` (for example `reshape_resample_ahe_rescale_initialresample_`). Generate a new manifest
 after preprocessing so its `image` and `series` fields point to the resulting filenames. Use
 [examples/custom_preprocess.py](examples/custom_preprocess.py) for a smaller, explicit Python configuration.
 
@@ -231,7 +248,7 @@ class/module/line details. Reports and per-folder CSVs are sensitive artifacts a
 | A patient is skipped on rerun | Its destination patient folder already exists. Use a fresh output root to recompute. |
 | A plan is refused | Read its fixed reason in the conversion report; verify the RTPLAN → RTSTRUCT → CT reference chain and geometry. |
 | Fewer images than expected | Review study summary skips, series eligibility, model exclusions, localizers, and readable pixel data. |
-| Preprocessing reports no step is on | Pass `--legacy-rnt`, or enable applicable `PreprocessSteps` in Python. |
+| Preprocessing reports no step is on | Pass `--legacy-rnt`, `--ahe`, or enable applicable `PreprocessSteps` in Python. |
 | A series or plan is missing from the manifest | Check the refusal count, `series.csv`, file presence, and image headers. |
 | Split refuses existing content | Preserve the old cohort record and generate the new cohort in a separate output root. |
 | Unexpected internal error | Preserve source data and reports in approved storage; report a synthetic reproducer and safe class/site details. |
