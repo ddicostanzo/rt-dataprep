@@ -19,7 +19,7 @@ from rt_dataprep.preprocess import REASON_INTERNAL as PREPROCESS_REASON_INTERNAL
 from rt_dataprep.split import REASON_COLUMNS, REASON_EXISTS, REASON_NO_TRAIN, REASON_OVERLAP, REASON_ROWS, REASON_SIZE, SPLIT_NAMES, split
 
 
-PREPROCESS_HELP = 'resample, rescale and crop/pad a converted tree into a separate output tree; --legacy-rnt is required for any output'
+PREPROCESS_HELP = 'resample, rescale and crop/pad a converted tree into a separate output tree; give --legacy-rnt, --ahe or both to write anything'
 WORKERS_HELP = 'number of threads reading headers; output is the same for any value'
 MAX_WORKERS = 64
 
@@ -45,10 +45,11 @@ def main(argv=None):
     sub = commands.add_parser('preprocess', help=PREPROCESS_HELP, description=PREPROCESS_HELP)
     sub.add_argument('converted', help='converted root, from the convert command')
     sub.add_argument('out', help='output root, outside the converted root')
-    sub.add_argument('--legacy-rnt', action='store_true', help='the legacy RNT steps; required for any output')
+    sub.add_argument('--legacy-rnt', action='store_true', help='the legacy RNT steps; without it or --ahe nothing is written')
+    sub.add_argument('--ahe', action='store_true', help='adaptive histogram equalization of every image volume; works alone or with --legacy-rnt')
     sub.add_argument('--legacy-linear-masks', action='store_true', help='resample masks linearly to float32, not nearest to uint8')
     sub.add_argument('--series-fov-mask', action='store_true',
-                     help='with --legacy-rnt, also write fovmask_<series> (uint8, 1 inside the series FOV) for each aligned plan series')
+                     help='with --legacy-rnt or --ahe, also write fovmask_<series> (uint8, 1 inside the series FOV) for each aligned plan series')
     sub = commands.add_parser('manifest', help='write manifest.csv in a converted or preprocessed root, one row per plan folder or study series')
     sub.add_argument('root', help='converted or preprocessed root; manifest.csv is written here')
     sub = commands.add_parser('split', help='write splits.json next to manifest.csv, whole patients per split')
@@ -64,7 +65,7 @@ def main(argv=None):
             convert(args.org, args.out, workers=args.workers)
         elif args.command == 'preprocess':
             steps = LEGACY_RNT if args.legacy_rnt else PreprocessSteps()
-            preprocess(args.converted, args.out, dataclasses.replace(steps, legacy_linear_masks=args.legacy_linear_masks,
+            preprocess(args.converted, args.out, dataclasses.replace(steps, ahe=args.ahe, legacy_linear_masks=args.legacy_linear_masks,
                                                      series_fov_mask=args.series_fov_mask))
         elif args.command == 'manifest':
             written, refused = manifest(args.root)

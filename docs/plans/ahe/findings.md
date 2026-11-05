@@ -58,3 +58,19 @@ Gotchas: CLAHE's default kernel is 1/8 of each axis, so an 8^3 series has 1-voxe
 tests use 24^3 gradients (`AHE_SIDE`). A landmark-peak test (ahe on vs off) was dropped as fragile: CLAHE saturates other tiles at 1, so argmax ties
 move; the A4 geometry check is the exact comparison with `Resample(reference_equalize(native))` on a rotated-direction native.
 The names, AC2 (dose/mask identical) and fovmask tests passed before the code change (task-02 had added the names; dose, masks and the FOV mask are geometry only).
+
+## review-group-3 (task-03)
+No BLOCKING, no WARNING. NOTEs: names/AC2/FOV tests are regression guards (green before); reference_series uses pre.rescale; landmark test dropped, rotated exact comparison covers A4.
+
+## task-04
+
+Files changed: `src/rt_dataprep/__main__.py`, `tests/test_cli.py`.
+
+Decisions: `--ahe` (store_true) goes through the existing `dataclasses.replace(steps, ahe=args.ahe, ...)`, so it works alone
+(`PreprocessSteps(ahe=True)`) or on top of `LEGACY_RNT`. Help: `PREPROCESS_HELP` and `--legacy-rnt` no longer say "required for any output"
+and name `--ahe`; `--series-fov-mask` says "with --legacy-rnt or --ahe". The replaced test is
+`test_preprocess_help_names_ahe_and_no_longer_requires_the_preset`; new tests: `--ahe` alone (CT `ahe_planning_ct.nii.gz`, dose and
+mask byte-identical to the input), `--ahe --legacy-rnt` (full CT name), and the flag reaching `PreprocessSteps`.
+
+Gotchas: a help reworded as "at least one of ... is required for any output" still fails the "does not appear" criterion; avoid the phrase.
+The module docstring of `preprocess.py` (named in spec A8) has no such wording, and that file is out of scope here.
