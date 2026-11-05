@@ -1552,6 +1552,7 @@ def test_a_series_whose_nonzero_voxels_all_miss_the_ct_is_kept_when_its_fov_over
     report, done, _ = run_plan(tmp_path, [mr_spec(ends[0], rigid(0, (4, 0, 0))), mr_spec(ends[1], rigid(0, (4, 0, 0)), file='series_MR_2.nii.gz')])
     assert plan_row(report).skipped_series == 0
     assert plan_row(report).files == [*BASE_FILES, MR_OUT, pre.output_name('series_MR_2.nii.gz', SMALL), 'series.csv']
+    assert any(not sitk.GetArrayFromImage(read_out(done, name)).any() for name in (MR_OUT, pre.output_name('series_MR_2.nii.gz', SMALL)))  # a copy: a view of a temporary image reads freed memory
 
 
 def test_an_all_zero_series_is_left_out_by_where_it_sits_not_its_values(tmp_path):
@@ -1559,7 +1560,24 @@ def test_an_all_zero_series_is_left_out_by_where_it_sits_not_its_values(tmp_path
     report, done, _ = run_plan(tmp_path, [mr_spec(zeros, rigid(0, (500, 0, 0))), mr_spec(zeros, rigid(0, (4, 0, 0)), file='series_MR_2.nii.gz')])
     kept = pre.output_name('series_MR_2.nii.gz', SMALL)
     assert plan_row(report).skipped_series == 1 and plan_row(report).files == [*BASE_FILES, kept, 'series.csv']
-    assert not sitk.GetArrayViewFromImage(read_out(done, kept)).any()
+    assert not sitk.GetArrayFromImage(read_out(done, kept)).any()
+
+
+def test_a_series_outside_the_ct_is_never_resampled(tmp_path, monkeypatch):
+    monkeypatch.setattr(pre, 'process_series', lambda *a: pytest.fail('a series outside the ct was resampled'))
+    report, _, _ = run_plan(tmp_path, [mr_spec(np.ones((8, 8, 8)), rigid(0, (500, 0, 0)))])
+    assert plan_row(report).skipped_series == 1
+
+
+def test_a_registered_ct_without_rescale_is_filled_with_its_own_minimum_outside_its_fov(tmp_path):
+    geometry, matrix = dict(spacing=(1.25,) * 3, origin=(-3.875, -4.125, -2.625)), rigid(0, (4, 0, 0))
+    values = np.full((8, 8, 8), 100.0)
+    values[0, 0, 0] = -3024.0  # SYNTHETIC scanner padding value
+    steps = dataclasses.replace(SMALL, rescale=False)
+    name = pre.output_name('series_CT_1.nii.gz', steps, ct=True)
+    _, done, _ = run_plan(tmp_path, [mr_spec(values, matrix, geometry, 'series_CT_1.nii.gz', 'CT')], steps=steps)
+    _, outside = coverage(read_out(done, name), geometry, (8, 8, 8), matrix)
+    assert (sitk.GetArrayFromImage(read_out(done, name))[outside] == -3024.0).all()
 
 
 def test_ac7_an_unreadable_series_file_is_left_out_and_counted(tmp_path):

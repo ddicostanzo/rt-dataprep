@@ -47,8 +47,9 @@ the registered MR/PT volumes voxel-aligned with the final CT, and a manifest col
   matrix applies unchanged. `identity` resamples with the identity transform (grids still differ).
 - D3 Interpolation: linear, float32, default value 0 outside the series FOV. MR/PT intensities are unchanged (MR/PT
   normalization is #16). A registered **CT** series is rescaled like the planning CT when `steps.rescale` is on
-  (owner), applied to the native image before the resample so that 0 outside the FOV is air; its output name uses
-  `output_name(file, steps, ct=True)`.
+  (owner), applied to the native image before the resample so that 0 outside the FOV is air. With rescale off, a CT
+  series is filled with its own native minimum instead of 0 (water), as the planning CT is padded (#125). Its output
+  name uses `output_name(file, steps, ct=True)`.
 - D4 Always on: alignment runs for every plan with registered series, under every step set including `--legacy-rnt`.
   No new flag.
 - D5 Unusable matrix: a series whose `reg_matrix` is not `identity` and is `''`, not 16 finite numbers, or not rigid (the same rigidity
