@@ -64,7 +64,7 @@ the registered MR/PT volumes voxel-aligned with the final CT, and a manifest col
   closing log line adds the total.
 - D8 Bad file (owner): a registered series whose file is **missing** from the plan folder refuses the plan with
   `REASON_FILE_MISSING` (a corrupt converted tree, loud, as for dose and masks). One that is present but
-  **unreadable**, or not a 3D scalar volume (2D, 4D or multi-component, #127), is left out and counted, as in D5: only `CaseRefused(REASON_FILE_UNREADABLE)` from reading that series
+  **unreadable**, or not a 3D volume of one real value per voxel (2D, 4D, multi-component or complex, #127, #139), is left out and counted, as in D5: only `CaseRefused(REASON_FILE_UNREADABLE)` from reading that series
   is caught; `REASON_INTERNAL` from the resample still stops the run.
 - D9 Naming and rows: the output name is `output_name(file, steps)` (`ct=True` for a CT series, D3). The output
   `series.csv` keeps the row with the file renamed, `reg_matrix` set to `identity` and `frame_of_reference_uid` set to

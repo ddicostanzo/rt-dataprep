@@ -1202,6 +1202,29 @@ def test_a_pixel_read_failure_refuses_that_series_only(tmp_path, monkeypatch):
     assert not list((out / 'SYNTHETICPTA' / 'study_1').glob('*MR*'))
 
 
+NOT_A_VOLUME = [  # convert writes 3D volumes of one real value per voxel only (#127, #138, #139)
+    lambda: sitk.Image([4, 4], sitk.sitkFloat32),
+    lambda: sitk.Image([4, 4, 4, 2], sitk.sitkFloat32),
+    lambda: sitk.Image([4, 4, 4], sitk.sitkVectorFloat32, 3),
+    lambda: sitk.Image([4, 4, 4], sitk.sitkComplexFloat32),
+]
+NOT_A_VOLUME_IDS = ['2d', '4d', 'multi-component', 'complex']
+
+
+@pytest.mark.parametrize('image', NOT_A_VOLUME, ids=NOT_A_VOLUME_IDS)
+@pytest.mark.parametrize('series, bad, steps', [
+    ((('CT', 1), ('MR', 1), ('PT', 1)), 'MR_1', SMALL),
+    ((('CT', 1), ('CT', 2)), 'CT_1', dataclasses.replace(SMALL, resample=False, harmonize_spacing=False, reshape=False)),
+], ids=['mr-every-step', 'ct-rescale-only'])
+def test_a_study_series_that_is_not_a_3d_real_volume_is_refused_on_its_own_row(tmp_path, image, series, bad, steps):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder = write_study_tree(converted, series=series)
+    sitk.WriteImage(image(), str(folder / f'series_{bad}.nii.gz'))
+    report = pre.preprocess(converted, out, steps)
+    assert [(f, o, r) for f, o, r, _ in imaging_rows(report)] == [
+        (f'study_1/series_{m}_{k}', *(('refused', pre.REASON_NOT_VOLUME) if f'{m}_{k}' == bad else ('preprocessed', ''))) for m, k in series]
+    assert not list((out / 'SYNTHETICPTA' / 'study_1').glob(f'*{bad}*'))
+
 def test_a_study_with_every_series_refused_leaves_no_study_folder_and_the_next_study_is_written(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     folder = write_study_tree(converted, series=(('MR', 1), ('PT', 1)))
@@ -1580,11 +1603,7 @@ def test_a_registered_ct_without_rescale_is_filled_with_its_own_minimum_outside_
     assert (sitk.GetArrayFromImage(read_out(done, name))[outside] == -3024.0).all()
 
 
-@pytest.mark.parametrize('image', [
-    lambda: sitk.Image([4, 4], sitk.sitkFloat32),
-    lambda: sitk.Image([4, 4, 4, 2], sitk.sitkFloat32),
-    lambda: sitk.Image([4, 4, 4], sitk.sitkVectorFloat32, 3),
-], ids=['2d', '4d', 'multi-component'])
+@pytest.mark.parametrize('image', NOT_A_VOLUME, ids=NOT_A_VOLUME_IDS)
 def test_a_series_that_is_not_a_3d_scalar_volume_is_left_out_and_counted(tmp_path, image):
     path = tmp_path / 'SYNTHETIC_series.nii.gz'
     sitk.WriteImage(image(), str(path))
