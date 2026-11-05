@@ -76,3 +76,14 @@ def test_a_three_part_root_or_grouping_folder_is_searched(tmp_path):
     nested.mkdir(parents=True)
     shutil.move(old, nested / old.name)
     assert parity.run(out, tmp_path / 'legacy_pooled_data')['counts']['compared'] == 1
+
+
+def test_a_root_of_symlinked_split_folders_is_searched(tmp_path):
+    out, pooled, old = build(tmp_path)
+    train_val = tmp_path / 'train_val'
+    train_val.mkdir()
+    shutil.move(old, train_val / old.name)
+    linked = tmp_path / 'linked'
+    linked.mkdir()
+    (linked / 'train_val').symlink_to(train_val, target_is_directory=True)
+    assert parity.run(out, linked)['counts']['compared'] == 1

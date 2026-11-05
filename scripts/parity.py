@@ -37,7 +37,7 @@ def pooled_folders(pooled):
     """[(mrn, fx, folder)] for every <mrn>_<x>_<fx> folder holding files, never descending into one (the rnt rule).
     A three-part name without files (the root, a grouping folder) is descended into."""
     out = []
-    for root, dirs, files in os.walk(pooled):
+    for root, dirs, files in os.walk(pooled, followlinks=True):  # a pooled root may be symlinks to train_val and test
         leaf = Path(root).name.split('_')
         if len(leaf) == 3 and files:
             dirs[:] = []
