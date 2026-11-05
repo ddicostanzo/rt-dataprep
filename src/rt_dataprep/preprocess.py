@@ -22,7 +22,6 @@ from pathlib import Path
 
 import numpy as np
 import SimpleITK as sitk
-from skimage.exposure import equalize_adapthist
 
 from rt_dataprep import convert as conv
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
@@ -46,6 +45,8 @@ REASON_KIND = 'series.csv has a row of an unknown kind'
 REASON_SERIES_CSV = 'series.csv is malformed: columns, row length, encoding, or one file named twice'
 REASON_TOO_SMALL = 'the image is shorter than one output voxel along an axis'
 REASON_NOT_VOLUME = 'the image is not a 3D volume of one real value per voxel'
+REASON_NONFINITE = 'the image contains non-finite voxel values'
+REASON_AHE_OPTIONS = 'AHE requires at least 2 bins, a finite clip limit from 0 to 1, and three positive finite kernel widths'
 REASON_FILE_MISSING = 'a series.csv row names a file that is not in the case folder'
 REASON_STUDY_MODALITY = 'a series.csv series row has a modality other than CT, MR or PT, or one that differs from its file name'
 REASON_STUDY_NAME = 'a series.csv series row names a file that is not a series volume'
@@ -63,8 +64,11 @@ class PreprocessSteps:
     harmonize_spacing: bool = False  # final resample to final_spacing, linear
     reshape: bool = False  # centred crop/pad to new_shape
     ahe: bool = False  # CLAHE of every image volume: float32 min-max to [0, 1], then skimage equalize_adapthist
+    ahe_kernel_mm: tuple | None = None  # optional physical window, x/y/z mm; None keeps skimage's voxel default
+    ahe_bins: int = 128
+    ahe_clip_limit: float = 0.05
     legacy_linear_masks: bool = False
-    series_fov_mask: bool = False  # not a step: write fovmask_<series> (uint8, 1 in its FOV) per aligned plan series
+    series_fov_mask: bool = False  # not a step: uint8 support masks for planning CT, study and aligned plan images
     new_spacing: tuple = (1, 1, 1)  # mm, (x, y, z)
     final_spacing: tuple = (1.25, 1.25, 1.25)
     new_shape: tuple = (701, 701, 433)  # voxels, (x, y, z)
@@ -126,13 +130,54 @@ def rescale(image):
     return sitk.ShiftScale(sitk.Cast(image, sitk.sitkFloat32), 1024.0, 1 / 4096)  # arithmetic with a float would promote to float64
 
 
-def equalize(image):
-    """`image` as float32 min-max scaled to [0, 1], then CLAHE (default kernel, 128 bins, clip 0.05); a constant volume is all 0 and never reaches skimage. Geometry is kept."""
+def equalize_adapthist(*args, **kwargs):
+    """Load the optional compute path only when AHE is used; keep a seam for backend failure tests."""
+    from skimage.exposure import equalize_adapthist as clahe
+    return clahe(*args, **kwargs)
+
+
+def finite_voxels(image):
+    """Whether every voxel is finite, scanning planes to avoid a volume-sized boolean allocation."""
+    return quiet_call(lambda: all(np.isfinite(plane).all() for plane in sitk.GetArrayViewFromImage(image)), REASON_INTERNAL)
+
+
+def check_ahe_options(kernel_mm, nbins, clip_limit):
+    valid = False
+    try:
+        valid = (isinstance(nbins, int) and not isinstance(nbins, bool) and nbins >= 2
+                 and np.isfinite(clip_limit) and 0 <= clip_limit <= 1
+                 and (kernel_mm is None or (len(kernel_mm) == 3 and all(np.isfinite(v) and v > 0 for v in kernel_mm))))
+    except (TypeError, ValueError):
+        pass
+    if not valid:
+        raise ValueError(REASON_AHE_OPTIONS)
+
+
+def ahe_options(steps):
+    return steps.ahe_kernel_mm, steps.ahe_bins, steps.ahe_clip_limit
+
+
+def equalize(image, kernel_mm=None, nbins=128, clip_limit=0.05):
+    """Float32 min-max then CLAHE; preserve normalized contrast if CLAHE collapses a varying volume. Geometry is kept."""
     array = sitk.GetArrayFromImage(image).astype(np.float32, copy=False)
-    if array.max() == array.min():
+    low, high = array.min(), array.max()
+    if not np.isfinite(low) or not np.isfinite(high):
+        raise ValueError  # internal compute guard; public process entry points refuse before entering quiet_call
+    if high == low:
         equalized = np.zeros_like(array)
     else:
-        equalized = equalize_adapthist((array - array.min()) / (array.max() - array.min()), nbins=128, clip_limit=0.05)
+        # Float32 extremes can overflow their subtraction even though both inputs are finite.
+        if float(high) - float(low) > np.finfo(np.float32).max:
+            normalized = ((array.astype(np.float64) - float(low)) / (float(high) - float(low))).astype(np.float32)
+        else:
+            normalized = (array - low) / (high - low)
+        options = {} if kernel_mm is None else {'kernel_size': tuple(
+            max(1, int(np.ceil(width / spacing))) for width, spacing in zip(kernel_mm, image.GetSpacing(), strict=True))[::-1]}
+        equalized = equalize_adapthist(normalized, nbins=nbins, clip_limit=clip_limit, **options)
+        if not np.isfinite(equalized).all():
+            raise ValueError
+        if equalized.max() == equalized.min():
+            equalized = normalized  # tiny tiles/two-level volumes can otherwise lose all contrast
     result = sitk.GetImageFromArray(equalized)
     result.CopyInformation(image)
     return result
@@ -153,6 +198,10 @@ def crop_or_pad(image, shape, pad_value):
 
 def process_ct(ct, steps):
     """The CT through the steps that are on, in legacy order. The result is the reference grid for dose and masks."""
+    if steps.ahe:
+        check_ahe_options(*ahe_options(steps))
+        if not finite_voxels(ct):
+            raise CaseRefused(REASON_NONFINITE)
     def run():
         image = ct
         if steps.resample:
@@ -160,7 +209,7 @@ def process_ct(ct, steps):
         if steps.rescale:
             image = rescale(image)
         if steps.ahe:
-            image = equalize(image)
+            image = equalize(image, *ahe_options(steps))
         if steps.harmonize_spacing:
             image = resample_to(image, steps.final_spacing)
         if steps.reshape:
@@ -189,15 +238,19 @@ def process_mask(mask, final_ct, steps):
     return quiet_call(lambda: sitk.Resample(mask, final_ct, sitk.Transform(), interpolator, 0, pixel), REASON_INTERNAL)
 
 
-def process_series(native, final_ct, matrix, rescale_hu, ct, ahe):
+def process_series(native, final_ct, matrix, rescale_hu, ct, ahe, options=(None, 128, 0.05)):
     """`native` (HU-rescaled first when rescale_hu, then equalized on its own grid when ahe) linearly resampled once onto final_ct as float32;
     0 outside its FOV, or its own minimum for a CT that is neither rescaled nor equalized (#125: 0 would be water; the planning CT pads with its minimum too).
     `matrix` is series frame -> CT frame (series_transform)."""
+    if ahe:
+        check_ahe_options(*options)
+        if not finite_voxels(native):
+            raise CaseRefused(REASON_NONFINITE)
     transform = series_transform(matrix)
     def run():
         image = rescale(native) if rescale_hu else native
         if ahe:
-            image = equalize(image)
+            image = equalize(image, *options)
         fill = minimum(native) if ct and not rescale_hu and not ahe else 0.0
         return sitk.Resample(image, final_ct, transform, sitk.sitkLinear, fill, sitk.sitkFloat32)
     return quiet_call(run, REASON_INTERNAL)
@@ -221,6 +274,25 @@ def covers_ct(native, final_ct, matrix):
         fov.CopyInformation(native)
         landed = sitk.Resample(fov, final_ct, series_transform(matrix), sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8)
         return landed, has_voxels(landed)
+    return quiet_call(run, REASON_INTERNAL)
+
+
+def image_fov_mask(info, steps):
+    """Native support through each geometric step, nearest-neighbour with zero padding; independent of intensity."""
+    def run():
+        size, origin, spacing, direction = info
+        mask = sitk.Image(size, sitk.sitkUInt8) + 1
+        mask.SetOrigin(origin)
+        mask.SetSpacing(spacing)
+        mask.SetDirection(direction)
+        for on, target in ((steps.resample, steps.new_spacing), (steps.harmonize_spacing, steps.final_spacing)):
+            if on:
+                new_size, new_origin, new_spacing, new_direction = reference_grid(mask, target)
+                mask = sitk.Resample(mask, new_size, sitk.Transform(), sitk.sitkNearestNeighbor,
+                                     new_origin, new_spacing, new_direction, 0, sitk.sitkUInt8)
+        if steps.reshape:
+            mask = crop_or_pad(mask, steps.new_shape, 0)
+        return mask
     return quiet_call(run, REASON_INTERNAL)
 
 
@@ -275,6 +347,8 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps()):  # noqa: B008
         raise ValueError(REASON_OUTSIDE_INPUT)
     if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape or steps.ahe):
         raise ValueError(REASON_NO_STEPS)
+    if steps.ahe:
+        check_ahe_options(*ahe_options(steps))
     folders = sorted(p for p in converted_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
     rows, aborted = [], False
@@ -378,7 +452,8 @@ def preprocess_study(study_dir, out_dir, steps):
             rows.append(PreprocessRow(patient, folder, conv.OUTCOME_REFUSED, str(refusal)))
             continue
         written.append(row | {'file': name})
-        rows.append(PreprocessRow(patient, folder, OUTCOME_PREPROCESSED, files=[name]))
+        rows.append(PreprocessRow(patient, folder, OUTCOME_PREPROCESSED,
+                                  files=[name, *([f'fovmask_{name}'] if steps.series_fov_mask else [])]))
     if written:
         conv.write_series_csv(written, out_dir / conv.SERIES_NAME)
         next(r for r in rows if r.outcome == OUTCOME_PREPROCESSED).files.append(conv.SERIES_NAME)
@@ -402,6 +477,8 @@ def preprocess_series(study_dir, out_dir, row, steps):
     name = output_name(row['file'], steps, ct=is_ct, image=True)
     out_dir.mkdir(exist_ok=True)
     conv.write_atomic(image, out_dir / name)
+    if steps.series_fov_mask:
+        conv.write_atomic(image_fov_mask(info, steps), out_dir / f'fovmask_{name}')
     return name
 
 
@@ -538,12 +615,16 @@ def preprocess_plan(plan_dir, out_dir, steps):
             conv.write_atomic(image, out_dir / name)
             del native, image
         files.append(name)
+        if kind == 'ct' and steps.series_fov_mask:
+            mask_name = f'fovmask_{name}'
+            conv.write_atomic(image_fov_mask(ct, steps), out_dir / mask_name)
+            files.append(mask_name)
         series_rows.append(row | {'file': name})
     skipped = 0
     for row in series:  # one series at a time, after the CT: read, resampled, written, released
         matrix = reg_matrix_array(row['reg_matrix'])
         native = None if matrix is None else read_series(plan_dir / row['file'])
-        if native is None or not is_volume(native):  # D8
+        if native is None or not is_volume(native) or (steps.ahe and not finite_voxels(native)):  # D8
             skipped += 1
             continue
         is_ct = row['modality'] == 'CT'
@@ -553,7 +634,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
         if not covered:  # entirely outside the CT: never resampled
             skipped += 1
         else:
-            image = process_series(native, final, matrix, is_ct and steps.rescale, is_ct, steps.ahe)
+            image = process_series(native, final, matrix, is_ct and steps.rescale, is_ct, steps.ahe, ahe_options(steps))
             name = output_name(row['file'], steps, ct=is_ct, image=True)
             conv.write_atomic(image, out_dir / name)
             files.append(name)

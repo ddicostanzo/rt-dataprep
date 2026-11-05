@@ -43,7 +43,7 @@ def tree(root):
 def read(root):
     with open(root / 'manifest.csv', newline='') as handle:
         reader = csv.DictReader(handle)
-        assert reader.fieldnames == COLUMNS
+        assert reader.fieldnames in (COLUMNS, [*COLUMNS, 'fov_mask'])
         return list(reader)
 
 

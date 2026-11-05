@@ -56,8 +56,9 @@ spacing, and centered crop/pad; it then writes a manifest. Inspect the resulting
 a grid for real data. Cropping a plan's nonzero dose or masks can refuse that plan. The script exits with status 1 if cases
 or registered series are refused/skipped, or the input yields no cases, so that subsequent automation can stop for review.
 
-`--series-fov-mask` writes masks only for registered series of plan cases; the imaging-only synthetic cohort has no such
-plan series. `--help` on either script describes its accepted arguments.
+Add `--series-fov-mask` to write support masks for the planning CT, study images, and registered plan series. It works
+with the synthetic imaging cohort too. The manifest then exposes primary masks through an optional trailing `fov_mask`
+column; aligned-series masks stay in the `series` JSON. `--help` describes each script's accepted arguments.
 
 Add `--ahe` to the custom example to include adaptive histogram equalization. To try only AHE through the CLI, without
 resampling to the large `--reshape` grid:
@@ -70,6 +71,9 @@ uv run python -m rt_dataprep manifest /tmp/rt-dataprep-ahe
 AHE is opt-in for CT/MR/PT image volumes and never equalizes dose or masks. It min-max scales each volume and applies
 CLAHE with 128 bins and clip limit 0.05, producing float32 values in [0, 1]. Those values are no longer HU or SUV. Outputs
 receive an `ahe_` prefix. See the [preprocessing guide](../README.md#preprocessing) for step order and memory considerations.
+The CLI also accepts `--ahe-kernel-mm X Y Z`, `--ahe-bins`, and `--ahe-clip-limit` with `--ahe`. A physical window is rounded
+up to whole voxels on each image's grid. Non-finite input is refused; degenerate CLAHE output falls back to normalized
+input instead of discarding all contrast.
 
 ## Clinical export workflow
 

@@ -1,6 +1,7 @@
 """DICOM header reading and path sanitising. Nothing here puts a path, tag value or UID in a message, warning or log."""
 import contextlib
 import csv
+import errno
 import logging
 import os
 import re
@@ -16,6 +17,16 @@ import pydicom
 import SimpleITK as sitk
 
 REASON_UNREADABLE = 'DICOM header is unreadable'
+ALLOCATION_FAILURE = re.compile(
+    r'\b(?:failed to allocate\b[^\n]*\bmemory|cannot allocate memory|out of memory|'
+    r'std::bad_alloc|bad allocation|memory allocation (?:has )?failed)\b', re.IGNORECASE)
+
+
+def allocation_failure(exc):
+    """Typed allocation errors, or recognized ITK/C++ RuntimeError wording. Never return or emit the original text."""
+    if isinstance(exc, MemoryError) or (isinstance(exc, OSError) and exc.errno == errno.ENOMEM):
+        return True
+    return isinstance(exc, RuntimeError) and ALLOCATION_FAILURE.search(str(exc)) is not None
 
 
 @contextlib.contextmanager
@@ -99,7 +110,7 @@ def quiet_call(fn, reason):
                 except Exception as exc:  # no message, no traceback kept
                     failed = True
                     try:
-                        out_of_memory = isinstance(exc, MemoryError) or 'Failed to allocate memory' in str(exc)  # ITK's is a RuntimeError
+                        out_of_memory = allocation_failure(exc)
                     except Exception:  # an exception whose str() fails is a refusal like any other
                         out_of_memory = False
                 except BaseException as exc:  # interrupt or exit: keep the kind (and an exit code), drop the message

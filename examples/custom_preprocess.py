@@ -30,7 +30,7 @@ def main():
     parser.add_argument('out', type=Path, help='new output root outside the input tree')
     parser.add_argument('--shape', type=positive_int, nargs=3, default=(128, 128, 96), metavar=('X', 'Y', 'Z'))
     parser.add_argument('--spacing', type=positive_float, nargs=3, default=(1.25, 1.25, 1.25), metavar=('X', 'Y', 'Z'))
-    parser.add_argument('--series-fov-mask', action='store_true', help='add field-of-view masks for aligned plan series')
+    parser.add_argument('--series-fov-mask', action='store_true', help='add support masks for planning CT, study and aligned images')
     parser.add_argument('--ahe', action='store_true', help='also apply adaptive histogram equalization to image volumes')
     args = parser.parse_args()
     if args.out.exists():

@@ -1,4 +1,5 @@
 import logging
+import errno
 import operator
 import os
 import subprocess
@@ -219,7 +220,10 @@ def test_quiet_call_refuses_an_exception_whose_str_fails():
     assert _chain(err.value) == (None, None)
 
 
-@pytest.mark.parametrize('error', [MemoryError(FAKE_PATH), RuntimeError(f'{FAKE_PATH}:179:\nFailed to allocate memory for image.')])
+@pytest.mark.parametrize('error', [MemoryError(FAKE_PATH), OSError(errno.ENOMEM, FAKE_PATH),
+                                  *[RuntimeError(f'{FAKE_PATH}:179:\n{wording}') for wording in (
+                                      'Failed to allocate memory for image.', 'Out of memory.', 'std::bad_alloc',
+                                      'Cannot allocate memory', 'Memory allocation failed', 'bad allocation')]])
 def test_quiet_call_raises_a_bare_memory_error_when_out_of_memory(error):
     def fail():
         raise error
@@ -227,6 +231,16 @@ def test_quiet_call_raises_a_bare_memory_error_when_out_of_memory(error):
         quiet_call(fail, REASON)
     assert err.value.args == ()
     assert _chain(err.value) == (None, None)
+
+
+@pytest.mark.parametrize('error', [OSError(errno.EIO, FAKE_PATH), RuntimeError('memory tag is unreadable'),
+                                  ValueError('Out of memory is a tag value, not a runtime allocation failure')])
+def test_ordinary_input_failures_are_not_promoted_to_memory_errors(error):
+    def fail():
+        raise error
+    with pytest.raises(CaseRefused) as caught:
+        quiet_call(fail, REASON)
+    assert str(caught.value) == REASON and _chain(caught.value) == (None, None)
 
 
 class _NeedsArg(BaseException):

@@ -189,14 +189,19 @@ the final planning CT grid; unusable alignment, no overlap, or unreadable data s
 `skipped_series`. Output `reg_matrix` is `identity` after alignment.
 
 Masks use nearest-neighbor interpolation and uint8 by default. `--legacy-linear-masks` requests the legacy linear float32
-behavior. `--series-fov-mask` adds a uint8 `fovmask_<series filename>` for each aligned plan series: 1 inside that series'
-field of view and 0 outside. The manifest lists a matching mask only when its header matches the CT grid.
+behavior. `--series-fov-mask` adds a uint8 `fovmask_<image filename>` for the planning CT, each study image, and aligned
+plan series. A value of 1 marks acquired support and 0 marks outside-FOV fill or crop/pad fill. Planning/study masks follow
+each geometric step with nearest-neighbor interpolation and zero padding; true zero-valued image voxels remain valid.
+Auxiliary masks do not add rows to `series.csv`. The manifest lists them only when their headers match the relevant image grid.
 
 Optional `--ahe` applies per-volume min-max scaling followed by scikit-image CLAHE (default kernel of one eighth of each
 axis, 128 bins, clip limit 0.05) to planning CT and CT/MR/PT image series. It is off by default and never equalizes dose,
 masks, or applicator coordinates. It produces float32 image values in [0, 1]; these are contrast values, not HU or SUV.
 The step runs before final resampling/cropping, after any CT rescale. Registered plan series are equalized on their native
-grids before alignment. Constant volumes become zero. This is not a numerical parity port of legacy mclahe.
+grids before alignment. Constant volumes become zero; if CLAHE collapses a varying tiny/two-level volume to a constant,
+the normalized input is retained instead, preserving contrast. NaN/Inf input is refused before AHE: a study refusal affects
+that series only, a planning CT refuses its plan, and an invalid aligned series is skipped and counted.
+This is not a numerical parity port of legacy mclahe.
 
 For AHE without the large `--reshape` grid, use a fresh output root:
 
@@ -205,8 +210,21 @@ uv run python -m rt_dataprep preprocess /secure/converted /secure/equalized --ah
 uv run python -m rt_dataprep manifest /secure/equalized
 ```
 
-`--ahe` combines with any other step flag, for example the four legacy flags. AHE can require several additional
-volume-sized arrays; include those in memory planning. Its parameters are currently fixed; it does not add CLI controls for kernel, bins, or clip limit.
+Combine `--ahe` with any other step flag. AHE can require several additional volume-sized arrays; include those in
+memory planning; real-data peak-memory profiling remains tracked in #47. Tune the histogram or use a physical window:
+
+```bash
+uv run python -m rt_dataprep preprocess /secure/converted /secure/equalized-tuned --ahe --ahe-kernel-mm 16 16 16 --ahe-bins 128 --ahe-clip-limit 0.05 --series-fov-mask
+```
+
+`--ahe-kernel-mm X Y Z` uses positive mm widths, rounded up to whole voxels on the grid being equalized (at least one
+voxel). Without it, the per-axis one-eighth voxel default is preserved. Bins must be at least 2; clip limit must be finite
+and between 0 and 1. These options require `--ahe`. Python equivalents are `ahe_kernel_mm`, `ahe_bins`, and
+`ahe_clip_limit` in `PreprocessSteps`.
+
+The initial linear resample's edge fill still participates in AHE's histogram; support masks identify validity for
+downstream consumers, not a masked CLAHE algorithm. AHE-only avoids introducing that initial-resample fill. A
+`rescale_` prefix records the executed CT processing step even though AHE's subsequent min-max scaling removes its units.
 
 Output filenames acquire step prefixes such as `reshape_resample_rescale_initialresample_`; when enabled, `ahe_` sits
 between `resample_` and `rescale_` (for example `reshape_resample_ahe_rescale_initialresample_`). Generate a new manifest
@@ -225,6 +243,10 @@ after preprocessing so its `image` and `series` fields point to the resulting fi
 | `rtplan_uid`, `ct_series_uid`, `study_uid` | Original identifiers; imaging uses its own series UID in `ct_series_uid`. |
 | `case_type`, `modality`, `image` | `plan` or `imaging`; image modality; volume filename for imaging (blank for plans). |
 | `series` | JSON list of aligned plan series (`file`, `modality`, optional `fov_mask`); `[]` for imaging. |
+| `fov_mask` (optional trailing column) | Planning-CT or study-image support-mask filename, relative to its case folder; blank when absent. |
+
+The trailing `fov_mask` column appears only when at least one usable primary-image mask is present in the tree. Without
+those masks, the original fourteen-column schema is retained. Aligned-series masks remain in their `series` JSON entries.
 
 An imaging `case_dir`, for example `SYNTHETIC_P001/study_1/series_MR_1`, is an ID, **not a directory path**. Resolve its image
 as `ROOT / patient / study_folder / image`. Plan image names come from the plan's `series.csv`.

@@ -1204,12 +1204,13 @@ def test_legacy_fx_folders_convert_like_plan_folders(tree):
 
 # ---------------------------------------------------------------- hardening B6 (#53)
 
-def test_itks_out_of_memory_reading_the_planning_ct_aborts_the_run_and_leaves_no_partial_folder(tree, monkeypatch, caplog):
+@pytest.mark.parametrize('wording', ['Failed to allocate memory for image.', 'std::bad_alloc', 'Out of memory.'])
+def test_itks_out_of_memory_reading_the_planning_ct_aborts_the_run_and_leaves_no_partial_folder(tree, monkeypatch, caplog, wording):
     org, out = tree
     make_plan(org / PID / 'plan_1')
 
     def execute(self):
-        raise RuntimeError('SYNTHETIC_SOURCE:179:\nFailed to allocate memory for image.')  # ITK's, a RuntimeError
+        raise RuntimeError(f'SYNTHETIC_SOURCE:179:\n{wording}')
     monkeypatch.setattr(sitk.ImageSeriesReader, 'Execute', execute)
     caplog.set_level(logging.DEBUG)
     with pytest.raises(conv.ConvertAborted) as caught:
@@ -1222,12 +1223,13 @@ def test_itks_out_of_memory_reading_the_planning_ct_aborts_the_run_and_leaves_no
 
 
 @pytest.mark.parametrize('step', ['GetImageFromArray', 'Resample'])
-def test_itks_out_of_memory_reading_the_dose_aborts_the_run_and_leaves_no_partial_folder(tree, monkeypatch, caplog, step):
+@pytest.mark.parametrize('wording', ['Failed to allocate memory for image.', 'std::bad_alloc', 'Out of memory.'])
+def test_itks_out_of_memory_reading_the_dose_aborts_the_run_and_leaves_no_partial_folder(tree, monkeypatch, caplog, step, wording):
     org, out = tree
     make_plan(org / PID / 'plan_1', doses=[dose_spec(10)])
 
     def allocate(*args, **kwargs):
-        raise RuntimeError('SYNTHETIC_SOURCE:179:\nFailed to allocate memory for image.')  # ITK's, a RuntimeError
+        raise RuntimeError(f'SYNTHETIC_SOURCE:179:\n{wording}')
     monkeypatch.setattr(sitk, step, allocate)
     caplog.set_level(logging.DEBUG)
     with pytest.raises(conv.ConvertAborted) as caught:

@@ -1714,7 +1714,7 @@ FOV_OUT = f'fovmask_{MR_OUT}'
                          ids=['translated', 'rotated_sub_voxel_odd_spacing'])
 def test_fov_mask_is_the_final_grid_uint8_where_the_series_lands_and_listed_right_after_its_series(tmp_path, matrix, geometry):
     report, done, _ = run_plan(tmp_path, [mr_spec(np.full((8, 8, 8), 3.0), matrix, geometry)], steps=FOV)
-    assert plan_row(report).files == [*BASE_FILES, MR_OUT, FOV_OUT, 'series.csv']
+    assert plan_row(report).files == [BASE_FILES[0], f'fovmask_{CT_FILE}', *BASE_FILES[1:], MR_OUT, FOV_OUT, 'series.csv']
     assert [r['file'] for r in conv_rows(done)] == [*BASE_FILES, MR_OUT]  # no mask row in series.csv
     mask, ct, image = read_out(done, FOV_OUT), read_out(done, CT_FILE), read_out(done)
     assert mask.GetPixelID() == sitk.sitkUInt8
@@ -1735,8 +1735,9 @@ def test_fov_mask_of_a_registered_ct_filled_with_its_minimum_equals_the_mr_mask(
                          ids=['no_matrix', 'no_overlap', 'unreadable'])
 def test_a_series_left_out_gets_no_fov_mask(tmp_path, spec):
     report, done, _ = run_plan(tmp_path, [spec], steps=FOV)
-    assert plan_row(report).skipped_series == 1 and plan_row(report).files == [*BASE_FILES, 'series.csv']
-    assert not any(p.name.startswith('fovmask_') for p in done.iterdir())
+    assert plan_row(report).skipped_series == 1
+    assert plan_row(report).files == [BASE_FILES[0], f'fovmask_{CT_FILE}', *BASE_FILES[1:], 'series.csv']
+    assert [p.name for p in done.iterdir() if p.name.startswith('fovmask_')] == [f'fovmask_{CT_FILE}']
 
 
 def test_no_fov_mask_is_written_by_default(tmp_path):
@@ -1758,7 +1759,7 @@ def test_the_fov_mask_leaves_every_other_output_unchanged(tmp_path):
         outs.append(root / 'out' / 'SYNTHETICPTA')
     off, on = ({p.relative_to(out) for p in out.rglob('*') if p.is_file() and not p.name.startswith('fovmask_')} for out in outs)
     assert off == on and len(off) > 7  # plan files and series, study series and csvs
-    assert sum(p.name.startswith('fovmask_') for p in outs[1].rglob('*')) == 1  # the plan's one aligned series only
+    assert sum(p.name.startswith('fovmask_') for p in outs[1].rglob('*')) == 4  # CT, aligned MR, two study images
     for name in off:
         if name.suffix == '.gz':
             a, b = sitk.ReadImage(str(outs[0] / name)), sitk.ReadImage(str(outs[1] / name))
@@ -1779,7 +1780,9 @@ AHE_STUDY_CT = 'reshape_resample_ahe_rescale_initialresample_series_CT_1.nii.gz'
 def reference_equalize(image):
     """The array of `image` min-max scaled in float32, then skimage's equalize_adapthist with the spec constants: never the code under test."""
     array = sitk.GetArrayFromImage(image).astype(np.float32)
-    return equalize_adapthist((array - array.min()) / (array.max() - array.min()), nbins=128, clip_limit=0.05)
+    normalized = (array - array.min()) / (array.max() - array.min())
+    equalized = equalize_adapthist(normalized, nbins=128, clip_limit=0.05)
+    return normalized if equalized.max() == equalized.min() else equalized
 
 
 def reference_pipeline(image, steps):

@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 MANIFEST_NAME = 'manifest.csv'
 COLUMNS = ['case_dir', 'patient', 'fx', 'ct_size', 'ct_spacing', 'dose', 'masks', 'rtplan_uid', 'ct_series_uid', 'study_uid',
            'case_type', 'modality', 'image', 'series']
+FOV_COLUMNS = [*COLUMNS, 'fov_mask']  # original schema is retained when there are no primary-image support masks
 
 
 def _geometry(size, spacing):
@@ -43,13 +44,25 @@ def _study_rows(patient, study):
     rows, refused = [], 0
     for row in series:
         try:
-            size, _, spacing, _ = read_info(study / row['file'])
+            info = read_info(study / row['file'])
         except (CaseRefused, OSError):  # this series only: its siblings keep their rows
             refused += 1
             continue
-        rows.append([f'{patient.name}/{study.name}/{series_id(row["file"])}', patient.name, '', *_geometry(size, spacing),
-                     '0', json.dumps([]), '', row['series_instance_uid'], row['study_instance_uid'], 'imaging', row['modality'], row['file'], json.dumps([])])
+        rows.append([f'{patient.name}/{study.name}/{series_id(row["file"])}', patient.name, '', *_geometry(info[0], info[2]),
+                     '0', json.dumps([]), '', row['series_instance_uid'], row['study_instance_uid'], 'imaging', row['modality'],
+                     row['file'], json.dumps([]), image_fov_mask(study, row['file'], info)])
     return rows, refused
+
+
+def image_fov_mask(folder, file, info):
+    """Name of a readable support mask on the image's grid, else ''; no voxel reads or symlink following."""
+    mask = folder / f'fovmask_{file}'
+    try:
+        if mask.is_file() and not mask.is_symlink() and same_grid(read_info(mask), info):
+            return mask.name
+    except (CaseRefused, OSError):
+        pass
+    return ''
 
 
 def _aligned(plan, series, ct):
@@ -91,12 +104,14 @@ def manifest(root):
             rows.append([f'{patient.name}/{plan.name}', patient.name, plan.name, *_geometry(ct[0], ct[2]),
                          str(int(any(row['kind'] == 'dose' for row in kept))), json.dumps(masks),
                          kept[0]['rtplan_uid'], kept[0]['series_instance_uid'], kept[0]['study_instance_uid'],  # kept[0] is the ct row
-                         'plan', 'CT', '', json.dumps(_aligned(plan, series, ct))])
+                         'plan', 'CT', '', json.dumps(_aligned(plan, series, ct)), image_fov_mask(plan, kept[0]['file'], ct)])
         for study in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(STUDY_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()):
             study_rows, study_refused = _study_rows(patient, study)
             rows += study_rows
             refused += study_refused
     rows.sort()  # case_dir is the first column
-    write_report(root, MANIFEST_NAME, COLUMNS, rows)
+    primary_masks = any(row[-1] for row in rows)
+    write_report(root, MANIFEST_NAME, FOV_COLUMNS if primary_masks else COLUMNS,
+                 rows if primary_masks else [row[:-1] for row in rows])
     log.info('manifest: %d written, %d refused', len(rows), refused)
     return len(rows), refused
