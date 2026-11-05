@@ -57,3 +57,12 @@ No BLOCKING. Deferred: W1 convert/preprocess case-guard tests would not catch re
 `.<lowercase>.old` canary); W2 AC-O7 second half only checked indirectly; N1 `preprocess_patient(overwrite=True)` without
 `claimed` raises TypeError (default `frozenset()`); N2 convert failed-build test lacks the caplog name check; N3 untested
 dangling-symlink target and recover failing to restore; N4 organize's redundant `rmtree(partial)` after recover.
+
+## task-05
+- `--overwrite` (shared OVERWRITE_HELP) on organize/convert/preprocess; `__main__` always passes `overwrite=args.overwrite`.
+- Test seams updated: PRE_RUN forwards `**kw`; `lambda *args` stubs take `**kwargs`; exact kwargs assertions include
+  `'overwrite': False`.
+- Deviation: tests/test_mask_retention.py:97 had a fourth `lambda *args` stub on `cli.preprocess` (not in the plan's file
+  list); same one-line fix.
+- README: commands table, a "Replacing existing output with `--overwrite`" subsection, troubleshooting row, reworded
+  review-before-replacing line.
