@@ -7,6 +7,7 @@ from rt_dataprep.convert import REASON_INTERNAL, REASON_OUTSIDE_ORG, ConvertAbor
 from rt_dataprep.manifest import MANIFEST_NAME, manifest
 from rt_dataprep.organize import REASON_OUTSIDE_SRC, organize
 from rt_dataprep.preprocess import (
+    REASON_AHE_OPTIONS,
     REASON_NO_STEPS,
     REASON_OUTSIDE_INPUT,
     PreprocessAborted,
@@ -48,9 +49,12 @@ def main(argv=None):
     sub.add_argument('--ahe', action='store_true', help='step: CLAHE adaptive histogram equalization of every image volume; writes the ahe_ prefix')
     sub.add_argument('--resample', action='store_true', help='step: resample to 1.25 mm spacing; writes the resample_ prefix')
     sub.add_argument('--reshape', action='store_true', help='step: centred crop/pad to 701 x 701 x 433 voxels; writes the reshape_ prefix')
+    sub.add_argument('--ahe-kernel-mm', type=float, nargs=3, metavar=('X', 'Y', 'Z'), help='AHE window in physical mm; requires --ahe')
+    sub.add_argument('--ahe-bins', type=int, default=None, help='AHE histogram bins (default 128, at least 2); requires --ahe')
+    sub.add_argument('--ahe-clip-limit', type=float, default=None, help='AHE clip limit (default 0.05, from 0 to 1); requires --ahe')
     sub.add_argument('--legacy-linear-masks', action='store_true', help='resample masks linearly to float32, not nearest to uint8')
     sub.add_argument('--series-fov-mask', action='store_true',
-                     help='with a step flag, also write fovmask_<series> (uint8, 1 inside the series FOV) for each aligned plan series')
+                     help='with a step flag, write uint8 FOV/padding masks for planning CT, study images and aligned plan series')
     sub = commands.add_parser('manifest', help='write manifest.csv in a converted or preprocessed root, one row per plan folder or study series')
     sub.add_argument('root', help='converted or preprocessed root; manifest.csv is written here')
     sub = commands.add_parser('split', help='write splits.json next to manifest.csv, whole patients per split')
@@ -65,10 +69,15 @@ def main(argv=None):
         if args.command == 'convert':
             convert(args.org, args.out, workers=args.workers)
         elif args.command == 'preprocess':
+            if not args.ahe and any(v is not None for v in (args.ahe_kernel_mm, args.ahe_bins, args.ahe_clip_limit)):
+                parser.error('AHE options require --ahe')
             # flags are named after the output prefix: --initial-resample is the resample field, --resample is harmonize_spacing
             preprocess(args.converted, args.out, PreprocessSteps(
                 resample=args.initial_resample, rescale=args.rescale, ahe=args.ahe, harmonize_spacing=args.resample, reshape=args.reshape,
-                legacy_linear_masks=args.legacy_linear_masks, series_fov_mask=args.series_fov_mask))
+                legacy_linear_masks=args.legacy_linear_masks, series_fov_mask=args.series_fov_mask,
+                ahe_kernel_mm=None if args.ahe_kernel_mm is None else tuple(args.ahe_kernel_mm),
+                ahe_bins=128 if args.ahe_bins is None else args.ahe_bins,
+                ahe_clip_limit=0.05 if args.ahe_clip_limit is None else args.ahe_clip_limit))
         elif args.command == 'manifest':
             written, refused = manifest(args.root)
             print(f'manifest: {written} written, {refused} refused')
@@ -79,7 +88,7 @@ def main(argv=None):
         else:
             organize(args.src, args.out, workers=args.workers)
     except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug, reported as below
-        if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_OUTSIDE_SRC,
+        if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_AHE_OPTIONS, REASON_OUTSIDE_SRC,
                             REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS):
             parser.exit(1, unexpected(exc))
         parser.exit(1, f'rt_dataprep: {exc}\n')
