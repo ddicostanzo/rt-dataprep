@@ -165,7 +165,7 @@ def compare_pair(old, new, tally):
         d = dice(a, b)
         p = '' if same else 'resampled_'
         tally.values[f'{p}dice_{s}'].append(d)
-        c[f'{p}pass' if d >= DICE_MIN else f'{p}fail'] += 1
+        c[('pass' if d >= DICE_MIN else 'fail') if same else 'resampled'] += 1  # resampled: information only
     if (old / 'dose_gy.nii.gz').is_file() and 'dose' in files:
         a, b, same = on_legacy_grid(sitk.ReadImage(str(old / 'dose_gy.nii.gz')), sitk.ReadImage(str(files['dose'])))
         p = '' if same else 'resampled_'

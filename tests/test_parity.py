@@ -72,7 +72,8 @@ def test_a_shifted_legacy_grid_is_compared_after_resampling(tmp_path):
     assert s['ct_size_delta_xyz'] == {'(0, 0, 0)': 1}
     assert s['distributions']['resampled_ct_max_abs_diff']['max'] < 1e-5
     assert s['distributions']['resampled_ct_pearson_r']['min'] > 0.9999
-    assert set(s['masks']) == {'hrctv', 'bladder'} and all(c['legacy'] == 1 and sum(c.values()) == 2 for c in s['masks'].values())
+    assert s['masks'] == {'hrctv': {'legacy': 1, 'resampled': 1}, 'bladder': {'legacy': 1, 'resampled': 1}}
+    assert {'resampled_dice_hrctv', 'resampled_dice_bladder'} <= set(s['distributions'])
 
 
 def test_cli_prints_no_identifiers(tmp_path, capfd):
