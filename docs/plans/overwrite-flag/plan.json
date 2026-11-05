@@ -1,0 +1,171 @@
+{
+  "version": 1,
+  "metadata": {
+    "title": "--overwrite for organize, convert and preprocess",
+    "spec": "docs/specs/2026-11-05-overwrite-flag.md",
+    "branch": "feat/overwrite-flag",
+    "created": "2026-11-05"
+  },
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "Shared recover/publish helper in dicom_io",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/dicom_io.py",
+        "tests/test_dicom_io.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/dicom_io.py": "modify",
+        "tests/test_dicom_io.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_dicom_io.py on tmp_path folders with SYNTHETIC_ names. Two public functions: one recovers a patient name under an output root (spec Behavior 1); one publishes a finished partial to its target given `overwrite` and whether the build had a successful case, and returns which of 'new', 'replaced', 'kept' happened (spec Behavior 3-5). Every directory rename the helper does goes through one public module-level function in dicom_io (for example `rename_dir`) so a test can monkeypatch it to fail only the second rename (partial into place) or both the second and the rollback. Run with `uv run --group dev pytest -q --tb=short tests/test_dicom_io.py` from the worktree (its own .venv, per vault Patterns/python/copied-venv-console-script-runs-the-original-repo.md). The fake `rename_dir` fails when `src.name == f'.{name}.partial'` (the partial-into-place rename); for the double failure it also fails when `src.name == f'.{name}.old'` (the rollback). Rollback shape: catch the error into a variable, attempt the rollback in a separate try, raise the stored error after the except blocks (no `raise` inside an except block). publish with an existing target and overwrite=False is misuse: raise, never replace. Recover also removes a leftover `.<name>.partial` (ignore_errors), because a kill between the two swap renames leaves one that a restore-then-skip would otherwise never remove.",
+      "criteria": [
+        "AC-H1: recover with `.<name>.old` present and `<name>` missing renames `.<name>.old` to `<name>` with contents unchanged; with both present it deletes `.<name>.old` and leaves `<name>` unchanged; with neither it does nothing; in every case a leftover `.<name>.partial` is removed.",
+        "AC-H2: publish with no existing target renames the partial to the target and returns 'new' (also for an empty partial, as today), regardless of `overwrite` and success.",
+        "AC-H3: publish with an existing target, overwrite=True and success=True leaves the target holding exactly the partial's files, no `.<name>.old` or `.<name>.partial` remains, and it returns 'replaced'.",
+        "AC-H4: publish with an existing target, overwrite=True and success=False leaves the target byte-identical, removes the partial, leaves no `.<name>.old`, and returns 'kept'.",
+        "AC-H5: when the rename of the partial into place fails after the target was moved aside, the target is back with its contents unchanged and the OSError propagates; when the rollback rename also fails, `.<name>.old` holds the old contents and the OSError propagates (a following recover restores it).",
+        "AC-H6: a failure deleting `.<name>.old` after a completed swap does not raise; the new target is in place and returns 'replaced'.",
+        "AC-H7: the helper only renames or deletes direct children of the target's parent named `<name>`, `.<name>.old` or `.<name>.partial`; a sibling folder in the same root is untouched in every test above.",
+        "AC-H8: the helper logs nothing that contains a path or folder name (caplog check in the AC-H5 test).",
+        "AC-H10: publish with an existing target and overwrite=False raises and leaves both the target and the partial unchanged.",
+        "AC-H9: full suite green and `uv run --group dev ruff check .` clean."
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "organize: overwrite keyword using the helper",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/organize.py",
+        "tests/test_organize.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/organize.py": "modify",
+        "tests/test_organize.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_organize.py with the existing synthetic DICOM helpers. organize() gains keyword-only overwrite=False. Recovery runs at today's exists-check point, after claimed.add (so REASON_NO_SOP_UID, REASON_SPLIT_SERIES and REASON_NAME_CLAIMED refusals never touch the root); the build replaces the existing `partial.rename(target)` with the helper's publish (success = the row outcome is organized). The summary log line adds replaced and kept counts; a refusal raised before the claimed check while `<name>` exists counts as kept (read-only exists check). Existing rows and report columns unchanged. Signature: `_organize_patient(folder, out_root, claimed, exclude_models, workers, overwrite)` returns `(row, read_s, copy_s, walked, status)`, status one of None, 'new', 'replaced', 'kept'. Status counting: 'kept' only when overwrite=True and `<name>` existed: organize only for REASON_NO_SOP_UID and REASON_SPLIT_SERIES, and only when `name.casefold()` is not in `claimed` (read-only exists check); convert/preprocess when no row of the patient succeeded, including the REASON_NO_PLANS / REASON_NO_CASES early returns; never for REASON_NAME_CLAIMED, REASON_MIXED_IDS, REASON_NO_ID, REASON_NO_DICOM or REASON_IO_ERROR. The stage loop counts statuses; a patient that raises adds nothing. Summary line: append `; %d replaced, %d kept` to the end of the stage's existing first summary log line, always printed (0/0 without overwrite); update every existing exact assertion on that line. Equality with a fresh run uses `tree_hashes` (helper in tests/test_convert.py; organize copies are byte-identical to the source) of the patient folder against a fresh-root run. AC-x3 failure injection: raise OSError inside the build (e.g. patch the copy/writer the stage uses); the row is REASON_IO_ERROR and the run continues.",
+      "criteria": [
+        "AC-O1: without overwrite, an existing patient folder is skipped with REASON_EXISTS and is byte-identical afterwards (spec AC1).",
+        "AC-O2: with overwrite=True, a stale patient folder (marker file added, a copied file removed) ends equal to a fresh run's output (`tree_hashes` of the folder equal a fresh-root run's): marker gone, expected files present, no hidden `.<name>.*` folder (spec AC2).",
+        "AC-O3: with overwrite=True and a patched failure inside the copy, the old folder is unchanged and no `.<name>.old` or `.<name>.partial` remains (spec AC3).",
+        "AC-O4: with overwrite=True and the helper's rename patched to fail the partial-into-place rename, the old folder is back unchanged and the row is REASON_IO_ERROR, and no `.<name>.partial` or `.<name>.old` remains (spec AC4).",
+        "AC-O5: `.<name>.old` with `<name>` missing is restored by a run without overwrite and then skipped with REASON_EXISTS; with both `<name>` and `.<name>.old` present, `.<name>.old` is deleted and `<name>` is byte-identical (spec AC5).",
+        "AC-O6: with overwrite=True, a patient now refused after its name is known (REASON_SPLIT_SERIES or REASON_NO_SOP_UID) keeps its existing folder byte-identical, keeps its refusal row, and the summary log counts it as kept (spec AC6).",
+        "AC-O7: with overwrite=True, a second source folder mapping to a name written earlier in the run is refused with REASON_NAME_CLAIMED and the first folder's new output is untouched; a later same-name folder refused before claiming does not restore, rename or delete anything (spec AC7).",
+        "AC-O8: an output folder with no matching input patient is untouched by an overwrite run (spec AC8).",
+        "AC-O9: the source tree's file list and contents are unchanged after an overwrite run (spec AC9).",
+        "AC-O10: the summary log line reports replaced and kept counts, and no captured log line contains the synthetic patient name or tmp_path, including in the AC-O4 failure (spec AC10).",
+        "AC-O11: full suite green and ruff clean."
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "convert: overwrite keyword, helper, same-run casefold guard",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_convert.py",
+        "tests/test_series.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_convert.py": "modify",
+        "tests/test_series.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_convert.py with the existing synthetic organized trees. convert() gains keyword-only overwrite=False. Recovery runs at today's exists-check in _convert_patient; publish replaces `partial.rename(target)` (success = any row of the patient with outcome converted, plan or study series). The REASON_NO_PLANS early return with an existing target under overwrite counts as kept. Under overwrite only, a casefolded set of names processed this run refuses a repeat with a new fixed REASON_NAME_CLAIMED constant in convert.py, before recovery. Summary log adds replaced and kept counts. Use a patched header read that turns every plan file unreadable to make every plan refuse. Signature: `_convert_patient(folder, out_root, exclude_models, workers, overwrite, claimed)` returns `(rows, reading, files, status)`. Status counting: 'kept' only when overwrite=True and `<name>` existed: organize only for REASON_NO_SOP_UID and REASON_SPLIT_SERIES (read-only exists check); convert/preprocess when no row of the patient succeeded, including the REASON_NO_PLANS / REASON_NO_CASES early returns; never for REASON_NAME_CLAIMED, REASON_MIXED_IDS, REASON_NO_ID, REASON_NO_DICOM or REASON_IO_ERROR. The stage loop counts statuses; a patient that raises adds nothing. Summary line: append `; %d replaced, %d kept` to the end of the stage's existing first summary log line, always printed (0/0 without overwrite); update every existing exact assertion on that line. The exact convert summary assertion is in tests/test_series.py (around line 1040). Same-run guard: when overwrite=True, the first step of the per-patient function is: if `folder.name.casefold()` is in `claimed`, return the patient row `(folder.name, '', OUTCOME_REFUSED, REASON_NAME_CLAIMED)` with status None; otherwise add it. Recovery and the exists check come after. When overwrite=False, `claimed` is never read or added to. Equality with a fresh run: the patient folder's relative file list equals a fresh-root run's, the marker is absent, and every file's mtime is at or after the overwrite run's start (set the stale folder's files to a past mtime with os.utime first), so a merge of old and new output fails. NIfTI byte-stability across runs is not assumed. AC-x3 failure injection: raise OSError inside the build (e.g. patch the copy/writer the stage uses); the row is REASON_IO_ERROR and the run continues. Do not inject a non-OSError (convert/preprocess record it as REASON_INTERNAL and abort the run).",
+      "criteria": [
+        "AC-C1: without overwrite, an existing patient folder is skipped with REASON_EXISTS and is byte-identical (spec AC1); two input folders differing only in case behave as today (no new refusal).",
+        "AC-C2: with overwrite=True, a stale converted patient folder ends equal to a fresh run's output (same relative file list as a fresh-root run and every file rewritten by this run): marker gone, expected files present, no hidden leftovers (spec AC2).",
+        "AC-C3: with overwrite=True and a patched failure inside the build, the old folder is unchanged with no hidden leftovers (spec AC3).",
+        "AC-C4: with overwrite=True and the partial-into-place rename failing, the old folder is back unchanged and the row is REASON_IO_ERROR, and no `.<name>.partial` or `.<name>.old` remains (spec AC4).",
+        "AC-C5: recovery: `.<name>.old` with `<name>` missing is restored and skipped without overwrite; with both present `.<name>.old` is deleted (spec AC5).",
+        "AC-C6: with overwrite=True, every plan refused through a patched unreadable read, and separately a patient with no plan folders, each keep the existing folder byte-identical, keep their refusal/skip rows, leave no hidden leftovers, and are counted as kept in the summary log (spec AC6).",
+        "AC-C7: with overwrite=True, two input folders whose names differ only in case: the second is refused with REASON_NAME_CLAIMED and the first's output is untouched (spec AC7).",
+        "AC-C8: an output folder with no matching input patient is untouched by an overwrite run (spec AC8).",
+        "AC-C9: summary log reports replaced and kept counts; no captured log line contains the synthetic patient name or tmp_path, including in the AC-C4 failure (spec AC10).",
+        "AC-C10: full suite green and ruff clean."
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "preprocess: overwrite keyword, helper, same-run casefold guard",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_preprocess.py with the existing small-grid synthetic converted trees (STEPS_SMALL-style steps; never the 701x701x433 default grid). preprocess() gains keyword-only overwrite=False after steps. Recovery at today's exists-check in preprocess_patient; publish replaces `partial.rename(target)` (success = any row with outcome preprocessed). The REASON_NO_CASES early return with an existing target under overwrite counts as kept. Under overwrite only, a casefolded same-run guard with a fixed REASON_NAME_CLAIMED constant in preprocess.py. Summary log adds replaced and kept counts. Signatures: `def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, overwrite=False)`; `preprocess_patient(folder, out_root, steps, overwrite=False, claimed=None)` returns `(rows, status)`; preprocess() keeps calling it positionally so the wrapper at tests/test_preprocess.py:966-970 keeps working (update it only if its return handling needs the tuple). Status counting: 'kept' only when overwrite=True and `<name>` existed: organize only for REASON_NO_SOP_UID and REASON_SPLIT_SERIES (read-only exists check); convert/preprocess when no row of the patient succeeded, including the REASON_NO_PLANS / REASON_NO_CASES early returns; never for REASON_NAME_CLAIMED, REASON_MIXED_IDS, REASON_NO_ID, REASON_NO_DICOM or REASON_IO_ERROR. The stage loop counts statuses; a patient that raises adds nothing. Summary line: append `; %d replaced, %d kept` to the end of the stage's existing first summary log line, always printed (0/0 without overwrite); update every existing exact assertion on that line. The exact preprocess summary assertion is in tests/test_preprocess.py (around line 1340). Same-run guard: when overwrite=True, the first step of the per-patient function is: if `folder.name.casefold()` is in `claimed`, return the patient row `(folder.name, '', OUTCOME_REFUSED, REASON_NAME_CLAIMED)` with status None; otherwise add it. Recovery and the exists check come after. When overwrite=False, `claimed` is never read or added to. Equality with a fresh run: the patient folder's relative file list equals a fresh-root run's, the marker is absent, and every file's mtime is at or after the overwrite run's start (set the stale folder's files to a past mtime with os.utime first), so a merge of old and new output fails. NIfTI byte-stability across runs is not assumed. AC-x3 failure injection: raise OSError inside the build (e.g. patch the copy/writer the stage uses); the row is REASON_IO_ERROR and the run continues. Do not inject a non-OSError (convert/preprocess record it as REASON_INTERNAL and abort the run).",
+      "criteria": [
+        "AC-P1: without overwrite, an existing patient folder is skipped with REASON_EXISTS and is byte-identical (spec AC1).",
+        "AC-P2: with overwrite=True, a stale preprocessed patient folder ends equal to a fresh run's output (same relative file list as a fresh-root run and every file rewritten by this run): marker gone, expected files present, no hidden leftovers (spec AC2).",
+        "AC-P3: with overwrite=True and a patched failure inside the build, the old folder is unchanged with no hidden leftovers (spec AC3).",
+        "AC-P4: with overwrite=True and the partial-into-place rename failing, the old folder is back unchanged and the row is REASON_IO_ERROR, and no `.<name>.partial` or `.<name>.old` remains (spec AC4).",
+        "AC-P5: recovery: `.<name>.old` with `<name>` missing is restored and skipped without overwrite; with both present `.<name>.old` is deleted (spec AC5).",
+        "AC-P6: with overwrite=True, a patient whose every case is refused, and separately a patient with no cases, each keep the existing folder byte-identical, keep their rows, leave no hidden leftovers, and are counted as kept (spec AC6).",
+        "AC-P7: with overwrite=True, two input folders whose names differ only in case: the second is refused with REASON_NAME_CLAIMED and the first's output is untouched (spec AC7).",
+        "AC-P8: an output folder with no matching input patient is untouched by an overwrite run (spec AC8).",
+        "AC-P9: summary log reports replaced and kept counts; no captured log line contains the synthetic patient name or tmp_path, including in the AC-P4 failure (spec AC10).",
+        "AC-P10: full suite green and ruff clean."
+      ]
+    },
+    {
+      "id": "task-05",
+      "title": "CLI --overwrite flag and README",
+      "depends_on": [
+        "task-02",
+        "task-03",
+        "task-04"
+      ],
+      "files": [
+        "src/rt_dataprep/__main__.py",
+        "tests/test_cli.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_cli.py": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "TDD in tests/test_cli.py. __main__ always passes overwrite=args.overwrite to organize, convert and preprocess. Update every existing seam that replaces a stage function so it accepts the keyword: the PRE_RUN lambda (`lambda converted, out, steps, **kw: real(converted, out, dataclasses.replace(...), **kw)`) and the `lambda *args:` stubs (become `lambda *args, **kwargs:`); existing assertions on positional args stay. Add in-process cases with monkeypatched stage functions asserting the keyword per command, and that `split --overwrite` is a usage error. README per spec AC12. Also update the exact kwargs assertion at tests/test_cli.py:396 to `{'workers': workers, 'overwrite': False}`.",
+      "criteria": [
+        "AC-L1: `organize`, `convert` and `preprocess` each accept `--overwrite`; the monkeypatched stage function receives overwrite=True with the flag and overwrite=False without it.",
+        "AC-L2: `split ... --overwrite` exits with an argparse usage error (exit 2); `manifest` has no --overwrite option.",
+        "AC-L3: each of the three commands' --help lists --overwrite.",
+        "AC-L4: all existing tests/test_cli.py tests pass with the updated seams (PRE_RUN forwards the keyword).",
+        "AC-L5: README documents --overwrite per spec AC12: replace only once the new output holds a successful case, otherwise kept; recovery of `.<name>.old` on the next run, including that an organize patient refused before the claimed check never recovers; the same-run guard; downstream trees, manifest.csv and splits.json must be regenerated; the 'Review outputs before deleting or replacing any prior result' line updated to fit the flag; the commands table lists --overwrite for the three commands.",
+        "AC-L6: full suite green and ruff clean."
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02",
+      "task-03",
+      "task-04"
+    ],
+    [
+      "task-05"
+    ]
+  ],
+  "Deferred": [
+    "Windows: rmtree fails on read-only files (organize copies keep source read-only bits), so `.<name>.old` can persist and later swaps fail as REASON_IO_ERROR. File as a hardening issue.",
+    "--overwrite for manifest or split (manifest already rewrites; split's refusal is deliberate).",
+    "Selecting a subset of patients to overwrite (use an input root holding only those patients).",
+    "Detecting stale downstream trees automatically."
+  ]
+}
