@@ -125,7 +125,8 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
             done[i] = _failure_row(folder, REASON_IO_ERROR)
             log.warning('organize: %s', REASON_IO_ERROR)
             return None
-        if not overwrite and os.path.lexists(target):  # lexists, as publish: a dangling link is an existing target
+        # cases None: task A saw the target and did not group; recover never removes a target, so it is still a skip
+        if cases is None or not overwrite and os.path.lexists(target):  # lexists, as publish: a dangling link is an existing target
             finish(i, PatientRow(name, 0, 0, unreadable, OUTCOME_SKIPPED, REASON_EXISTS), read_s, walked)
             return None
         held[i] = (read_s, walked, PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED))
@@ -134,7 +135,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
     started = time.monotonic()
     try:
         folders = sorted(p for p in src_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # .X.partial too
-        pool.run(workers, [pool.Task(_worker, (read_fn, folder, exclude_models)) for folder in folders], handle)
+        pool.run(workers, [pool.Task(_worker, (read_fn, folder, exclude_models, None if overwrite else out_root)) for folder in folders], handle)
     finally:  # Ctrl-C too: the report lists what was done
         rows = [done[i] for i in sorted(done)]
         write_report(out_root, REPORT_NAME, ['patient', 'plan_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'],
@@ -170,9 +171,9 @@ def _worker(fn, folder, *args):
         return pool.Stop((None, _failure_row(folder, REASON_INTERNAL)))
 
 
-def _read_patient(folder, exclude_models):
+def _read_patient(folder, exclude_models, skip_root=None):
     """
-    Task A: (sanitized name, refusal, per-plan path lists, misc paths, unreadable count, files walked, reading seconds). The refusal is
+    Task A, skip_root the out_root without --overwrite: (sanitized name, refusal, per-plan path lists (None: the output exists, not grouped), misc paths, unreadable count, files walked, reading seconds). The refusal is
     None or (row, whether its status may be 'kept'); the parent decides that and the claim. Paths only, no datasets. A raise (OSError) adds none.
     """
     started = time.monotonic()
@@ -202,6 +203,8 @@ def _read_patient(folder, exclude_models):
     extra = [(path, ds) for path, ds in blank if pair(ds) not in present]
     if series_of(extra) & series_of(headers):  # a series split between blank and real ids would be placed short
         return refused(REASON_SPLIT_SERIES)
+    if skip_root is not None and os.path.lexists(skip_root / name):  # #180: a patient the parent will skip is not grouped
+        return name, None, None, [], unreadable, walked, reading
     cases, misc = _group(headers, exclude_models)
     misc += [path for path, _ in blank] + bad
     return name, None, cases, misc, unreadable, walked, reading
