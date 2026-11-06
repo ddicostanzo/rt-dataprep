@@ -1,6 +1,7 @@
 """The scheduler: one code path for N=1 (inline) and N>1 (spawned processes). Every consumer runs in a daemon thread under a timeout."""
 import logging
 import os
+import signal
 import threading
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -183,6 +184,42 @@ def test_keyboard_interrupt_in_the_parent_wait(workers, tmp_path, monkeypatch, c
     assert ({1} if workers == 2 else set()) == {i for i, _ in delivered}
     seen = capfd.readouterr()
     assert w.SECRET not in seen.out + seen.err
+
+
+@pytest.mark.skipif(not (hasattr(signal, 'pthread_sigmask') and hasattr(signal, 'sigtimedwait')), reason='no signal masks to poll')
+def test_workers_spawn_with_ctrl_c_blocked_but_a_running_task_gets_it_and_the_parent_mask_is_restored():
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    delivered, error = run_guarded(2, [Task(w.sigint_state)])
+    assert error is None and delivered == [(0, ([], True))]  # _init_worker unblocked it (#177)
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == before
+
+
+@pytest.mark.skipif(not (hasattr(signal, 'pthread_sigmask') and hasattr(signal, 'sigtimedwait')), reason='no signal masks to poll')
+def test_a_ctrl_c_to_the_parent_during_handle_starts_no_new_patient(tmp_path):
+    def handle(index, result):
+        if index == 0:
+            signal.pthread_kill(threading.get_ident(), signal.SIGINT)  # this (main) thread alone: pending until the next pick
+
+    delivered = []
+    tasks = [Task(w.echo, (0,)), Task(w.sleep_then, (1, 0.5)), Task(w.record, ('2', str(tmp_path), 0.0))]
+    with pytest.raises(KeyboardInterrupt):  # on the main thread, as the CLI runs it: the mask is per thread
+        pool.run(2, tasks, lambda i, r: (delivered.append(i), handle(i, r))[1])
+    assert delivered == [0, 1]  # the running task still ends and is delivered
+    assert 2 not in started(tmp_path)
+
+
+@pytest.mark.skipif(not (hasattr(signal, 'pthread_sigmask') and hasattr(signal, 'sigtimedwait')), reason='no signal masks to poll')
+def test_a_task_failing_after_a_parent_ctrl_c_with_every_slot_busy_is_skipped_not_failed():
+    main = threading.get_ident()
+    timer = threading.Timer(0.2, signal.pthread_kill, (main, signal.SIGINT))  # parent only, while both slots run
+    delivered = []
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):  # on the main thread: the mask is per thread
+            pool.run(2, [Task(w.sleep_then, (0, 1.0)), Task(w.fail, (1, 0.5))], lambda i, r: delivered.append((i, r)))
+    finally:
+        timer.cancel()
+    assert delivered == [(0, 0)]  # not (1, Failed('RuntimeError')): an interrupted run writes no error row (#177)
 
 
 def test_a_worker_info_line_reaches_stderr(capfd, caplog):
