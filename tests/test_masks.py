@@ -534,7 +534,7 @@ def test_an_roi_whose_every_contour_crosses_ct_slices_is_written_as_line_text(tm
 def test_an_roi_mixing_axial_and_crossing_contours_still_refuses(tmp_path):
     axial = np.array([[-1.0, 8.0, 9.0], [3.0, 8.0, 9.0], [3.0, 14.0, 9.0], [-1.0, 14.0, 9.0]])
     rois = [dict(number=1, name='Odd', kind='line', lines=[axial, SPANNING], geometry='CLOSED_PLANAR')]
-    assert refused(tmp_path, make_plan(tmp_path, rois)) in (masks.REASON_MASK_SLICES, masks.REASON_MASK_EMPTY)
+    assert refused(tmp_path, make_plan(tmp_path, rois)) == masks.REASON_MASK_SLICES
 
 
 def test_an_axial_contour_halfway_between_slices_stays_a_mask_and_refuses(tmp_path):
