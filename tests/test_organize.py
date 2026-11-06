@@ -907,6 +907,42 @@ def test_o7_a_later_same_name_folder_is_refused_and_never_touches_the_first_outp
     assert hidden(out) == [] and counts(caplog) == (1, 0)  # p3 was refused after p1 claimed the name: not kept
 
 
+def _drop_sop_uid(folder):
+    path = next(folder.glob('ct*.dcm'))
+    ds = pydicom.dcmread(path)
+    del ds.SOPInstanceUID  # refused before the claim: REASON_NO_SOP_UID
+    ds.save_as(path)
+
+
+def test_t2a_two_refused_folders_for_one_output_name_count_one_kept(tree, caplog):
+    src, out = tree
+    name = 'SYNTHETIC_twin'
+    planning_study(src / 'p1', pid=name, date=EARLY)
+    planning_study(src / 'p2', pid=name, date=LATE)
+    _drop_sop_uid(src / 'p1')
+    _drop_sop_uid(src / 'p2')
+    (out / name).mkdir(parents=True)
+    caplog.set_level(logging.INFO)
+    report = organize(src, out, overwrite=True)
+    assert [r.reason for r in report.rows] == [org.REASON_NO_SOP_UID, org.REASON_NO_SOP_UID]
+    assert counts(caplog) == (0, 1)
+
+
+def test_t2b_a_refused_folder_then_an_organized_one_for_one_name_count_one_replaced(tree, caplog):
+    src, out = tree
+    name = 'SYNTHETIC_twin'
+    planning_study(src / 'p1', pid=name, date=EARLY)
+    planning_study(src / 'p2', pid=name, date=LATE)
+    _drop_sop_uid(src / 'p1')  # sorts first: kept, then p2 replaces the same folder
+    (out / name).mkdir(parents=True)
+    (out / name / 'marker.txt').write_text('stale')
+    caplog.set_level(logging.INFO)
+    report = organize(src, out, overwrite=True)
+    assert [r.outcome for r in report.rows] == [org.OUTCOME_REFUSED, org.OUTCOME_ORGANIZED]
+    assert not (out / name / 'marker.txt').exists()
+    assert counts(caplog) == (1, 0)
+
+
 def test_o8_an_output_folder_with_no_input_patient_is_untouched(stale):
     src, out, fresh = stale
     (out / 'SYNTHETIC_other').mkdir()

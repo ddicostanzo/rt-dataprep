@@ -69,17 +69,19 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
     out_root.mkdir(parents=True, exist_ok=True)
     read_fn, copy_fn = _read_fn or _read_patient, _copy_fn or _copy_patient
     claimed = set()  # casefolded output names taken in this run: a case-insensitive filesystem would merge them
-    done, held = {}, {}  # folder index -> its row; index -> (reading s, files walked, row) of a patient whose copy is under way
-    replaced = kept = files = 0
+    done, held = {}, {}  # folder index -> its row; index -> (reading s, files walked, row, output name) of a patient whose copy is under way
+    statuses = {}  # casefolded output name -> 'replaced'/'kept': one count per output folder, whatever number of source folders map to it
+    files = 0
     reading = copying = 0.0  # seconds; a patient refused by an error adds none
     aborted = False
     folders = []
 
-    def finish(i, row, read_s, walked, copy_s=0.0, status=None):
-        nonlocal reading, copying, files, replaced, kept
+    def finish(i, row, read_s, walked, name, copy_s=0.0, status=None):
+        nonlocal reading, copying, files
         done[i] = row
         reading, copying, files = reading + read_s, copying + copy_s, files + walked
-        replaced, kept = replaced + (status == 'replaced'), kept + (status == 'kept')
+        if status is not None:
+            statuses[name.casefold()] = status  # a later status for the same name overwrites an earlier one
 
     def handle(i, result):
         nonlocal aborted
@@ -99,8 +101,8 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
                 return pool.ABORT
             return None
         if i in held:  # task B finished: the copy is published
-            read_s, walked, row = held.pop(i)
-            finish(i, row, read_s, walked, *result)
+            read_s, walked, row, name = held.pop(i)
+            finish(i, row, read_s, walked, name, *result)
             return None
         if aborted:  # a read delivered after the abort: that patient is not started (no claim, recover, copy or row)
             return None
@@ -109,10 +111,10 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
             row, reads_kept = refusal
             # read-only: a refusal before the claim never recovers or touches the root; it only reports an old folder kept
             status = 'kept' if reads_kept and overwrite and name.casefold() not in claimed and os.path.lexists(out_root / name) else None
-            finish(i, row, read_s, walked, status=status)
+            finish(i, row, read_s, walked, name, status=status)
             return None
         if name.casefold() in claimed:  # two folders, one output name: refuse, never merge
-            finish(i, PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NAME_CLAIMED), read_s, walked)
+            finish(i, PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NAME_CLAIMED), read_s, walked, name)
             return None
         claimed.add(name.casefold())
         target = out_root / name
@@ -127,9 +129,9 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
             return None
         # cases None: task A saw the target and did not group; recover never removes a target, so it is still a skip
         if cases is None or (not overwrite and os.path.lexists(target)):  # lexists, as publish: a dangling link is an existing target
-            finish(i, PatientRow(name, 0, 0, unreadable, OUTCOME_SKIPPED, REASON_EXISTS), read_s, walked)
+            finish(i, PatientRow(name, 0, 0, unreadable, OUTCOME_SKIPPED, REASON_EXISTS), read_s, walked, name)
             return None
-        held[i] = (read_s, walked, PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED))
+        held[i] = (read_s, walked, PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED), name)
         return pool.Task(_worker, (copy_fn, folder, out_root, name, cases, misc, overwrite))
 
     started = time.monotonic()
@@ -142,7 +144,8 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
                      ([r.patient, r.plans, r.misc, r.unreadable, r.outcome, r.reason] for r in rows))
     log.info('organize: %d patient folders, %d organized, %d plan folders, %d misc files, %d unreadable files; %d replaced, %d kept',
              len(rows), sum(r.outcome == OUTCOME_ORGANIZED for r in rows), sum(r.plans for r in rows),
-             sum(r.misc for r in rows), sum(r.unreadable for r in rows), replaced, kept)
+             sum(r.misc for r in rows), sum(r.unreadable for r in rows),
+             *(sum(v == status for v in statuses.values()) for status in ('replaced', 'kept')))
     log.info('organize: %.1f s total, %.1f s reading (summed over patients), %.1f s copying (summed over patients), %d files, workers %d',
              time.monotonic() - started, reading, copying, files, workers)
     if aborted:  # raised here: nothing of the original is chained
