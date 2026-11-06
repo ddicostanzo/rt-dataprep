@@ -84,7 +84,8 @@ the run as today: `_convert_worker` turns it into the patient's REASON_INTERNAL 
 ### Folder checks
 
 A helper in `dicom_io` stats an entry with `path.stat()` (so a test can patch `Path.stat` path-selectively) and returns Python 3.13's `is_file()` / `is_dir()` result on any version: False for
-ENOENT, ENOTDIR, EBADF and ELOOP, and for a ValueError (an embedded NUL), the type check otherwise; any other OSError (EACCES, EIO, ...) is raised. Convert's
+ENOENT, ENOTDIR, EBADF and ELOOP, the Windows codes 3.13 ignores (21, 123, 1921), and for a ValueError (an embedded
+NUL), the type check otherwise; any other OSError (EACCES, EIO, ...) is raised. Convert's
 folder checks use it: the patient-folder listing of the organized root, the plan-folder listing of a patient, the
 `misc_files/` check, the file listing in `read_folder_headers`, and the `misc_files/` listing for salvage.
 
