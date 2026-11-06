@@ -1,0 +1,80 @@
+"""Module-level worker functions for the scheduler tests: picklable and importable in a spawned child (tests/ is on pythonpath)."""
+import logging
+import os
+import signal
+import time
+from pathlib import Path
+
+MARKER = 'original'  # a test patches this in the parent; a spawned worker re-imports the module and sees the original
+RAISE_NAME = 'boom'  # the patient folder name the per-stage raisers below fail on
+SECRET = 'SYNTHETIC_secret_message'  # what a raising worker puts in its exception: it must never appear anywhere
+
+
+def echo(value):
+    return value
+
+
+def pid():
+    return os.getpid()
+
+
+def marker():
+    return MARKER
+
+
+def sleep_then(value, seconds):
+    time.sleep(seconds)
+    return value
+
+
+def record(name, directory, seconds):
+    """Write <name>.start and <name>.end (monotonic clock, shared by all processes) around a sleep."""
+    Path(directory, f'{name}.start').write_text(repr(time.monotonic()))
+    time.sleep(seconds)
+    Path(directory, f'{name}.end').write_text(repr(time.monotonic()))
+    return name
+
+
+def fail(value, seconds=0.0):
+    time.sleep(seconds)
+    raise RuntimeError(SECRET)
+
+
+def interrupt(value):
+    raise KeyboardInterrupt
+
+
+def die(value):
+    os.kill(os.getpid(), signal.SIGKILL)  # kills the worker process: BrokenProcessPool in the parent (never call it inline)
+
+
+def log_info(value):
+    logging.getLogger('pool_workers').info('SYNTHETIC worker line %s', value)
+    return value
+
+
+def _raise_for(folder):
+    if Path(folder).name == RAISE_NAME:
+        raise RuntimeError(SECRET)
+
+
+# The per-stage raisers stand in for the real per-patient call (internal seam): they raise for the patient folder named
+# RAISE_NAME and otherwise return a minimal result of the stage's shape.
+def convert_patient(folder, *args, **kwargs):
+    _raise_for(folder)
+    return [], 0.0, 0, None  # rows, reading seconds, files, status
+
+
+def preprocess_patient(folder, *args, **kwargs):
+    _raise_for(folder)
+    return [], None  # rows, status
+
+
+def organize_read(folder, *args, **kwargs):
+    _raise_for(folder)
+    return Path(folder).name, [], [], 0, 0, 0.0  # name, per-plan paths, misc paths, unreadable, walked, reading seconds
+
+
+def organize_copy(folder, *args, **kwargs):
+    _raise_for(folder)
+    return 0.0, None  # copy seconds, status
