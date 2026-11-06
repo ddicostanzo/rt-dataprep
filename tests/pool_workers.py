@@ -48,6 +48,11 @@ def die(value):
     os.kill(os.getpid(), signal.SIGKILL)  # kills the worker process: BrokenProcessPool in the parent (never call it inline)
 
 
+def die_after_marker(value, path):
+    Path(path).touch()
+    die(value)
+
+
 def after_file(value, path, seconds):
     """Wait (at most 30 s) for the parent to create path, then sleep."""
     deadline = time.monotonic() + 30
