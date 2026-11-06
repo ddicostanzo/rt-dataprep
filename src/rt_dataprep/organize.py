@@ -101,6 +101,8 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
             read_s, walked, row = held.pop(i)
             finish(i, row, read_s, walked, *result)
             return None
+        if aborted:  # a read delivered after the abort: that patient is not started (no claim, recover, copy or row)
+            return None
         name, refusal, cases, misc, unreadable, walked, read_s = result
         if refusal is not None:
             row, reads_kept = refusal

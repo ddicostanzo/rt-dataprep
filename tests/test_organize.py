@@ -964,7 +964,8 @@ def test_an_unexpected_error_in_the_read_task_aborts_a_two_process_run_with_the_
     error = call_guarded(lambda: organize(src, out, workers=2, _read_fn=pool_workers.organize_read))
     assert isinstance(error, org.OrganizeAborted) and str(error) == org.REASON_INTERNAL
     got = [(r['patient'], r['outcome'], r['reason']) for r in rows(out)]
-    assert got.count(('boom', org.OUTCOME_REFUSED, org.REASON_INTERNAL)) == 1  # which later patients had started is timing; N=1 below
+    assert got.count(('boom', org.OUTCOME_REFUSED, org.REASON_INTERNAL)) == 1
+    assert len(got) <= 2  # 'a' (before it) at most: a later read is delivered after the abort and adds no row or copy
     err = capfd.readouterr().err
     assert pool_workers.SECRET not in err and 'RuntimeError' in err  # the worker logged the type and site, never the message
 
