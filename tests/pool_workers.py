@@ -48,6 +48,15 @@ def die(value):
     os.kill(os.getpid(), signal.SIGKILL)  # kills the worker process: BrokenProcessPool in the parent (never call it inline)
 
 
+def after_file(value, path, seconds):
+    """Wait (at most 30 s) for the parent to create path, then sleep."""
+    deadline = time.monotonic() + 30
+    while not Path(path).exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(seconds)
+    return value
+
+
 def log_info(value):
     logging.getLogger('pool_workers').info('SYNTHETIC worker line %s', value)
     return value
