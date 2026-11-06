@@ -249,8 +249,7 @@ def _convert_patient(folder, out_root, exclude_models, overwrite):
         return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_NO_PLANS)], reading, files, 'kept' if exists else None
     # Built under a hidden name and renamed at the end: a run that dies part-way leaves no folder that a later run would
     # skip as done. The flag, not an except block, decides the cleanup, so any failure (and Ctrl-C) removes the partial.
-    partial = out_root / f'.{folder.name}.partial'
-    shutil.rmtree(partial, ignore_errors=True)
+    partial = out_root / f'.{folder.name}.partial'  # recover, above, already removed a leftover
     rows, done, status = [], False, None
     try:
         partial.mkdir()

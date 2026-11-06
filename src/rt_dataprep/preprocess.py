@@ -455,8 +455,7 @@ def preprocess_patient(folder, out_root, steps, overwrite=False):
         return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_NO_CASES)], 'kept' if exists else None
     # Built under a hidden name and renamed at the end, as convert does: a run that dies part-way leaves no folder that a
     # later run would skip as done. The flag, not an except block, decides the cleanup, so any failure (and Ctrl-C) removes it.
-    partial = out_root / f'.{folder.name}.partial'
-    shutil.rmtree(partial, ignore_errors=True)
+    partial = out_root / f'.{folder.name}.partial'  # recover, above, already removed a leftover
     rows, done, status = [], False, None
     try:
         partial.mkdir()

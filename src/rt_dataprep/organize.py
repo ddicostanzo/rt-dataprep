@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 REPORT_NAME = 'organize_report.csv'
 OUTCOME_ORGANIZED, OUTCOME_SKIPPED, OUTCOME_REFUSED = 'organized', 'skipped', 'refused'
 REASON_EXISTS = 'output folder already exists'
-REASON_NAME_CLAIMED = 'output folder name already used by an earlier patient folder in this run'
+REASON_NAME_CLAIMED = 'another folder of this run already maps to this output name (case-insensitive)'  # same text as convert's and preprocess's
 REASON_MIXED_IDS = 'source folder holds more than one PatientID'
 REASON_NO_DICOM = 'source folder holds no readable DICOM file'
 REASON_NO_ID = 'source folder holds no file with a PatientID'
@@ -219,8 +219,7 @@ def _copy_patient(folder, out_root, name, cases, misc, overwrite):
     # Build under a hidden name and rename at the end: a run that dies part-way leaves no folder that a later run
     # would skip as already done.
     partial = out_root / f'.{name}.partial'
-    copy_started = time.monotonic()
-    dicom_io.remove_tree(partial)
+    copy_started = time.monotonic()  # the parent's recover already removed a leftover partial
     try:
         for n, paths in enumerate(cases, start=1):
             _copy_all(paths, partial / f'plan_{n}')
