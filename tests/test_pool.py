@@ -277,3 +277,17 @@ def test_a_stop_result_halts_submission_when_it_completes_not_when_its_turn_come
 def test_a_system_exit_keeps_its_sanitized_code_and_never_its_message(workers, code, expected):
     delivered, error = run_guarded(workers, [Task(w.exit_with, (code,))])
     assert error is None and delivered == [(0, Failed('SystemExit', expected))]
+
+
+@BOTH
+def test_a_raising_handle_still_delivers_the_running_tasks_then_raises(workers):
+    # #178: a stage handle that raised lost the rows of patients still running (they had published, so a rerun skipped them)
+    def handle(index, result):
+        if index == 0:
+            raise ValueError('SYNTHETIC_refusal')
+        return Task(w.echo, ('follow-up',)) if index == 1 else None  # returned after the error: dropped, nothing new starts
+
+    tasks = [Task(w.echo, ('fast 0',)), Task(w.sleep_then, ('slow 1', 1.0))] + [Task(w.echo, (f'later {i}',)) for i in range(2, 5)]
+    delivered, error = run_guarded(workers, tasks, handle)
+    assert isinstance(error, ValueError) and str(error) == 'SYNTHETIC_refusal'
+    assert delivered == [(0, 'fast 0'), (1, 'slow 1')][:workers]  # N=1: patient 1 never started
