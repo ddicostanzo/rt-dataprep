@@ -84,6 +84,8 @@ def run(workers, tasks, handle):
     follow-up of an index already started still runs (that patient was under way). KeyboardInterrupt, from a task or the waiting parent, stops submission the same way; a task that returns still
     reaches handle, one that raises gets no call, no follow-up runs, and the interrupt is raised once the running tasks end.
     Idle workers ignore Ctrl-C; a running task gets it as KeyboardInterrupt.
+    An exception from handle stops submission like ABORT and drops the follow-ups handle returns after it; running tasks
+    still finish and reach handle (their output is published, so their rows must be kept), then the first one is raised.
     """
     queue = deque((i, task, True) for i, task in enumerate(tasks))  # (index, task, is the first stage)
     count = len(queue)
@@ -91,13 +93,18 @@ def run(workers, tasks, handle):
     started, ready = set(), {}  # first-stage indexes submitted; first-stage results waiting for their turn
     next_index = 0
     stop = interrupted = False
+    raised = None  # the first exception from handle (SystemExit too): raised once the running tasks are delivered (#178)
 
     def deliver(index, result):
-        nonlocal stop
-        follow = handle(index, result)
+        nonlocal stop, raised
+        try:
+            follow = handle(index, result)
+        except (Exception, SystemExit) as exc:
+            stop, raised = True, exc if raised is None else raised
+            return
         if follow is ABORT:
             stop = True
-        elif follow is not None and not interrupted:
+        elif follow is not None and not interrupted and raised is None:
             queue.appendleft((index, follow, False))
 
     context = (contextlib.nullcontext(_Inline()) if workers == 1 else
@@ -150,3 +157,5 @@ def run(workers, tasks, handle):
                 next_index += 1
     if interrupted:
         raise KeyboardInterrupt
+    if raised is not None:
+        raise raised
