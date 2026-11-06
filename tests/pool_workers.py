@@ -72,7 +72,7 @@ def preprocess_patient(folder, *args, **kwargs):
 
 def organize_read(folder, *args, **kwargs):
     _raise_for(folder)
-    return Path(folder).name, [], [], 0, 0, 0.0  # name, per-plan paths, misc paths, unreadable, walked, reading seconds
+    return Path(folder).name, None, [], [], 0, 0, 0.0  # name, refusal, per-plan paths, misc paths, unreadable, walked, reading seconds
 
 
 def organize_copy(folder, *args, **kwargs):

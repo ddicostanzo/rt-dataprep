@@ -7,12 +7,13 @@ PatientID, folder name, date or path; organize_report.csv in the output root is 
 import logging
 import os
 import shutil
+import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from rt_dataprep import dicom_io
+from rt_dataprep import convert, dicom_io, pool
 from rt_dataprep.dicom_io import sanitize_path_component, write_report
 
 log = logging.getLogger(__name__)
@@ -29,8 +30,13 @@ REASON_OUTSIDE_ROOT = 'output folder resolves outside the output root'
 REASON_IO_ERROR = 'file system error while reading or copying; nothing kept for this patient'
 REASON_OUTSIDE_SRC = 'output root is the source root or inside it'
 REASON_NO_SOP_UID = 'a DICOM file has no or an empty SOPInstanceUID'
+REASON_INTERNAL = 'an unexpected error stopped the organizing; the report lists what was finished'
 _CT_DATES = (('SeriesDate', 'SeriesTime'), ('StudyDate', 'StudyTime'), ('AcquisitionDate', 'AcquisitionTime'),
              ('ContentDate', 'ContentTime'))  # fx order: the first non-blank date wins, with its own time as the tiebreak (#68)
+
+
+class OrganizeAborted(Exception):
+    """A patient hit an unexpected error: the report is written, the run stops. str() is exactly REASON_INTERNAL."""
 
 
 @dataclass
@@ -48,40 +54,123 @@ class OrganizeReport:
     rows: list
 
 
-def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overwrite=False):
+def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overwrite=False, _read_fn=None, _copy_fn=None):
+    """
+    Sort every patient folder under src_root into out_root and write organize_report.csv.
+
+    workers: patient processes, one patient per process; the output is the same for any N.
+    _read_fn, _copy_fn: internal test seams, replace the per-patient read (task A) and copy (task B) only (module-level, picklable).
+    """
     src_root, out_root = Path(src_root), Path(out_root)
     if out_root.resolve().is_relative_to(src_root.resolve()):  # before any mkdir: it would be walked as a patient folder
         raise ValueError(REASON_OUTSIDE_SRC)
     if overwrite and src_root.resolve().is_relative_to(out_root.resolve()):  # a replaced patient folder could hold the source
         raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
     out_root.mkdir(parents=True, exist_ok=True)
+    read_fn, copy_fn = _read_fn or _read_patient, _copy_fn or _copy_patient
     claimed = set()  # casefolded output names taken in this run: a case-insensitive filesystem would merge them
-    rows, replaced, kept = [], 0, 0
-    reading = copying = files = 0  # seconds, seconds, files walked; a refused-by-OSError patient adds none
+    done, held = {}, {}  # folder index -> its row; index -> (reading s, files walked, row) of a patient whose copy is under way
+    replaced = kept = files = 0
+    reading = copying = 0.0  # seconds; a patient refused by an error adds none
+    aborted = False
+    folders = []
+
+    def finish(i, row, read_s, walked, copy_s=0.0, status=None):
+        nonlocal reading, copying, files, replaced, kept
+        done[i] = row
+        reading, copying, files = reading + read_s, copying + copy_s, files + walked
+        replaced, kept = replaced + (status == 'replaced'), kept + (status == 'kept')
+
+    def handle(i, result):
+        nonlocal aborted
+        folder = folders[i]
+        if isinstance(result, pool.Failed):  # escaped the worker wrapper (a broken pool...): only the type name is known
+            if result.type_name == 'SystemExit':  # as before: exits the run with no row; the report is still written
+                raise SystemExit
+            log.error('organize: %s: %s', REASON_INTERNAL, result.type_name)
+            result = (None, _failure_row(folder, REASON_INTERNAL))
+        result, failure = result
+        if failure is not None:  # an OSError (go on) or an unexpected error (stop), already logged by the worker
+            held.pop(i, None)
+            done[i] = failure
+            if failure.reason == REASON_INTERNAL:
+                aborted = True
+                return pool.ABORT
+            return None
+        if i in held:  # task B finished: the copy is published
+            read_s, walked, row = held.pop(i)
+            finish(i, row, read_s, walked, *result)
+            return None
+        name, refusal, cases, misc, unreadable, walked, read_s = result
+        if refusal is not None:
+            row, reads_kept = refusal
+            # read-only: a refusal before the claim never recovers or touches the root; it only reports an old folder kept
+            status = 'kept' if reads_kept and overwrite and name.casefold() not in claimed and os.path.lexists(out_root / name) else None
+            finish(i, row, read_s, walked, status=status)
+            return None
+        if name.casefold() in claimed:  # two folders, one output name: refuse, never merge
+            finish(i, PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NAME_CLAIMED), read_s, walked)
+            return None
+        claimed.add(name.casefold())
+        target = out_root / name
+        try:
+            if not target.resolve().is_relative_to(out_root.resolve()):
+                raise ValueError(REASON_OUTSIDE_ROOT)
+            dicom_io.recover(out_root, name)
+        except OSError:  # its message names a path, i.e. the patient: report a fixed reason and go on
+            done[i] = _failure_row(folder, REASON_IO_ERROR)
+            log.warning('organize: %s', REASON_IO_ERROR)
+            return None
+        if not overwrite and os.path.lexists(target):  # lexists, as publish: a dangling link is an existing target
+            finish(i, PatientRow(name, 0, 0, unreadable, OUTCOME_SKIPPED, REASON_EXISTS), read_s, walked)
+            return None
+        held[i] = (read_s, walked, PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED))
+        return pool.Task(_worker, (copy_fn, folder, out_root, name, cases, misc, overwrite))
+
     started = time.monotonic()
     try:
-        for folder in sorted(p for p in src_root.iterdir() if p.is_dir() and not p.name.startswith('.')):  # .X.partial too
-            try:
-                row, read_s, copy_s, walked, status = _organize_patient(folder, out_root, claimed, exclude_models, overwrite)
-                rows.append(row)
-                reading, copying, files = reading + read_s, copying + copy_s, files + walked
-                replaced, kept = replaced + (status == 'replaced'), kept + (status == 'kept')
-            except OSError:  # its message names a path, i.e. the patient: report a fixed reason and go on
-                rows.append(PatientRow(sanitize_path_component(folder.name), 0, 0, 0, OUTCOME_REFUSED, REASON_IO_ERROR))
-                log.warning('organize: %s', REASON_IO_ERROR)
+        folders = sorted(p for p in src_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # .X.partial too
+        pool.run(workers, [pool.Task(_worker, (read_fn, folder, exclude_models)) for folder in folders], handle)
     finally:  # Ctrl-C too: the report lists what was done
+        rows = [done[i] for i in sorted(done)]
         write_report(out_root, REPORT_NAME, ['patient', 'plan_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'],
                      ([r.patient, r.plans, r.misc, r.unreadable, r.outcome, r.reason] for r in rows))
     log.info('organize: %d patient folders, %d organized, %d plan folders, %d misc files, %d unreadable files; %d replaced, %d kept',
              len(rows), sum(r.outcome == OUTCOME_ORGANIZED for r in rows), sum(r.plans for r in rows),
              sum(r.misc for r in rows), sum(r.unreadable for r in rows), replaced, kept)
-    log.info('organize: %.1f s total, %.1f s reading, %.1f s copying, %d files, workers %d',
+    log.info('organize: %.1f s total, %.1f s reading (summed over patients), %.1f s copying (summed over patients), %d files, workers %d',
              time.monotonic() - started, reading, copying, files, workers)
+    if aborted:  # raised here: nothing of the original is chained
+        raise OrganizeAborted(REASON_INTERNAL)
     return OrganizeReport(rows)
 
 
-def _organize_patient(folder, out_root, claimed, exclude_models, overwrite):
-    """(row, reading seconds, copying seconds, files walked, status None/'new'/'replaced'/'kept'); a raise (OSError) adds none."""
+def _failure_row(folder, reason):
+    return PatientRow(sanitize_path_component(folder.name), 0, 0, 0, OUTCOME_REFUSED, reason)
+
+
+def _worker(fn, folder, *args):
+    """
+    One task in a worker (or inline): (fn(folder, *args), None). A failure becomes data here, as a traceback does not cross the
+    process boundary: an OSError is the patient's REASON_IO_ERROR row, any other Exception its REASON_INTERNAL row, with only the
+    type and the crash site logged (no message).
+    """
+    try:
+        return fn(folder, *args), None
+    except OSError:  # its message names a path, i.e. the patient: one fixed reason
+        log.warning('organize: %s', REASON_IO_ERROR)
+        return None, _failure_row(folder, REASON_IO_ERROR)
+    except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
+        module, line = convert.crash_site(sys.exc_info()[2])
+        log.error('organize: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
+        return None, _failure_row(folder, REASON_INTERNAL)
+
+
+def _read_patient(folder, exclude_models):
+    """
+    Task A: (sanitized name, refusal, per-plan path lists, misc paths, unreadable count, files walked, reading seconds). The refusal is
+    None or (row, whether its status may be 'kept'); the parent decides that and the claim. Paths only, no datasets. A raise (OSError) adds none.
+    """
     started = time.monotonic()
     paths = sorted(_walk(folder))
     with dicom_io._pydicom_quiet():  # the whole folder read: pydicom's warnings and log records quote values
@@ -89,44 +178,38 @@ def _organize_patient(folder, out_root, claimed, exclude_models, overwrite):
     headers = [(path, ds) for path, ds in results if ds is not None]
     bad = [path for path, ds in results if ds is None]  # has the preamble but the read fails; copied to misc_files (#13)
     unreadable = len(bad)
-    reading, walked = time.monotonic() - started, len(paths)  # `paths` is rebound by the copy loop below
-    done = lambda row, copy_s=0.0, status=None: (row, reading, copy_s, walked, status)  # noqa: E731
+    reading, walked = time.monotonic() - started, len(paths)
     # A file with a blank PatientID is the folder's but never placed in a plan: it is copied to misc_files (#12).
     blank = [(path, ds) for path, ds in headers if not str(ds.get('PatientID', '')).strip()]
     headers = [(path, ds) for path, ds in headers if str(ds.get('PatientID', '')).strip()]
     ids = {str(ds.get('PatientID', '')) for _, ds in headers}
     if len(ids) != 1:  # never pick one of several ids: that would file one patient's data under another
         reason = REASON_MIXED_IDS if ids else REASON_NO_ID if blank else REASON_NO_DICOM
-        return done(PatientRow(sanitize_path_component(folder.name), 0, 0, unreadable, OUTCOME_REFUSED, reason))
+        name = sanitize_path_component(folder.name)
+        return name, (PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, reason), False), [], [], unreadable, walked, reading
     name = sanitize_path_component(ids.pop())
-    # read-only: a refusal before the claimed check never recovers or touches the root; it only reports an old folder kept
-    kept = lambda: 'kept' if overwrite and name.casefold() not in claimed and os.path.lexists(out_root / name) else None  # noqa: E731
+    refused = lambda reason: (name, (PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, reason), True), [], [], unreadable, walked, reading)  # noqa: E731
     if any(not str(ds.get('SOPInstanceUID', '')).strip() for _, ds in headers):  # type 1; grouping and dedup key on it
-        return done(PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NO_SOP_UID), status=kept())
+        return refused(REASON_NO_SOP_UID)
     # A blank or whitespace UID is no series, and a blank-id copy of a slice already present takes nothing away (#71).
     series_of = lambda items: {u for _, ds in items if (u := str(ds.get('SeriesInstanceUID', ''))).strip()}  # noqa: E731
     pair = lambda ds: (str(ds.get('SOPInstanceUID', '')), str(ds.get('SeriesInstanceUID', '')))  # noqa: E731 (a SOP alone may collide, #81)
     present = {pair(ds) for _, ds in headers}
     extra = [(path, ds) for path, ds in blank if pair(ds) not in present]
     if series_of(extra) & series_of(headers):  # a series split between blank and real ids would be placed short
-        return done(PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_SPLIT_SERIES), status=kept())
-    if name.casefold() in claimed:  # two folders, one output name: refuse, never merge
-        return done(PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NAME_CLAIMED))
-    claimed.add(name.casefold())
-    target = out_root / name
-    if not target.resolve().is_relative_to(out_root.resolve()):
-        raise ValueError(REASON_OUTSIDE_ROOT)
-    dicom_io.recover(out_root, name)
-    if not overwrite and os.path.lexists(target):  # lexists, as publish: a dangling link is an existing target
-        return done(PatientRow(name, 0, 0, unreadable, OUTCOME_SKIPPED, REASON_EXISTS))
+        return refused(REASON_SPLIT_SERIES)
     cases, misc = _group(headers, exclude_models)
     misc += [path for path, _ in blank] + bad
+    return name, None, cases, misc, unreadable, walked, reading
+
+
+def _copy_patient(folder, out_root, name, cases, misc, overwrite):
+    """Task B: (copying seconds, status None/'new'/'replaced'/'kept'). `folder` only names the patient for the failure row."""
     # Build under a hidden name and rename at the end: a run that dies part-way leaves no folder that a later run
     # would skip as already done.
     partial = out_root / f'.{name}.partial'
     copy_started = time.monotonic()
     shutil.rmtree(partial, ignore_errors=True)
-    status = None
     try:
         for n, paths in enumerate(cases, start=1):
             _copy_all(paths, partial / f'plan_{n}')
@@ -137,7 +220,7 @@ def _organize_patient(folder, out_root, claimed, exclude_models, overwrite):
         # A second Ctrl-C during this rmtree leaves a partly deleted .partial: the source scan skips it and the next run removes it before copying.
         shutil.rmtree(partial, ignore_errors=True)
         raise
-    return done(PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED), time.monotonic() - copy_started, status)
+    return time.monotonic() - copy_started, status
 
 
 def _read_one(path):
