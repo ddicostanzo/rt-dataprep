@@ -1,7 +1,9 @@
 """preprocess: grid, crop/pad, rescale, names, CT pipeline, dose and mask resampling (task-01); the tree walk (task-02)."""
 import ast
+import builtins
 import csv
 import dataclasses
+import errno
 import inspect
 import logging
 import os
@@ -246,6 +248,119 @@ def test_names_newest_step_first_and_geometric_prefixes_only_for_dose_and_masks(
     assert pre.output_name('dose.nii.gz', rescale) == 'dose.nii.gz' and pre.output_name('ptv.nii.gz', rescale) == 'ptv.nii.gz'
     assert pre.output_name('dose.nii.gz', PreprocessSteps(harmonize_spacing=True)) == 'resample_dose.nii.gz'
     assert pre.output_name('planning_ct.nii.gz', PreprocessSteps(), ct=True) == 'planning_ct.nii.gz'
+
+
+def garbage_file(tmp_path):
+    bad = tmp_path / 'ct.nii.gz'
+    bad.write_bytes(b'not an image')
+    return bad
+
+
+def fail_python_open(monkeypatch, bad, error):
+    """Only preprocess's own open, and only for `bad`, raises `error`; the modes asked for are returned."""
+    modes = []
+
+    def raiser(path, *args, **kwargs):
+        if str(path) != str(bad):
+            return builtins.open(path, *args, **kwargs)
+        modes.append(args[0] if args else kwargs.get('mode', 'r'))
+        raise error
+    monkeypatch.setattr(pre, 'open', raiser, raising=False)
+    return modes
+
+
+READERS = (pre.read_image, pre.read_info)
+
+
+@pytest.mark.parametrize('read', READERS)
+def test_a_garbage_file_python_reads_cleanly_is_still_unreadable(tmp_path, monkeypatch, read):
+    bad = garbage_file(tmp_path)
+    calls = []
+    real = pre._read_failure
+    monkeypatch.setattr(pre, '_read_failure', lambda path: (calls.append(path), real(path))[1])
+    with pytest.raises(CaseRefused) as caught:
+        read(bad)
+    assert str(caught.value) == pre.REASON_FILE_UNREADABLE and calls == [bad]
+    assert caught.value.__context__ is None and caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize('read', READERS)
+def test_a_file_that_vanishes_before_the_python_reread_is_unreadable(tmp_path, monkeypatch, read):
+    bad = garbage_file(tmp_path)
+    fail_python_open(monkeypatch, bad, FileNotFoundError(errno.ENOENT, 'gone', str(bad)))
+    with pytest.raises(CaseRefused) as caught:
+        read(bad)
+    assert str(caught.value) == pre.REASON_FILE_UNREADABLE
+
+
+@pytest.mark.parametrize('read', READERS)
+@pytest.mark.parametrize('code', [errno.EACCES, errno.EIO])
+def test_a_file_system_error_from_the_python_reread_propagates_as_oserror(tmp_path, monkeypatch, read, code):
+    bad = garbage_file(tmp_path)
+    modes = fail_python_open(monkeypatch, bad, OSError(code, 'forced', str(bad)))
+    with pytest.raises(OSError) as caught:
+        read(bad)
+    assert not isinstance(caught.value, CaseRefused) and caught.value.errno == code and modes == ['rb']
+    assert caught.value.__context__ is None and caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize('read', READERS)
+def test_a_forced_permission_error_from_the_python_reread_propagates(tmp_path, monkeypatch, read):
+    bad = garbage_file(tmp_path)
+    fail_python_open(monkeypatch, bad, PermissionError(errno.EACCES, 'forced', str(bad)))
+    with pytest.raises(PermissionError):
+        read(bad)
+
+
+@pytest.mark.parametrize('read', READERS)
+def test_enomem_from_the_python_reread_is_a_bare_memory_error(tmp_path, monkeypatch, read):
+    bad = garbage_file(tmp_path)
+    fail_python_open(monkeypatch, bad, OSError(errno.ENOMEM, 'forced', str(bad)))
+    with pytest.raises(MemoryError) as caught:
+        read(bad)
+    assert type(caught.value) is MemoryError and caught.value.args == ()
+    assert caught.value.__context__ is None and caught.value.__cause__ is None
+
+
+def test_read_failure_reads_in_chunks_to_the_end_and_returns(tmp_path, monkeypatch):
+    big = tmp_path / 'big.bin'
+    big.write_bytes(bytes(10))
+    sizes, real = [], builtins.open
+
+    def spy(path, mode='r', *args, **kwargs):
+        handle = real(path, mode, *args, **kwargs)
+        read = handle.read
+        handle.read = lambda size=-1: (sizes.append(size), read(size))[1]
+        return handle
+    monkeypatch.setattr(pre, 'open', spy, raising=False)
+    monkeypatch.setattr(pre, 'READ_CHUNK', 4)
+    assert pre._read_failure(big) is None
+    assert sizes == [4, 4, 4, 4]  # 4 + 4 + 2 bytes, then the empty read that ends it
+
+
+def test_read_failure_swallows_a_missing_file(tmp_path):
+    assert pre._read_failure(tmp_path / 'absent.nii.gz') is None
+
+
+@pytest.mark.parametrize('read', READERS)
+def test_a_successful_read_does_not_run_the_python_check(tmp_path, monkeypatch, read):
+    good = tmp_path / 'ct.nii.gz'
+    sitk.WriteImage(make_image(box((2, 2, 2), (4, 4, 4)), **grid()), str(good))
+    monkeypatch.setattr(pre, '_read_failure', lambda path: pytest.fail('the Python check ran'))
+    read(good)
+
+
+@pytest.mark.parametrize('read', READERS)
+def test_a_memory_error_from_quiet_call_does_not_run_the_python_check(tmp_path, monkeypatch, read):
+    bad = garbage_file(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise MemoryError()
+    monkeypatch.setattr(pre.sitk, 'ReadImage', boom)
+    monkeypatch.setattr(pre.sitk, 'ImageFileReader', boom)
+    monkeypatch.setattr(pre, '_read_failure', lambda path: pytest.fail('the Python check ran'))
+    with pytest.raises(MemoryError):
+        read(bad)
 
 
 def test_third_party_failures_are_one_fixed_reason(tmp_path):
