@@ -69,14 +69,36 @@ def _raise_for(folder):
 
 # The per-stage raisers stand in for the real per-patient call (internal seam): they raise for the patient folder named
 # RAISE_NAME and otherwise return a minimal result of the stage's shape.
+# A non-raising patient sleeps first, so the raiser's Stop lands before a slot frees: only the first N patients start.
 def convert_patient(folder, *args, **kwargs):
+    from rt_dataprep import convert
     _raise_for(folder)
-    return [], 0.0, 0, None  # rows, reading seconds, files, status
+    time.sleep(0.3)
+    return [convert.ConvertRow(Path(folder).name, '', convert.OUTCOME_SKIPPED)], 0.0, 0, None  # rows, reading seconds, files, status
 
 
 def preprocess_patient(folder, *args, **kwargs):
+    from rt_dataprep import convert, preprocess
     _raise_for(folder)
-    return [], None  # rows, status
+    time.sleep(0.3)
+    return [preprocess.PreprocessRow(Path(folder).name, '', convert.OUTCOME_SKIPPED)], None  # rows, status
+
+
+def _record_in(folder):
+    """Write start and end (monotonic clock, shared by all processes) into the patient folder around a sleep."""
+    Path(folder, 'start').write_text(repr(time.monotonic()))
+    time.sleep(0.3)
+    Path(folder, 'end').write_text(repr(time.monotonic()))
+
+
+def convert_record(folder, *args, **kwargs):
+    _record_in(folder)
+    return [], 0.0, 0, None
+
+
+def preprocess_record(folder, *args, **kwargs):
+    _record_in(folder)
+    return [], None
 
 
 def organize_read(folder, *args, **kwargs):

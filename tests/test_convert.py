@@ -1497,6 +1497,15 @@ def test_without_overwrite_a_case_repeat_is_held_and_the_rows_equal_those_of_one
     assert [r[0] for r in one if r[1] == 'plan_1'] == ['SYNTHETICPTA', 'SYNTHETICPTC', 'syntheticpta']  # the repeat ran, as today
 
 
+def test_a_case_repeat_starts_only_after_its_twin_ends(tmp_path, tree):
+    import pool_workers
+    org, _ = tree
+    three_patients(org, ('SYNTHETICPTA', 'syntheticpta', 'SYNTHETICPTC'))
+    conv.convert(org, tmp_path / 'out3', workers=3, _patient_fn=pool_workers.convert_record)  # three slots: only the hold key keeps the twins apart
+    times = {n: [float((org / n / f).read_text()) for f in ('start', 'end')] for n in ('SYNTHETICPTA', 'syntheticpta')}
+    assert times['syntheticpta'][0] >= times['SYNTHETICPTA'][1]
+
+
 def test_an_internal_error_in_one_patient_aborts_a_two_process_run_with_the_report_and_no_message(tree, capfd):
     import pool_workers
     org, out = tree
@@ -1506,7 +1515,7 @@ def test_an_internal_error_in_one_patient_aborts_a_two_process_run_with_the_repo
     assert isinstance(error, conv.ConvertAborted) and str(error) == conv.REASON_INTERNAL
     with open(out / conv.REPORT_NAME, newline='') as handle:
         rows = list(csv.DictReader(handle))
-    assert [(r['patient'], r['outcome'], r['reason']) for r in rows] == [('boom', conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
+    assert [(r['patient'], r['outcome'], r['reason']) for r in rows] == [('a', conv.OUTCOME_SKIPPED, ''), ('boom', conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]  # two slots: 'a' and 'boom' only
     err = capfd.readouterr().err
     assert pool_workers.SECRET not in err and 'RuntimeError' in err  # the worker logged the type and site, never the message
 
