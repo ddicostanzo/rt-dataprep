@@ -81,13 +81,20 @@ count before accepting the cohort. Successful process completion can include ref
 | --- | --- | --- |
 | `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers 1..64` (default 1); `--overwrite` |
 | `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers 1..64` (default 1); `--overwrite` |
-| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | At least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
+| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers 1..64` (default 1); at least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
 | `manifest ROOT` | Write `ROOT/manifest.csv` and a dated copy. | Works on converted or preprocessed trees. |
 | `split ROOT` | Read `ROOT/manifest.csv`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
 
-Use `uv run python -m rt_dataprep COMMAND --help` for exact arguments. Header workers accelerate header reads, not volume
-conversion; changing the worker count preserves output ordering. Study exclusion defaults to a case-sensitive
+Use `uv run python -m rt_dataprep COMMAND --help` for exact arguments. Study exclusion defaults to a case-sensitive
 `Acuity` substring in `ManufacturerModelName`; `organize()` and `convert()` expose `exclude_models` through the Python API.
+
+### Parallel patients (`--workers`)
+
+`--workers N` (1 to 64, default 1; organize, convert and preprocess) processes N patients at a time, each in its own
+process. The output and row order are the same for any value. Budget about 7 GB of RAM per worker at the full
+701 x 701 x 433 grid. SimpleITK and BLAS threads are not capped per process, so N workers can use more than N cores.
+Ctrl-C in a terminal reaches the workers too. `kill -INT` sent to the parent process alone makes it wait for the patients
+already running, then stop with the report written.
 
 ## Input and output
 

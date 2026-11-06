@@ -6,7 +6,8 @@ from pathlib import Path
 from rt_dataprep.dicom_io import REASON_INPUT_INSIDE_OUTPUT
 from rt_dataprep.convert import REASON_INTERNAL, REASON_OUTSIDE_ORG, ConvertAborted, convert, crash_site
 from rt_dataprep.manifest import MANIFEST_NAME, manifest
-from rt_dataprep.organize import REASON_OUTSIDE_SRC, organize
+from rt_dataprep.organize import REASON_INTERNAL as ORGANIZE_REASON_INTERNAL
+from rt_dataprep.organize import REASON_OUTSIDE_SRC, OrganizeAborted, organize
 from rt_dataprep.preprocess import (
     REASON_AHE_OPTIONS,
     REASON_MASK_RETENTION_LIMIT,
@@ -21,7 +22,7 @@ from rt_dataprep.split import REASON_COLUMNS, REASON_EXISTS, REASON_NO_TRAIN, RE
 
 
 PREPROCESS_HELP = 'resample, rescale and crop/pad a converted tree into a separate output tree; give at least one step flag to write anything'
-WORKERS_HELP = 'number of threads reading headers; output is the same for any value'
+WORKERS_HELP = 'number of patients processed in parallel, each in its own process (about 7 GB RAM each at 701x701x433); output is the same for any value'
 OVERWRITE_HELP = "replace a patient's existing output folder once its new output holds at least one successful case"
 MAX_WORKERS = 64
 
@@ -49,6 +50,7 @@ def main(argv=None):
     sub = commands.add_parser('preprocess', help=PREPROCESS_HELP, description=PREPROCESS_HELP)
     sub.add_argument('converted', help='converted root, from the convert command')
     sub.add_argument('out', help='output root, outside the converted root')
+    sub.add_argument('--workers', type=positive_int, default=1, help=WORKERS_HELP)
     sub.add_argument('--overwrite', action='store_true', help=OVERWRITE_HELP)
     sub.add_argument('--initial-resample', action='store_true', help='step: resample to 1 mm spacing; writes the initialresample_ prefix')
     sub.add_argument('--rescale', action='store_true', help='step: rescale a CT to (HU + 1024) / 4096; writes the rescale_ prefix; as the only step, MR/PT study series are refused')
@@ -85,7 +87,7 @@ def main(argv=None):
                 min_mask_retention=args.min_mask_retention,
                 ahe_kernel_mm=None if args.ahe_kernel_mm is None else tuple(args.ahe_kernel_mm),
                 ahe_bins=128 if args.ahe_bins is None else args.ahe_bins,
-                ahe_clip_limit=0.05 if args.ahe_clip_limit is None else args.ahe_clip_limit), overwrite=args.overwrite)
+                ahe_clip_limit=0.05 if args.ahe_clip_limit is None else args.ahe_clip_limit), workers=args.workers, overwrite=args.overwrite)
         elif args.command == 'manifest':
             written, refused = manifest(args.root)
             print(f'manifest: {written} written, {refused} refused')
@@ -103,6 +105,8 @@ def main(argv=None):
         parser.exit(1, f'rt_dataprep: {exc}\n')
     except ConvertAborted:  # the report is written; the text is fixed, nothing of the original reaches the terminal
         parser.exit(1, f'rt_dataprep: {REASON_INTERNAL}\n')
+    except OrganizeAborted:  # same as above, with organize's own fixed text
+        parser.exit(1, f'rt_dataprep: {ORGANIZE_REASON_INTERNAL}\n')
     except PreprocessAborted:  # same as above, with preprocess's own fixed text
         parser.exit(1, f'rt_dataprep: {PREPROCESS_REASON_INTERNAL}\n')
     except OSError:  # the message names a path, which can hold a patient id

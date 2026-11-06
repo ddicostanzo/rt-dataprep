@@ -376,6 +376,7 @@ def calls(monkeypatch):
     seen = []
     monkeypatch.setattr(cli, 'organize', lambda *args, **kwargs: seen.append(('organize', args, kwargs)))
     monkeypatch.setattr(cli, 'convert', lambda *args, **kwargs: seen.append(('convert', args, kwargs)))
+    monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: seen.append(('preprocess', args[:2], kwargs)))
     return seen
 
 
@@ -393,20 +394,20 @@ def test_series_fov_mask_flag_reaches_preprocess_steps(flags, want, monkeypatch)
     assert seen[0][2].series_fov_mask is ('--series-fov-mask' in flags)
 
 
-@pytest.mark.parametrize('command', ['organize', 'convert'])
+@pytest.mark.parametrize('command', ['organize', 'convert', 'preprocess'])
 @pytest.mark.parametrize('flag, workers', [([], 1), (['--workers', '3'], 3)])
-def test_workers_reaches_organize_and_convert_and_defaults_to_one(command, flag, workers, calls):
+def test_workers_reaches_each_stage_and_defaults_to_one(command, flag, workers, calls):
     cli.main([command, 'a', 'b', *flag])
     assert calls == [(command, ('a', 'b'), {'workers': workers, 'overwrite': False})]
 
 
-@pytest.mark.parametrize('command', ['organize', 'convert'])
+@pytest.mark.parametrize('command', ['organize', 'convert', 'preprocess'])
 def test_workers_accepts_the_cap(command, calls):
     cli.main([command, 'a', 'b', '--workers', '64'])
     assert calls == [(command, ('a', 'b'), {'workers': 64, 'overwrite': False})]
 
 
-@pytest.mark.parametrize('command', ['organize', 'convert'])
+@pytest.mark.parametrize('command', ['organize', 'convert', 'preprocess'])
 @pytest.mark.parametrize('value', ['0', '-1', 'x', '1.5', '1_0', '+3', '٣', ' 3', '65', '1000000'])
 def test_workers_below_one_or_not_an_integer_is_a_usage_error(command, value, calls, capfd):
     with pytest.raises(SystemExit) as exc:
@@ -415,7 +416,7 @@ def test_workers_below_one_or_not_an_integer_is_a_usage_error(command, value, ca
     assert '--workers' in capfd.readouterr().err
 
 
-@pytest.mark.parametrize('argv', [['preprocess', 'a', 'b'], ['manifest', 'a'], ['split', 'a', '--test-size', '0', '--val-size', '0', '--seed', '0']])
+@pytest.mark.parametrize('argv', [['manifest', 'a'], ['split', 'a', '--test-size', '0', '--val-size', '0', '--seed', '0']])
 def test_no_other_subcommand_takes_workers(argv, calls, capfd):
     with pytest.raises(SystemExit) as exc:
         cli.main([*argv, '--workers', '2'])
@@ -423,12 +424,37 @@ def test_no_other_subcommand_takes_workers(argv, calls, capfd):
     capfd.readouterr()
 
 
-@pytest.mark.parametrize('command', ['organize', 'convert'])
-def test_workers_help_says_threads_and_same_output(command, capfd):
+@pytest.mark.parametrize('command', ['organize', 'convert', 'preprocess'])
+def test_workers_help_says_patient_processes_memory_and_same_output(command, capfd):
     with pytest.raises(SystemExit):
         cli.main([command, '--help'])
     text = ' '.join(capfd.readouterr().out.split())
-    assert 'number of threads reading headers; output is the same for any value' in text
+    assert ' '.join(cli.WORKERS_HELP.split()) in text
+    assert 'each in its own process' in text and 'about 7 GB RAM each at 701x701x433' in text and 'output is the same for any value' in text
+    assert 'thread' not in text
+
+
+@pytest.mark.parametrize('command, aborted, reason', [('organize', cli.OrganizeAborted, cli.ORGANIZE_REASON_INTERNAL),
+                                                       ('convert', cli.ConvertAborted, cli.REASON_INTERNAL)])
+def test_an_aborted_stage_exits_1_with_its_fixed_text(command, aborted, reason, monkeypatch, capfd):
+    def stop(*args, **kwargs):
+        raise aborted(reason)
+    monkeypatch.setattr(cli, command, stop)
+    with pytest.raises(SystemExit) as exc:
+        cli.main([command, 'a', 'b'])
+    assert exc.value.code == 1
+    assert capfd.readouterr().err == f'rt_dataprep: {reason}\n'
+
+
+def test_workers_2_worker_info_line_reaches_stderr(tmp_path, org):
+    misc = org / PID / 'misc_files'
+    misc.mkdir()
+    (misc / 'SYNTHETIC_junk.dcm').write_bytes(b'not a dicom file')  # makes the patient worker log its count of unreadable files
+    result = subprocess.run([sys.executable, '-m', 'rt_dataprep', 'convert', str(org), str(tmp_path / 'out'), '--workers', '2'],
+                            capture_output=True, text=True)
+    assert result.returncode == 0
+    assert 'convert: 1 unreadable files in misc_files' in result.stderr.splitlines()
+    assert 'workers 2' in result.stderr and PID not in result.stderr and str(tmp_path) not in result.stderr
 
 
 # --overwrite on organize, convert and preprocess: passed through as a keyword; split and manifest reject it.
