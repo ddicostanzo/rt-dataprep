@@ -257,6 +257,7 @@ def publish(out_root, name, *, overwrite, success):
     the target moves to `.<name>.old`, the partial moves in, `.<name>.old` is deleted ('replaced'); otherwise the target
     stays and the partial is deleted ('kept'). If the partial cannot move in, the target is moved back and that OSError
     is raised; if the move back fails too, `.<name>.old` stays for recover and the same OSError is raised. Logs nothing.
+    Call recover(out_root, name) before building the partial: publish assumes no `.<name>.old` is left over.
     """
     out_root = Path(out_root)
     target, old, partial = out_root / name, out_root / f'.{name}.old', out_root / f'.{name}.partial'

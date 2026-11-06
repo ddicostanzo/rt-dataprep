@@ -1153,3 +1153,15 @@ def test_a_resumed_run_copies_nothing_and_creates_no_partial_for_a_skipped_patie
         thread.join(10)
     assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_SKIPPED, org.REASON_EXISTS)] * 2
     assert seen == [] and written(out) == before
+
+
+def test_a_leftover_partial_is_never_published_with_the_new_copy(tmp_path):
+    """A partial that survived a failed recover must not merge into the new build: its stale plan_1 would be published (#166 review)."""
+    out, misc = tmp_path / 'out', tmp_path / 'src' / 'note.dcm'
+    stale = out / '.SYNTHETIC_A.partial' / 'plan_1'
+    stale.mkdir(parents=True)
+    misc.parent.mkdir()
+    misc.write_bytes(b'x')
+    with pytest.raises(FileExistsError):
+        org._copy_patient(misc.parent, out, 'SYNTHETIC_A', [], [misc], overwrite=False)
+    assert not os.path.lexists(out / 'SYNTHETIC_A')

@@ -363,6 +363,8 @@ cohorts = split(workspace / 'converted' / 'manifest.csv', test_size=0.2, val_siz
 # Inspect conversion.rows and refused in approved storage; do not print patient-bearing rows into shared logs.
 ```
 
+`organize()`, `convert()` and `preprocess()` take `overwrite=True` (keyword only), which matches the CLI's `--overwrite`.
+
 The API is under active development. Pin a reviewed commit and `uv.lock` when reproducing an analysis.
 
 ## Development
