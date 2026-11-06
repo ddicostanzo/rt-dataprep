@@ -54,3 +54,20 @@ Gotchas:
 - No BLOCKING. WARNING (fixed by orchestrator): the CT site's re-read was unpinned (read_series re-reads the same slices); added test_a3_the_ct_read_itself_reports_the_io_error with read_series stubbed; mutation-checked (fails without the _read_ct call).
 - NOTE (deferred): a refused plan's CT is re-read twice (as the CT and as another series): cost only.
 - NOTE (deferred): A4's first-calls comparison can't tell which site made the calls.
+
+## task-03
+
+Files changed: src/rt_dataprep/dicom_io.py (entry_is, _ABSENT, _KINDS before _pydicom_quiet), src/rt_dataprep/convert.py (the five folder
+checks call dicom_io.entry_is; no is_file/is_dir left), tests/test_dicom_io.py (entry_is tests), tests/test_convert.py (A6 + twin,
+hide_entries), tests/test_cli.py (A8 + twin, hide_root_entries; imports errno, os, Path).
+
+Decisions:
+- entry_is(path, kind) with kind 'file' or 'dir' (a typo is a KeyError). It calls path.stat() and returns False for ENOENT, ENOTDIR, EBADF,
+  ELOOP (and the three Windows codes 3.13 also ignores) and for ValueError; any other OSError is raised.
+- A6/A8 patch Path.is_file/is_dir to False for entries of the one folder (parent == folder); the twins also make Path.stat raise
+  PermissionError for those entries. All are RED before the helper (the run goes on with an empty listing), green after.
+- A8 runs in-process (cli.main + pytest.raises(SystemExit)), so the monkeypatch reaches convert.
+
+Gotchas:
+- Path.is_file/is_dir take only follow_symlinks in 3.13, so the patched lambdas forward **kw.
+- The 0o444 tests are RED before the change only because of the is_file/is_dir -> False patch; on 3.13 the real chmod alone already raises.
