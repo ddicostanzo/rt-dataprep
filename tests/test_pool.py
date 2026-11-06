@@ -186,7 +186,7 @@ def test_keyboard_interrupt_in_the_parent_wait(workers, tmp_path, monkeypatch, c
     assert w.SECRET not in seen.out + seen.err
 
 
-@pytest.mark.skipif(not hasattr(signal, 'pthread_sigmask'), reason='POSIX signal masks')
+@pytest.mark.skipif(not (hasattr(signal, 'pthread_sigmask') and hasattr(signal, 'sigtimedwait')), reason='no signal masks to poll')
 def test_workers_spawn_with_ctrl_c_blocked_but_a_running_task_gets_it_and_the_parent_mask_is_restored():
     before = signal.pthread_sigmask(signal.SIG_BLOCK, [])
     delivered, error = run_guarded(2, [Task(w.sigint_state)])
@@ -194,7 +194,7 @@ def test_workers_spawn_with_ctrl_c_blocked_but_a_running_task_gets_it_and_the_pa
     assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == before
 
 
-@pytest.mark.skipif(not hasattr(signal, 'pthread_sigmask'), reason='POSIX signal masks')
+@pytest.mark.skipif(not (hasattr(signal, 'pthread_sigmask') and hasattr(signal, 'sigtimedwait')), reason='no signal masks to poll')
 def test_a_ctrl_c_to_the_parent_during_handle_starts_no_new_patient(tmp_path):
     def handle(index, result):
         if index == 0:

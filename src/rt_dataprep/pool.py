@@ -33,7 +33,7 @@ class Stop(NamedTuple):
 
 ABORT = object()  # returned by handle: submit nothing further
 _SKIP = object()  # a first-stage task that ended with KeyboardInterrupt (or any exception once interrupted): no result
-_MASKABLE = hasattr(signal, 'pthread_sigmask')  # POSIX; on Windows Ctrl-C reaches the parent as before
+_MASKABLE = hasattr(signal, 'pthread_sigmask') and hasattr(signal, 'sigtimedwait')  # Linux; macOS lacks sigtimedwait, Windows both: Ctrl-C reaches the parent as before
 
 
 class _Inline:
