@@ -198,7 +198,7 @@ def test_workers_spawn_with_ctrl_c_blocked_but_a_running_task_gets_it_and_the_pa
 def test_a_ctrl_c_to_the_parent_during_handle_starts_no_new_patient(tmp_path):
     def handle(index, result):
         if index == 0:
-            os.kill(os.getpid(), signal.SIGINT)  # the parent alone, as at worker startup: pending until the next pick
+            signal.pthread_kill(threading.get_ident(), signal.SIGINT)  # this (main) thread alone: pending until the next pick
 
     delivered = []
     tasks = [Task(w.echo, (0,)), Task(w.sleep_then, (1, 0.5)), Task(w.record, ('2', str(tmp_path), 0.0))]

@@ -67,10 +67,7 @@ def _call(fn, *args):
 
 def _take_ctrl_c():
     """Consume a pending, blocked Ctrl-C (N > 1 only): True if there was one."""
-    if signal.SIGINT not in signal.sigpending():
-        return False
-    signal.sigwait({signal.SIGINT})
-    return True
+    return signal.sigtimedwait({signal.SIGINT}, 0) is not None  # one call: sigpending then sigwait can block forever
 
 
 def _submit(executor, task):
