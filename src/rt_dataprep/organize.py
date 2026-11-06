@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rt_dataprep import dicom_io
-from rt_dataprep.dicom_io import read_pooled, sanitize_path_component, write_report
+from rt_dataprep.dicom_io import sanitize_path_component, write_report
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
     try:
         for folder in sorted(p for p in src_root.iterdir() if p.is_dir() and not p.name.startswith('.')):  # .X.partial too
             try:
-                row, read_s, copy_s, walked, status = _organize_patient(folder, out_root, claimed, exclude_models, workers, overwrite)
+                row, read_s, copy_s, walked, status = _organize_patient(folder, out_root, claimed, exclude_models, overwrite)
                 rows.append(row)
                 reading, copying, files = reading + read_s, copying + copy_s, files + walked
                 replaced, kept = replaced + (status == 'replaced'), kept + (status == 'kept')
@@ -80,11 +80,12 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
     return OrganizeReport(rows)
 
 
-def _organize_patient(folder, out_root, claimed, exclude_models, workers, overwrite):
+def _organize_patient(folder, out_root, claimed, exclude_models, overwrite):
     """(row, reading seconds, copying seconds, files walked, status None/'new'/'replaced'/'kept'); a raise (OSError) adds none."""
     started = time.monotonic()
-    paths = sorted(_walk(folder))  # serial and fully listed first, so the pooled step sees the sorted order
-    results = [r for r in read_pooled(_read_one, paths, workers) if r]
+    paths = sorted(_walk(folder))
+    with dicom_io._pydicom_quiet():  # the whole folder read: pydicom's warnings and log records quote values
+        results = [r for r in map(_read_one, paths) if r]
     headers = [(path, ds) for path, ds in results if ds is not None]
     bad = [path for path, ds in results if ds is None]  # has the preamble but the read fails; copied to misc_files (#13)
     unreadable = len(bad)

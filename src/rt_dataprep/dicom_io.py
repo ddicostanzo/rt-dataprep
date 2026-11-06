@@ -10,7 +10,6 @@ import sys
 import tempfile
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pydicom
@@ -159,26 +158,6 @@ def read_header(path):
     """read_header_core inside its own quiet block."""
     with _pydicom_quiet():
         return read_header_core(path)
-
-
-def read_pooled(step, paths, workers):
-    """`step(path)` for every path on `workers` threads (>= 1), results in input order; the first failure raises."""
-    # Assumes a GIL build of CPython, nothing else running in the process while the block is held (the quiet state is
-    # process-global), and that quiet_call never runs inside a worker (it swaps fds 1/2 and is not thread-safe).
-    with _pydicom_quiet():
-        executor = ThreadPoolExecutor(workers)
-        try:
-            return [future.result() for future in [executor.submit(step, path) for path in paths]]
-        finally:
-            joined = interrupted = False
-            while not joined:  # a Ctrl-C mid-join must not end the wait: running steps finish inside the block (#97)
-                try:
-                    executor.shutdown(cancel_futures=True)  # queued steps never start
-                    joined = True
-                except KeyboardInterrupt:
-                    interrupted = True
-            if interrupted:  # after the join: the user asked to stop, whatever the steps raised or returned
-                raise KeyboardInterrupt from None
 
 
 # Ported from DICOM_Transport src/common.py. Everything outside this set becomes "_".

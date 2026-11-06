@@ -1311,12 +1311,11 @@ def rows_of(report):
     return [(r.patient, r.folder, r.outcome, r.reason, r.files, r.skipped_series) for r in report.rows]
 
 
-@pytest.mark.parametrize('workers', [1, 4])
-def test_read_folder_headers_sorted_by_path_with_the_flag_for_any_workers(tree, workers):
+def test_read_folder_headers_sorted_by_path_with_the_unreadable_flag(tree):
     org, _ = tree
     make_plan(org / PID / 'plan_1')
     add_bad_files(org / PID / 'plan_1')
-    headers, unreadable = conv.read_folder_headers(org / PID / 'plan_1', workers=workers)
+    headers, unreadable = conv.read_folder_headers(org / PID / 'plan_1')
     assert unreadable and [p for p, _ in headers] == sorted(p for p, _ in headers)
     assert sorted(p.name for p, _ in headers) == sorted(p.name for p in (org / PID / 'plan_1').glob('*.dcm') if 'empty' not in p.name)
 
@@ -1403,21 +1402,24 @@ def test_no_timing_line_on_ctrl_c(tree, caplog, monkeypatch):
 
 # ---------------------------------------------------------------- hardening B8 (#98): workers reach every read, the dicom_io seam
 
-def test_every_pooled_header_read_gets_the_workers_value(tree, monkeypatch):
-    org, out = tree
-    make_plan(org / PID / 'plan_1')
-    make_plan(org / PID / 'plan_2')
-    (org / PID / 'misc_files').mkdir()
-    sd.write_ct_series(org / PID / 'misc_files', np.zeros(SHAPE), patient_id=PID)
-    seen, real = [], conv.read_pooled
-
-    def record(step, paths, workers):
-        seen.append(workers)
-        return real(step, paths, workers)
-
-    monkeypatch.setattr(conv, 'read_pooled', record)
-    conv.convert(org, out, workers=3)
-    assert seen == [3, 3, 3]  # plan_1, plan_2 and misc_files
+def test_a_folder_header_read_that_makes_pydicom_warn_prints_nothing_and_restores_state(tmp_path, capfd, caplog):
+    sd.write_rtdose(tmp_path / 'dose.dcm', [[[1]]], invalid_values=True)
+    state = lambda: (pydicom.config.settings.reading_validation_mode, logging.getLogger('pydicom').disabled)  # noqa: E731
+    with warnings.catch_warnings(record=True) as control, caplog.at_level(logging.DEBUG):  # control: it warns unquieted
+        warnings.simplefilter('always')
+        for element in pydicom.dcmread(tmp_path / 'dose.dcm', stop_before_pixels=True).iterall():
+            _ = element.value
+    assert control or caplog.records
+    caplog.clear()
+    capfd.readouterr()
+    before, filters = state(), list(warnings.filters)
+    with warnings.catch_warnings(record=True) as caught, caplog.at_level(logging.DEBUG):
+        warnings.simplefilter('always')
+        headers, unreadable = conv.read_folder_headers(tmp_path)
+    out = capfd.readouterr()
+    assert len(headers) == 1 and not unreadable
+    assert caught == [] and caplog.records == [] and (out.out, out.err) == ('', '')
+    assert state() == before and list(warnings.filters) == filters
 
 
 @pytest.mark.parametrize('workers', [1, 4])

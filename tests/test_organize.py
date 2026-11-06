@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import warnings
 from collections import Counter
 
 import numpy as np
@@ -577,6 +578,30 @@ def test_a_preamble_oserror_refuses_that_patient_only_with_workers_4(tree, monke
     assert not [p for p in out.iterdir() if p.name.endswith('.partial')]
 
 
+def test_a_patient_header_read_that_makes_pydicom_warn_prints_nothing_and_restores_state(tree, capfd, caplog):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    sd.write_rtdose(src / PID / 'a' / 'odd.dcm', [[[1]]], patient_id=PID, invalid_values=True)
+    odd = src / PID / 'a' / 'odd.dcm'
+    state = lambda: (pydicom.config.settings.reading_validation_mode, logging.getLogger('pydicom').disabled)  # noqa: E731
+    with warnings.catch_warnings(record=True) as control, caplog.at_level(logging.DEBUG):  # control: it warns unquieted
+        warnings.simplefilter('always')
+        for element in pydicom.dcmread(odd, stop_before_pixels=True).iterall():
+            _ = element.value
+    assert control or caplog.records
+    caplog.clear()
+    capfd.readouterr()
+    before, filters = state(), list(warnings.filters)
+    with warnings.catch_warnings(record=True) as caught, caplog.at_level(logging.DEBUG):
+        warnings.simplefilter('always')
+        report = organize(src, out)
+    captured = capfd.readouterr()
+    assert [r.outcome for r in report.rows] == [org.OUTCOME_ORGANIZED]
+    assert caught == [] and [r for r in caplog.records if r.name.startswith('pydicom')] == []
+    assert (captured.out, captured.err) == ('', '')
+    assert state() == before and list(warnings.filters) == filters
+
+
 TIMING = re.compile(r'organize: (\d+\.\d) s total, (\d+\.\d) s reading, (\d+\.\d) s copying, (\d+) files, workers (\d+)')
 
 
@@ -649,21 +674,6 @@ def test_an_unlistable_subfolder_refuses_the_patient(tree):
 def summary_and_timing(caplog):
     texts = [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.organize']
     return texts, next(i for i, t in enumerate(texts) if 'patient folders' in t)
-
-
-def test_every_pooled_header_read_gets_the_workers_value(tree, monkeypatch):
-    src, out = tree
-    planning_study(src / PID / 'a')
-    planning_study(src / 'SYNTHETIC_SECOND' / 'a', pid='SYNTHETIC_SECOND')
-    seen, real = [], org.read_pooled
-
-    def record(step, paths, workers):
-        seen.append(workers)
-        return real(step, paths, workers)
-
-    monkeypatch.setattr(org, 'read_pooled', record)
-    organize(src, out, workers=3)
-    assert seen == [3, 3]  # one pooled read per patient folder
 
 
 def test_the_timing_line_comes_right_after_the_summary_line(tree, caplog):

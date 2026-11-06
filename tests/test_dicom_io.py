@@ -5,9 +5,7 @@ import os
 import subprocess
 import sys
 import threading
-import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pydicom
@@ -16,7 +14,7 @@ import SimpleITK as sitk
 
 import synthetic_dicom as sd
 from rt_dataprep import dicom_io
-from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_header, read_header_core, read_pooled, sanitize_path_component
+from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_header, read_header_core, sanitize_path_component
 
 
 def test_package_init_has_no_imports():
@@ -389,127 +387,6 @@ def test_read_header_core_error_has_no_context(tmp_path):
             read_header_core(path)
         assert str(err.value) == dicom_io.REASON_UNREADABLE
         assert _chain(err.value) == (None, None)
-
-
-def _quiet_state():
-    return (pydicom.config.settings.reading_validation_mode, logging.getLogger('pydicom').disabled, list(warnings.filters))
-
-
-def _invalid_value_files(folder, count=16):
-    for i in range(count):
-        sd.write_rtdose(folder / f'dose{i:02d}.dcm', [[[1]]], invalid_values=(i == 7))
-    return sorted(folder.glob('*.dcm'))
-
-
-def test_read_pooled_is_silent_under_threads_and_restores_state(tmp_path, capfd, caplog):
-    paths = _invalid_value_files(tmp_path)
-    with warnings.catch_warnings(record=True) as control, caplog.at_level(logging.DEBUG):  # control: warns unquieted
-        warnings.simplefilter('always')
-        for element in pydicom.dcmread(paths[7], stop_before_pixels=True).iterall():
-            _ = element.value
-    assert control or caplog.records
-    caplog.clear()
-    capfd.readouterr()
-    before = _quiet_state()
-    with warnings.catch_warnings(record=True) as caught, caplog.at_level(logging.DEBUG):
-        warnings.simplefilter('always')
-        inside = _quiet_state()
-        headers = read_pooled(read_header_core, paths, 4)
-        after = _quiet_state()
-    out = capfd.readouterr()
-    assert len(headers) == 16 and all(isinstance(h, pydicom.Dataset) for h in headers)
-    assert caught == [] and caplog.records == [] and (out.out, out.err) == ('', '')
-    assert after == inside  # filters compared inside the recording block, where they were set
-    assert _quiet_state() == before
-
-
-def test_read_pooled_returns_input_order(tmp_path, monkeypatch):
-    paths = [tmp_path / f'p{i}.dcm' for i in range(8)]
-
-    def core(path):
-        time.sleep(0.05 * (len(paths) - paths.index(path)))  # earlier paths finish last
-        return path
-
-    monkeypatch.setattr(dicom_io, 'read_header_core', core)
-    assert read_pooled(lambda path: dicom_io.read_header_core(path), paths, 4) == paths
-
-
-def test_read_pooled_one_worker_is_one_thread(tmp_path, monkeypatch):
-    threads = set()
-
-    def core(path):
-        threads.add(threading.get_ident())
-        return path
-
-    monkeypatch.setattr(dicom_io, 'read_header_core', core)
-    paths = [tmp_path / f'p{i}.dcm' for i in range(5)]
-    assert read_pooled(lambda path: dicom_io.read_header_core(path), paths, 1) == paths
-    assert len(threads) == 1 and threads != {threading.get_ident()}
-
-
-def test_read_pooled_ctrl_c_cancels_queued_steps_and_restores_state(tmp_path, monkeypatch):
-    paths = [tmp_path / f'p{i:02d}.dcm' for i in range(50)]
-    calls = []
-
-    def core(path):
-        calls.append(path)
-        if path == paths[0]:
-            raise KeyboardInterrupt
-        time.sleep(0.5)  # structural margin: the queue is cancelled long before these finish
-
-    monkeypatch.setattr(dicom_io, 'read_header_core', core)
-    before = _quiet_state()
-    with pytest.raises(KeyboardInterrupt):
-        read_pooled(lambda path: dicom_io.read_header_core(path), paths, 4)
-    assert len(calls) <= 2 * 4 and paths[-1] not in calls
-    assert _quiet_state() == before
-
-
-@pytest.mark.parametrize('first', [KeyboardInterrupt, OSError])  # a Ctrl-C mid-join wins over a step's OSError too
-def test_read_pooled_waits_for_running_steps_even_when_the_shutdown_join_is_interrupted(monkeypatch, first):
-    started, release, finished = threading.Event(), threading.Event(), threading.Event()
-    shutdowns = []
-    real_shutdown = ThreadPoolExecutor.shutdown
-
-    def step(path):
-        if path == 'SYNTHETIC_1':
-            assert started.wait(timeout=5)
-            raise first('SYNTHETIC_x')
-        started.set()
-        release.wait(timeout=5)  # a timeout fails the test instead of hanging it
-        finished.set()
-
-    def shutdown(self, *args, **kwargs):
-        shutdowns.append(1)
-        if len(shutdowns) == 1:
-            raise KeyboardInterrupt  # the second Ctrl-C, mid-join
-        release.set()
-        return real_shutdown(self, *args, **kwargs)
-
-    monkeypatch.setattr(ThreadPoolExecutor, 'shutdown', shutdown)
-    try:
-        with pytest.raises(KeyboardInterrupt) as raised:
-            read_pooled(step, ['SYNTHETIC_1', 'SYNTHETIC_2'], 2)
-        assert len(shutdowns) == 2 and getattr(raised.value, '__suppress_context__')  # noqa: B009
-        assert finished.is_set()  # the running step ended inside the block
-    finally:
-        release.set()  # on a regression worker 2 ends at once instead of waiting out its 5 s timeout
-
-
-def test_read_pooled_raises_the_ctrl_c_of_the_join_even_when_every_step_succeeded(monkeypatch):
-    shutdowns = []
-    real_shutdown = ThreadPoolExecutor.shutdown
-
-    def shutdown(self, *args, **kwargs):
-        shutdowns.append(1)
-        if len(shutdowns) == 1:
-            raise KeyboardInterrupt  # Ctrl-C mid-join, without delegating
-        return real_shutdown(self, *args, **kwargs)
-
-    monkeypatch.setattr(ThreadPoolExecutor, 'shutdown', shutdown)
-    with pytest.raises(KeyboardInterrupt):  # not a list of results
-        read_pooled(lambda path: path, ['SYNTHETIC_1', 'SYNTHETIC_2'], 2)
-    assert len(shutdowns) == 2
 
 
 # recover / publish: the --overwrite swap helper. Folders are SYNTHETIC_ names in tmp_path.

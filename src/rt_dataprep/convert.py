@@ -27,7 +27,7 @@ from pydicom.datadict import tag_for_keyword
 
 from rt_dataprep import dicom_io, masks
 from rt_dataprep import series as ser
-from rt_dataprep.dicom_io import CaseRefused, quiet_call, read_pooled, write_report
+from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
 from rt_dataprep.series import DIRECTION_ATOL
 
 log = logging.getLogger(__name__)
@@ -103,7 +103,7 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwr
     Convert every <patient>/plan_<n>/ under org_root into out_root/<patient>/plan_<n>/ and write convert_report.csv.
 
     exclude_models: a study that holds a file whose ManufacturerModelName contains one of these is left out of the other series.
-    workers: threads that read the headers of one folder; the output is the same for any value.
+    workers: accepted and logged; unused until patients run in processes.
     overwrite: replace a patient's existing output folder once the new output holds a converted row; otherwise the old one is kept.
     """
     org_root, out_root = Path(org_root), Path(out_root)
@@ -122,7 +122,7 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwr
     try:
         for folder in folders:
             try:
-                found, read_s, read_files, status = _convert_patient(folder, out_root, exclude_models, workers, overwrite, claimed)
+                found, read_s, read_files, status = _convert_patient(folder, out_root, exclude_models, overwrite, claimed)
                 rows += found
                 reading, files = reading + read_s, files + read_files
                 replaced, kept = replaced + (status == 'replaced'), kept + (status == 'kept')
@@ -163,7 +163,7 @@ def crash_site(tb):
     return site
 
 
-def _convert_patient(folder, out_root, exclude_models, workers, overwrite, claimed):
+def _convert_patient(folder, out_root, exclude_models, overwrite, claimed):
     """(rows, reading seconds, header files read, status None/'new'/'replaced'/'kept'); a raise adds neither of the middle two."""
     if overwrite:  # first: a repeat of a name written this run must not recover, rename or replace anything
         if folder.name.casefold() in claimed:
@@ -179,9 +179,9 @@ def _convert_patient(folder, out_root, exclude_models, workers, overwrite, claim
     # Headers are read once per patient. An unreadable file in misc_files/ is not a series and is ignored: only its count
     # reaches the log.
     read_started = time.monotonic()
-    plan_headers = [read_folder_headers(plan_dir, workers=workers) for plan_dir in plans]
+    plan_headers = [read_folder_headers(plan_dir) for plan_dir in plans]
     misc_dir = folder / 'misc_files'
-    misc_headers, misc_unreadable = read_folder_headers(misc_dir, workers=workers) if misc_dir.is_dir() else ([], False)
+    misc_headers, misc_unreadable = read_folder_headers(misc_dir) if misc_dir.is_dir() else ([], False)
     reading = time.monotonic() - read_started
     files = sum(len(found) for found, _ in plan_headers) + len(misc_headers)  # a value: misc_headers is filtered below
     # An unreadable misc file may be a lost slice of any series of its study: those are skipped (#36). Its study is read
@@ -436,9 +436,10 @@ def _convert_plan(headers, unreadable, case_dir):
     return PlanResult(files, series_uid, series_rows)
 
 
-def read_folder_headers(folder, workers=1):
+def read_folder_headers(folder):
     """([(path, Dataset)] of every readable file in `folder`, sorted by path; whether any file was unreadable)."""
-    results = read_pooled(_read_one, sorted(p for p in Path(folder).iterdir() if p.is_file()), workers)
+    with dicom_io._pydicom_quiet():  # the whole folder read: pydicom's warnings and log records quote values
+        results = [_read_one(p) for p in sorted(p for p in Path(folder).iterdir() if p.is_file())]
     headers = [(path, ds) for path, ds in results if ds is not None]
     return headers, len(headers) < len(results)
 
