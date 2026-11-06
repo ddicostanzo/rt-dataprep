@@ -438,7 +438,7 @@ def test_workers_help_says_patient_processes_memory_and_same_output(command, cap
                                                        ('convert', cli.ConvertAborted, cli.REASON_INTERNAL)])
 def test_an_aborted_stage_exits_1_with_its_fixed_text(command, aborted, reason, monkeypatch, capfd):
     def stop(*args, **kwargs):
-        raise aborted(reason)
+        raise aborted('SYNTHETIC_secret_message')  # the printed text is the fixed one, never str(exc)
     monkeypatch.setattr(cli, command, stop)
     with pytest.raises(SystemExit) as exc:
         cli.main([command, 'a', 'b'])

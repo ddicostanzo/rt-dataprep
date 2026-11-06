@@ -2232,6 +2232,15 @@ def test_without_overwrite_a_case_repeat_is_held_and_the_rows_equal_those_of_one
     assert [r[0] for r in one if r[1] == 'plan_1'] == ['SYNTHETICPTA', 'SYNTHETICPTC', 'syntheticpta']  # the repeat ran, as today
 
 
+def test_a_case_repeat_starts_only_after_its_twin_ends(tmp_path):
+    import pool_workers
+    converted = tmp_path / 'converted'
+    three_patients(converted, ('SYNTHETICPTA', 'syntheticpta', 'SYNTHETICPTC'))
+    pre.preprocess(converted, tmp_path / 'out3', SMALL, workers=3, _patient_fn=pool_workers.preprocess_record)  # three slots: only the hold key keeps the twins apart
+    times = {n: [float((converted / n / f).read_text()) for f in ('start', 'end')] for n in ('SYNTHETICPTA', 'syntheticpta')}
+    assert times['syntheticpta'][0] >= times['SYNTHETICPTA'][1]
+
+
 def test_an_internal_error_in_one_patient_aborts_a_two_process_run_with_the_report_and_no_message(tmp_path, capfd):
     import pool_workers
     converted, out = tmp_path / 'converted', tmp_path / 'out'
@@ -2239,6 +2248,6 @@ def test_an_internal_error_in_one_patient_aborts_a_two_process_run_with_the_repo
         (converted / name).mkdir(parents=True)
     error = call_guarded(lambda: pre.preprocess(converted, out, SMALL, workers=2, _patient_fn=pool_workers.preprocess_patient))
     assert isinstance(error, pre.PreprocessAborted) and str(error) == pre.REASON_INTERNAL
-    assert [(r['patient'], r['outcome'], r['reason']) for r in report_rows(out)] == [('boom', conv.OUTCOME_REFUSED, pre.REASON_INTERNAL)]
+    assert [(r['patient'], r['outcome'], r['reason']) for r in report_rows(out)] == [('a', conv.OUTCOME_SKIPPED, ''), ('boom', conv.OUTCOME_REFUSED, pre.REASON_INTERNAL)]  # two slots: 'a' and 'boom' only
     err = capfd.readouterr().err
     assert pool_workers.SECRET not in err and 'RuntimeError' in err  # the worker logged the type and site, never the message
