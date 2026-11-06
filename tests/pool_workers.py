@@ -64,23 +64,32 @@ def log_info(value):
 
 def _raise_for(folder):
     if Path(folder).name == RAISE_NAME:
+        Path(folder, 'raised').write_text('')  # what _after_the_raiser waits for
         raise RuntimeError(SECRET)
+
+
+def _after_the_raiser(folder):
+    """Wait (at most 30 s) until the RAISE_NAME patient has raised, then give its Stop 0.3 s to reach the parent."""
+    deadline = time.monotonic() + 30
+    while not Path(folder).parent.joinpath(RAISE_NAME, 'raised').exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.3)
 
 
 # The per-stage raisers stand in for the real per-patient call (internal seam): they raise for the patient folder named
 # RAISE_NAME and otherwise return a minimal result of the stage's shape.
-# A non-raising patient sleeps first, so the raiser's Stop lands before a slot frees: only the first N patients start.
+# A non-raising patient returns only after the raiser's Stop has landed, before a slot frees: only the first N patients start.
 def convert_patient(folder, *args, **kwargs):
     from rt_dataprep import convert
     _raise_for(folder)
-    time.sleep(0.3)
+    _after_the_raiser(folder)
     return [convert.ConvertRow(Path(folder).name, '', convert.OUTCOME_SKIPPED)], 0.0, 0, None  # rows, reading seconds, files, status
 
 
 def preprocess_patient(folder, *args, **kwargs):
     from rt_dataprep import convert, preprocess
     _raise_for(folder)
-    time.sleep(0.3)
+    _after_the_raiser(folder)
     return [preprocess.PreprocessRow(Path(folder).name, '', convert.OUTCOME_SKIPPED)], None  # rows, status
 
 
