@@ -137,8 +137,9 @@ def test_escaping_exception_is_a_failed_with_only_its_type_name(workers, tmp_pat
 
 
 def test_a_dying_worker_is_a_failed_and_does_not_hang(tmp_path, capfd):
-    tasks = [Task(w.die, (0, str(tmp_path))), Task(w.after_death, (1, str(tmp_path), 0.5)), Task(w.echo, (2,))]
-    delivered, error = run_guarded(2, tasks)
+    released = tmp_path / 'released'  # created once handle has task 0's Failed, so stop is already set when task 1 returns (#183)
+    tasks = [Task(w.die, (0,)), Task(w.after_file, (1, str(released), 0.0)), Task(w.echo, (2,))]
+    delivered, error = run_guarded(2, tasks, lambda i, r: released.touch() if i == 0 else None)
     assert error is None
     assert delivered[0] == (0, Failed('BrokenProcessPool'))
     assert 2 not in {i for i, _ in delivered}  # task 1 may or may not have finished before the pool broke
