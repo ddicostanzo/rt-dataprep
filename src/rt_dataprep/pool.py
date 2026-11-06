@@ -65,6 +65,14 @@ def _call(fn, *args):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
+def _take_ctrl_c():
+    """Consume a pending, blocked Ctrl-C (N > 1 only): True if there was one."""
+    if signal.SIGINT not in signal.sigpending():
+        return False
+    signal.sigwait({signal.SIGINT})
+    return True
+
+
 def _submit(executor, task):
     call = (task.fn,) if isinstance(executor, _Inline) else (_call, task.fn)  # inline: the parent's handler stays as it is
     try:
@@ -91,8 +99,10 @@ def run(workers, tasks, handle):
     still finish and reach handle (their output is published, so their rows must be kept), then the first one is raised;
     a later exception from handle is dropped. A caller that must not start a delivered patient after its own raise (organize's
     claim) refuses it in handle itself (#182).
-    With N > 1 on POSIX the parent keeps SIGINT blocked except right after each wait returns (#177): workers start with it
-    blocked, and a Ctrl-C never lands inside wait's lock handling or between handle's bookkeeping steps.
+    With N > 1 on POSIX the parent keeps SIGINT blocked and polls for it before every pick and every 0.2 s of waiting
+    (#177): workers start with it blocked, and a Ctrl-C never lands inside wait's lock handling or in handle. A task already
+    running when the Ctrl-C reached only the parent (or a starting worker) runs to its end and is delivered. The mask is the
+    calling thread's: call run from the main thread (the CLI does), or Ctrl-C reaches another thread unmasked.
     """
     queue = deque((i, task, True) for i, task in enumerate(tasks))  # (index, task, is the first stage)
     count = len(queue)
@@ -123,6 +133,8 @@ def run(workers, tasks, handle):
         with context as executor:
             while True:
                 while len(running) < workers:
+                    if masked and _take_ctrl_c():
+                        stop = interrupted = True
                     busy = {key for _, key, _ in running.values()}
                     pick = next((e for e in queue if not (e[2] and stop) and not interrupted
                                  and (e[1].key is None or e[1].key not in busy)), None)
@@ -135,17 +147,10 @@ def run(workers, tasks, handle):
                 if not running:
                     break
                 try:
-                    done, _ = wait(running, return_when=FIRST_COMPLETED)
+                    done, _ = wait(running, timeout=0.2 if masked else None, return_when=FIRST_COMPLETED)
                 except KeyboardInterrupt:  # the workers got the same signal; let them end, then re-raise
                     stop = interrupted = True
                     continue
-                if masked:
-                    try:  # the one point a pending Ctrl-C is raised: before any new submission (#177)
-                        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
-                    except KeyboardInterrupt:
-                        stop = interrupted = True
-                    finally:
-                        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
                 for future in done:
                     index, _, first = running.pop(future)
                     error = future.exception()
@@ -172,6 +177,8 @@ def run(workers, tasks, handle):
                     elif not (stop and next_index not in started):  # never submitted after a stop: nobody waits for it
                         break
                     next_index += 1
+        if masked and _take_ctrl_c():  # one during shutdown: raised here, not by the mask restore below
+            interrupted = True
         if interrupted:
             raise KeyboardInterrupt
         if raised is not None:

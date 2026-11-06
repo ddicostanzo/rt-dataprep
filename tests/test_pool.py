@@ -194,6 +194,20 @@ def test_workers_spawn_with_ctrl_c_blocked_but_a_running_task_gets_it_and_the_pa
     assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == before
 
 
+@pytest.mark.skipif(not hasattr(signal, 'pthread_sigmask'), reason='POSIX signal masks')
+def test_a_ctrl_c_to_the_parent_during_handle_starts_no_new_patient(tmp_path):
+    def handle(index, result):
+        if index == 0:
+            os.kill(os.getpid(), signal.SIGINT)  # the parent alone, as at worker startup: pending until the next pick
+
+    delivered = []
+    tasks = [Task(w.echo, (0,)), Task(w.sleep_then, (1, 0.5)), Task(w.record, ('2', str(tmp_path), 0.0))]
+    with pytest.raises(KeyboardInterrupt):  # on the main thread, as the CLI runs it: the mask is per thread
+        pool.run(2, tasks, lambda i, r: (delivered.append(i), handle(i, r))[1])
+    assert delivered == [0, 1]  # the running task still ends and is delivered
+    assert 2 not in started(tmp_path)
+
+
 def test_a_worker_info_line_reaches_stderr(capfd, caplog):
     caplog.set_level(logging.INFO)  # the parent's root level is what the pool initializer copies
     run_guarded(2, [Task(w.log_info, (7,))])
