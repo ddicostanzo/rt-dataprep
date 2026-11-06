@@ -8,6 +8,7 @@ message and remote traceback can quote a patient). Nothing here formats, logs or
 import contextlib
 import logging
 import multiprocessing
+import signal
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from typing import Callable, NamedTuple
@@ -41,12 +42,24 @@ class _Inline:
 
 
 def _init_worker(level):
+    # An idle worker ignores Ctrl-C: one killed while waiting for work breaks the pool, which kills the busy ones mid-cleanup.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     logging.basicConfig(level=level, format='%(message)s')  # a spawned worker starts with no handler: INFO would vanish
 
 
-def _submit(executor, task):
+def _call(fn, *args):
+    """Run fn in a worker with Ctrl-C raising KeyboardInterrupt, as in the parent, so its own cleanup runs."""
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
-        return executor.submit(task.fn, *task.args)
+        return fn(*args)
+    finally:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _submit(executor, task):
+    call = (task.fn,) if isinstance(executor, _Inline) else (_call, task.fn)  # inline: the parent's handler stays as it is
+    try:
+        return executor.submit(*call, *task.args)
     except Exception as exc:  # e.g. a pool that broke between two checks: the same Failed as any other escape
         future = Future()
         future.set_exception(exc)
@@ -61,9 +74,10 @@ def run(workers, tasks, handle):
     First results reach handle in input order whatever the completion order; a result is a task's return value or Failed.
     handle returns None, ABORT, or a Task: a follow-up for the same index, queued ahead of unstarted work and sharing the
     slots; its result reaches handle(index, result) when it completes (in completion order) and may chain again.
-    After ABORT, or a Failed, nothing further is submitted; running tasks finish and are delivered (a Task returned then is
-    dropped). KeyboardInterrupt, from a task or the waiting parent, stops submission the same way; a task that returns still
-    reaches handle, one that raises gets no call, and the interrupt is raised once the running tasks end.
+    After ABORT, or a Failed, no further first-stage task is submitted; running tasks finish and are delivered, and a
+    follow-up of an index already started still runs (that patient was under way). KeyboardInterrupt, from a task or the waiting parent, stops submission the same way; a task that returns still
+    reaches handle, one that raises gets no call, no follow-up runs, and the interrupt is raised once the running tasks end.
+    Idle workers ignore Ctrl-C; a running task gets it as KeyboardInterrupt.
     """
     queue = deque((i, task, True) for i, task in enumerate(tasks))  # (index, task, is the first stage)
     count = len(queue)
@@ -77,7 +91,7 @@ def run(workers, tasks, handle):
         follow = handle(index, result)
         if follow is ABORT:
             stop = True
-        elif follow is not None and not stop:
+        elif follow is not None and not interrupted:
             queue.appendleft((index, follow, False))
 
     context = (contextlib.nullcontext(_Inline()) if workers == 1 else
@@ -85,9 +99,10 @@ def run(workers, tasks, handle):
                                    initializer=_init_worker, initargs=(logging.getLogger().level,)))
     with context as executor:
         while True:
-            while not stop and len(running) < workers:
+            while len(running) < workers:
                 busy = {key for _, key, _ in running.values()}
-                pick = next((e for e in queue if e[1].key is None or e[1].key not in busy), None)
+                pick = next((e for e in queue if not (e[2] and stop) and not interrupted
+                             and (e[1].key is None or e[1].key not in busy)), None)
                 if pick is None:
                     break
                 queue.remove(pick)
@@ -112,7 +127,6 @@ def run(workers, tasks, handle):
                 else:
                     stop = True
                     result = _SKIP if interrupted else Failed(type(error).__name__)
-                error = None  # drop the exception object (and its remote traceback) unseen
                 if first:
                     ready[index] = result
                 elif result is not _SKIP:

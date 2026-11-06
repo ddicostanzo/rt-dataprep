@@ -78,3 +78,27 @@ def organize_read(folder, *args, **kwargs):
 def organize_copy(folder, *args, **kwargs):
     _raise_for(folder)
     return 0.0, None  # copy seconds, status
+
+
+def cleanup_on_interrupt(value, directory):
+    """Sleep until Ctrl-C, then clean up and return: the result must still reach the parent."""
+    Path(directory, f'{value}.start').write_text('')
+    try:
+        time.sleep(30)
+    except KeyboardInterrupt:
+        time.sleep(0.5)
+        return f'cleaned {value}'
+    return f'slept {value}'
+
+
+INTERRUPT_SCRIPT = '''
+import sys
+import pool_workers as w
+from rt_dataprep import pool
+got = []
+try:
+    pool.run(2, [pool.Task(w.cleanup_on_interrupt, ('a', sys.argv[1])), pool.Task(w.echo, ('b',))],
+             lambda i, r: got.append((i, r)))
+except KeyboardInterrupt:
+    print('interrupted', sorted(got))
+'''

@@ -211,10 +211,13 @@ def test_follow_up_tasks_share_the_slots_and_results_carry_the_index(workers, mo
 
 
 @BOTH
-def test_abort_on_a_read_result_drops_its_copy(workers):
+def test_abort_on_a_read_result_starts_no_new_patient_but_finishes_started_ones(workers):
     tasks = [Task(w.echo, (i,)) for i in range(3)]
-    delivered, _ = run_guarded(workers, tasks, lambda i, r: ABORT if i == 0 else Task(w.echo, ('copy',)))
-    assert ('copy' not in [r for _, r in delivered]) and delivered[0] == (0, 0)
+    handle = lambda i, r: ABORT if r == 0 else Task(w.echo, (f'copy {i}',)) if isinstance(r, int) else None  # noqa: E731
+    delivered, error = run_guarded(workers, tasks, handle)
+    assert error is None and delivered[0] == (0, 0)
+    assert all(i < workers for i, _ in delivered)  # only the first N were started; 2 never is
+    assert ('copy 0' not in [r for _, r in delivered]) and (workers == 1 or (1, 'copy 1') in delivered)
 
 
 @BOTH
@@ -223,3 +226,38 @@ def test_per_stage_raisers_fail_on_the_chosen_folder_only(fn, workers, tmp_path)
     delivered, error = run_guarded(workers, [Task(fn, (tmp_path / name,)) for name in ('ok', w.RAISE_NAME)])
     assert error is None
     assert [isinstance(r, Failed) for _, r in delivered] == [False, True]
+
+
+def test_a_real_ctrl_c_keeps_the_row_of_a_running_task_while_another_worker_is_idle(tmp_path):
+    # A real SIGINT to the process group, as a terminal sends it: an idle worker must not die and break the pool.
+    import signal
+    import subprocess
+    import sys
+    import time
+    env = {**os.environ, 'PYTHONPATH': os.pathsep.join([str(Path(w.__file__).parent), str(Path(pool.__file__).parents[1])])}
+    proc = subprocess.Popen([sys.executable, '-c', w.INTERRUPT_SCRIPT, str(tmp_path)], env=env, start_new_session=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + TIMEOUT
+        while not (tmp_path / 'a.start').exists():
+            assert time.monotonic() < deadline and proc.poll() is None, 'the task never started'
+            time.sleep(0.05)
+        time.sleep(1.0)  # 'b' has finished: its worker is idle
+        os.killpg(proc.pid, signal.SIGINT)
+        out, err = proc.communicate(timeout=TIMEOUT)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+    assert out.strip() == "interrupted [(0, 'cleaned a'), (1, 'b')]"
+    assert 'Traceback' not in err  # no worker died on the signal
+
+
+@BOTH
+def test_a_failed_later_index_still_runs_the_follow_up_of_an_earlier_one(workers, tmp_path):
+    # index 0's read finishes before index 1 fails (or in the same pass): 0's copy still runs, nothing new starts
+    tasks = [Task(w.echo, ('read 0',)), Task(w.fail, ('read 1', 0.5)), Task(w.echo, ('read 2',))]
+    follow = lambda i, r: Task(w.sleep_then, (f'copy {i}', 1.0)) if r == 'read 0' else None  # noqa: E731
+    delivered, error = run_guarded(workers, tasks, follow)
+    assert error is None
+    assert (0, 'copy 0') in delivered and (1, Failed('RuntimeError')) in delivered
+    assert all(i != 2 for i, _ in delivered) or workers == 1  # N=2 never starts 2 after the failure; N=1 ran it before
