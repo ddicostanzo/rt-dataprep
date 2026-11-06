@@ -49,3 +49,8 @@ Gotchas:
   read_failure is asked about the CT slices twice (once from _read_ct, once from read_series). A4 compares the first calls and the set.
 - A refused plan leaves extra rows ('studies' skipped/converted) beside the plan_1 row; A4 filters on plan_1 (and the studies row for the series site).
 - Under dicom_io's `open` patch, pydicom's own opens are untouched (they live in pydicom), so only read_failure's re-read is forced.
+
+## review-2
+- No BLOCKING. WARNING (fixed by orchestrator): the CT site's re-read was unpinned (read_series re-reads the same slices); added test_a3_the_ct_read_itself_reports_the_io_error with read_series stubbed; mutation-checked (fails without the _read_ct call).
+- NOTE (deferred): a refused plan's CT is re-read twice (as the CT and as another series): cost only.
+- NOTE (deferred): A4's first-calls comparison can't tell which site made the calls.

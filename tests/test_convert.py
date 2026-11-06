@@ -1659,6 +1659,15 @@ def test_a3_a_file_system_error_from_the_reread_is_the_patients_io_error(tree, m
     assert modes == ['rb']  # the patch was reached, once, in binary
 
 
+def test_a3_the_ct_read_itself_reports_the_io_error(tree, monkeypatch):
+    org, out = tree
+    _, bad, _ = site_ct(org)
+    monkeypatch.setattr(conv.ser, 'read_series', lambda slices: None)  # the CT is read again as another series: only _read_ct's re-read is left
+    modes = fail_open(monkeypatch, bad, PermissionError(errno.EACCES, 'denied', str(bad)))
+    only_io_error_row(out, conv.convert(org, out).rows)
+    assert modes == ['rb']
+
+
 @pytest.mark.parametrize('site', SITES)
 def test_a5_a_forced_enomem_from_the_reread_is_the_internal_error_and_stops_the_run(tree, monkeypatch, site):
     org, out = tree
