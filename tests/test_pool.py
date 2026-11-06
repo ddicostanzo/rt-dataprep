@@ -2,6 +2,7 @@
 import logging
 import os
 import signal
+import sys
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -163,6 +164,21 @@ def test_a_worker_spawned_after_the_manager_waits_is_still_watched(tmp_path, mon
     delivered, error = run_guarded(2, tasks)
     assert error is None
     assert delivered == [(0, Failed('BrokenProcessPool')), (1, Failed('BrokenProcessPool'))]  # task 0 ends when the pool breaks, not after its sleep
+
+
+def test_a_raising_manager_wakeup_keeps_the_submitted_task(monkeypatch):
+    """pool's extra wakeup (#200) is best effort: if it raises, the task already submitted still runs and is delivered (#201)."""
+    from concurrent.futures import process
+    real = process._ThreadWakeup.wakeup
+
+    def wakeup(self):
+        if sys._getframe(1).f_globals.get('__name__') == pool.__name__:  # only pool's own kick; CPython's calls stay real
+            raise RuntimeError(w.SECRET)
+        return real(self)
+
+    monkeypatch.setattr(process._ThreadWakeup, 'wakeup', wakeup)
+    delivered, error = run_guarded(2, [Task(w.echo, (0,)), Task(w.echo, (1,))])
+    assert error is None and delivered == [(0, 0), (1, 1)]
 
 
 def test_a_submit_that_raises_is_a_failed(monkeypatch):
