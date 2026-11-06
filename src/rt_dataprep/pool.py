@@ -99,7 +99,8 @@ def run(workers, tasks, handle):
     With N > 1 on POSIX the parent keeps SIGINT blocked and takes it before every pick and after every wait (wait wakes every 0.2 s for that)
     (#177): workers start with it blocked, and a Ctrl-C never lands inside wait's lock handling or in handle. A task already
     running when the Ctrl-C reached only the parent (or a starting worker) runs to its end and is delivered. The mask is the
-    calling thread's: call run from the main thread (the CLI does), or Ctrl-C reaches another thread unmasked.
+    calling thread's: call run from the main thread (the CLI does), or Ctrl-C reaches another thread unmasked. A caller that
+    had SIGINT blocked already gets no polling: its pending Ctrl-C stays pending for it (#194).
     """
     queue = deque((i, task, True) for i, task in enumerate(tasks))  # (index, task, is the first stage)
     count = len(queue)

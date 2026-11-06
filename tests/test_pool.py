@@ -210,8 +210,11 @@ def test_a_caller_that_blocked_ctrl_c_keeps_its_pending_one():
     try:
         signal.pthread_kill(threading.get_ident(), signal.SIGINT)  # pending, as the caller meant it
         delivered = []
-        pool.run(2, [Task(w.echo, (0,))], lambda i, r: delivered.append(i))
-        assert delivered == [0]  # no KeyboardInterrupt: the pending Ctrl-C is the caller's (#194)
+        try:
+            pool.run(2, [Task(w.echo, (0,))], lambda i, r: delivered.append(i))
+        except KeyboardInterrupt:  # a bare one would abort the whole pytest run
+            pytest.fail('run took the caller\'s pending Ctrl-C (#194)')
+        assert delivered == [0]
         assert signal.SIGINT in signal.sigpending()
     finally:
         signal.sigtimedwait({signal.SIGINT}, 0)  # consumed here, or the restore below raises it
