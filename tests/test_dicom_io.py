@@ -600,3 +600,14 @@ def test_the_rmtree_handler_clears_the_read_only_bit_before_it_retries(tmp_path)
         os.unlink(p)
     getattr(dicom_io, '_clear_readonly')(func, str(file), OSError())  # noqa: B009
     assert seen and not file.exists()
+
+
+def test_the_rmtree_handler_never_changes_a_link_target(tmp_path):
+    outside = tmp_path / 'outside.bin'
+    outside.write_bytes(b'SYNTHETIC_outside')
+    outside.chmod(0o444)
+    link = tmp_path / 'link'
+    link.symlink_to(outside)
+    getattr(dicom_io, '_clear_readonly')(os.unlink, str(link), OSError())  # noqa: B009
+    assert not os.path.lexists(link)
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o444
