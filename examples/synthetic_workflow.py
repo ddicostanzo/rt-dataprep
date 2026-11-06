@@ -85,7 +85,7 @@ def run(workspace):
     # The four legacy steps, three geometric plus the CT rescale (the CLI's --initial-resample --rescale --resample --reshape), with a deliberately compact grid for a quick local example.
     steps = PreprocessSteps(resample=True, rescale=True, harmonize_spacing=True, reshape=True,
                             new_spacing=(1, 1, 2), final_spacing=(1.25, 1.25, 2), new_shape=(16, 16, 8))
-    preprocessing = preprocess(converted, processed, steps)
+    preprocessing = preprocess(converted, processed, steps, workers=2)
     if any(row.outcome != 'preprocessed' for row in preprocessing.rows):
         raise RuntimeError('synthetic preprocessing had an unexpected outcome')
     for root in (converted, processed):

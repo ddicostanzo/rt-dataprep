@@ -25,7 +25,7 @@ import pydicom
 import SimpleITK as sitk
 from pydicom.datadict import tag_for_keyword
 
-from rt_dataprep import dicom_io, masks
+from rt_dataprep import dicom_io, masks, pool
 from rt_dataprep import series as ser
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
 from rt_dataprep.series import DIRECTION_ATOL
@@ -98,13 +98,14 @@ class PlanResult:
     series_rows: list  # dicts of SERIES_COLUMNS for the plan's series.csv, which the patient level writes last
 
 
-def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwrite=False):
+def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwrite=False, _patient_fn=None):
     """
     Convert every <patient>/plan_<n>/ under org_root into out_root/<patient>/plan_<n>/ and write convert_report.csv.
 
     exclude_models: a study that holds a file whose ManufacturerModelName contains one of these is left out of the other series.
-    workers: accepted and logged; unused until patients run in processes.
+    workers: patient processes, one patient per process (about 7 GB RAM each at 701x701x433); the output is the same for any N.
     overwrite: replace a patient's existing output folder once the new output holds a converted row; otherwise the old one is kept.
+    _patient_fn: internal test seam, replaces the per-patient call only (module-level and picklable for workers > 1).
     """
     org_root, out_root = Path(org_root), Path(out_root)
     if out_root.resolve().is_relative_to(org_root.resolve()):  # before any mkdir: nothing is written into the input
@@ -113,42 +114,89 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwr
         raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
     folders = sorted(p for p in org_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
-    rows, aborted = [], False
-    claimed = set()  # casefolded folder names of this run, read only under overwrite: a case-insensitive root would merge them
-    replaced = kept = 0
-    reading = 0.0  # seconds and header files of the patients that finished; a refused or aborted patient adds none
-    files = 0
+    patient_fn = _patient_fn or _convert_patient
+    # The parent owns the claims. Under overwrite a repeat of a casefolded name (a case-insensitive root would merge them) is refused here,
+    # undispatched; otherwise the repeat is dispatched under the same hold key, so it starts after the first one ended.
+    dispatched, refused, claimed = [], {}, set()
+    for i, folder in enumerate(folders):
+        if overwrite and folder.name.casefold() in claimed:
+            refused[i] = [ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_NAME_CLAIMED)]
+        else:
+            dispatched.append(i)
+        claimed.add(folder.name.casefold())
+    tasks = [pool.Task(_convert_worker, (patient_fn, folders[i], out_root, exclude_models, overwrite), folders[i].name.casefold())
+             for i in dispatched]
+    results, aborted = {}, False  # folder index -> (rows, reading seconds, header files, status, seconds, internal)
+
+    def handle(k, result):
+        nonlocal aborted
+        i = dispatched[k]
+        if isinstance(result, pool.Failed):  # escaped the worker wrapper (a broken pool...): only the type name is known
+            if result.type_name == 'SystemExit':  # as before: exits the run with no row; the report is still written
+                raise SystemExit
+            log.error('convert: %s: %s', REASON_INTERNAL, result.type_name)
+            result = [ConvertRow(folders[i].name, '', OUTCOME_REFUSED, REASON_INTERNAL)], 0.0, 0, None, 0.0, True
+        results[i] = result
+        if result[-1]:
+            aborted = True
+            return pool.ABORT
+
     started = time.monotonic()
     try:
-        for folder in folders:
-            try:
-                found, read_s, read_files, status = _convert_patient(folder, out_root, exclude_models, overwrite, claimed)
-                rows += found
-                reading, files = reading + read_s, files + read_files
-                replaced, kept = replaced + (status == 'replaced'), kept + (status == 'kept')
-            except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
-                rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_IO_ERROR))
-                log.warning('convert: %s', REASON_IO_ERROR)
-            except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
-                module, line = crash_site(sys.exc_info()[2])
-                rows.append(ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_INTERNAL))
-                log.error('convert: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
-                aborted = True
-                break
+        pool.run(workers, tasks, handle)
     finally:  # Ctrl-C too: the report lists what was done
+        rows = rows_in_order(len(folders), refused, {i: r[0] for i, r in results.items()})
         write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'],
                      ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows))
+    # A refused or aborted patient adds no reading seconds or files; every patient adds its own time minus its reading.
+    reading, files = sum(r[1] for r in results.values()), sum(r[2] for r in results.values())
+    converting = sum(r[4] - r[1] for r in results.values())
+    replaced, kept = (sum(r[3] == status for r in results.values()) for status in ('replaced', 'kept'))
     plan_rows = [r for r in rows if re.fullmatch(PLAN_FOLDER, r.folder)]
     patient_rows = [r for r in rows if r.folder == '']
     log.info('convert: %d plan rows (%d converted, %d refused, %d skipped), %d imaging rows, %d studies rows, %d patient rows (%d refused, %d skipped); %d replaced, %d kept',
              len(plan_rows), *(sum(r.outcome == o for r in plan_rows) for o in (OUTCOME_CONVERTED, OUTCOME_REFUSED, OUTCOME_SKIPPED)),
              sum(bool(re.fullmatch(STUDY_SERIES, r.folder)) for r in rows), sum(r.folder == STUDIES_NAME for r in rows), len(patient_rows),
              *(sum(r.outcome == o for r in patient_rows) for o in (OUTCOME_REFUSED, OUTCOME_SKIPPED)), replaced, kept)
-    total = time.monotonic() - started
-    log.info('convert: %.1f s total, %.1f s reading, %.1f s converting, %d files, workers %d', total, reading, total - reading, files, workers)
-    if aborted:  # raised here, after the except blocks: nothing of the original is chained
+    log.info('convert: %.1f s total, %.1f s reading (summed over patients), %.1f s converting (summed over patients), %d files, workers %d',
+             time.monotonic() - started, reading, converting, files, workers)
+    if aborted:  # raised here: nothing of the original is chained
         raise ConvertAborted(REASON_INTERNAL)
     return ConvertReport(rows)
+
+
+def rows_in_order(count, refused, done):
+    """
+    The rows of folders 0..count-1 in order: `done` maps a folder index to its patient's rows, `refused` to the rows of a repeat that was
+    never dispatched. A repeat has a row only if every dispatched folder before it has one: the run got that far.
+    """
+    rows, reached = [], True
+    for i in range(count):
+        if i in refused:
+            rows += refused[i] if reached else []
+        elif i in done:
+            rows += done[i]
+        else:
+            reached = False
+    return rows
+
+
+def _convert_worker(patient_fn, folder, out_root, exclude_models, overwrite):
+    """
+    One patient in a worker (or inline): patient_fn's (rows, reading seconds, header files, status) plus the patient's seconds and an
+    internal flag. A failure becomes data here, as a traceback does not cross the process boundary: an OSError is the patient's
+    REASON_IO_ERROR row, any other Exception its REASON_INTERNAL row, with only the type and the crash site logged (no message).
+    """
+    started = time.monotonic()
+    try:
+        return (*patient_fn(folder, out_root, exclude_models, overwrite), time.monotonic() - started, False)
+    except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
+        log.warning('convert: %s', REASON_IO_ERROR)
+        return [ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_IO_ERROR)], 0.0, 0, None, time.monotonic() - started, False
+    except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
+        module, line = crash_site(sys.exc_info()[2])
+        log.error('convert: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
+        return [ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_INTERNAL)], 0.0, 0, None, time.monotonic() - started, True
 
 
 def crash_site(tb):
@@ -163,12 +211,8 @@ def crash_site(tb):
     return site
 
 
-def _convert_patient(folder, out_root, exclude_models, overwrite, claimed):
+def _convert_patient(folder, out_root, exclude_models, overwrite):
     """(rows, reading seconds, header files read, status None/'new'/'replaced'/'kept'); a raise adds neither of the middle two."""
-    if overwrite:  # first: a repeat of a name written this run must not recover, rename or replace anything
-        if folder.name.casefold() in claimed:
-            return [ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_NAME_CLAIMED)], 0.0, 0, None
-        claimed.add(folder.name.casefold())
     target = out_root / folder.name
     dicom_io.recover(out_root, folder.name)
     exists = os.path.lexists(target)  # lexists, as publish: a dangling link is an existing target

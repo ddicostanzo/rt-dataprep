@@ -2167,3 +2167,78 @@ def test_overwrite_leaves_an_unrelated_output_folder_alone(tmp_path):
     (out / 'SYNTHETICOTHER' / 'keep.txt').write_text('keep')
     pre.preprocess(converted, out, SMALL, overwrite=True)
     assert (out / 'SYNTHETICOTHER' / 'keep.txt').read_text() == 'keep'
+
+
+# ---- patient processes (#171): N=2 equals N=1, parent-side claims, abort ----
+
+def three_patients(root, names=('SYNTHETICPTA', 'SYNTHETICPTB', 'SYNTHETICPTC')):
+    for name in names:
+        write_plan(root, patient=name)
+
+
+def written_bytes(root):
+    """{relative path: bytes} of every file under root except the report copies (their names carry a timestamp)."""
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob('*')) if p.is_file() and 'report' not in p.name}
+
+
+def rows_of(report):
+    return [(r.patient, r.folder, r.outcome, r.reason, r.files, r.skipped_series) for r in report.rows]
+
+
+def call_guarded(fn):
+    """Run fn in a daemon thread and fail instead of hanging; return the exception it raised, if any."""
+    import threading
+    outcome = {}
+
+    def target():
+        try:
+            fn()
+        except BaseException as exc:  # noqa: BLE001
+            outcome['error'] = exc
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(120)
+    assert not thread.is_alive(), 'the call did not return'
+    return outcome.get('error')
+
+
+def test_two_patient_processes_write_the_same_files_and_rows_as_one(tmp_path):
+    converted = tmp_path / 'converted'
+    three_patients(converted)
+    one = pre.preprocess(converted, tmp_path / 'out1', SMALL)
+    two = pre.preprocess(converted, tmp_path / 'out2', SMALL, workers=2)
+    assert rows_of(two) == rows_of(one) and len(one.rows) >= 3
+    assert all(r.outcome == 'preprocessed' for r in one.rows)  # not a vacuous equality
+    assert written_bytes(tmp_path / 'out2') == written_bytes(tmp_path / 'out1') and written_bytes(tmp_path / 'out1')
+
+
+@pytest.mark.parametrize('workers', [1, 2])
+def test_under_overwrite_a_case_repeat_is_refused_by_the_parent_and_the_first_in_sorted_order_wins(tmp_path, workers):
+    converted = tmp_path / 'converted'
+    three_patients(converted, ('SYNTHETICPTA', 'syntheticpta', 'SYNTHETICPTC'))  # sorted: ...PTA, ...PTC, syntheticpta
+    rows = rows_of(pre.preprocess(converted, tmp_path / 'out', SMALL, workers=workers, overwrite=True))
+    claimed = [r for r in rows if r[3] == pre.REASON_NAME_CLAIMED]
+    assert claimed == [('syntheticpta', '', conv.OUTCOME_REFUSED, pre.REASON_NAME_CLAIMED, [], 0)]
+    assert [r[0] for r in rows if r[1] == 'plan_1'] == ['SYNTHETICPTA', 'SYNTHETICPTC']
+    assert not (tmp_path / 'out' / 'syntheticpta').exists()
+
+
+def test_without_overwrite_a_case_repeat_is_held_and_the_rows_equal_those_of_one_process(tmp_path):
+    converted = tmp_path / 'converted'
+    three_patients(converted, ('SYNTHETICPTA', 'syntheticpta', 'SYNTHETICPTC'))
+    one = rows_of(pre.preprocess(converted, tmp_path / 'out1', SMALL))
+    two = rows_of(pre.preprocess(converted, tmp_path / 'out2', SMALL, workers=2))
+    assert two == one and not any(r[3] == pre.REASON_NAME_CLAIMED for r in one)
+    assert [r[0] for r in one if r[1] == 'plan_1'] == ['SYNTHETICPTA', 'SYNTHETICPTC', 'syntheticpta']  # the repeat ran, as today
+
+
+def test_an_internal_error_in_one_patient_aborts_a_two_process_run_with_the_report_and_no_message(tmp_path, capfd):
+    import pool_workers
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    for name in ('a', 'boom', 'c', 'd', 'e', 'f'):
+        (converted / name).mkdir(parents=True)
+    error = call_guarded(lambda: pre.preprocess(converted, out, SMALL, workers=2, _patient_fn=pool_workers.preprocess_patient))
+    assert isinstance(error, pre.PreprocessAborted) and str(error) == pre.REASON_INTERNAL
+    assert [(r['patient'], r['outcome'], r['reason']) for r in report_rows(out)] == [('boom', conv.OUTCOME_REFUSED, pre.REASON_INTERNAL)]
+    err = capfd.readouterr().err
+    assert pool_workers.SECRET not in err and 'RuntimeError' in err  # the worker logged the type and site, never the message
