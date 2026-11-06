@@ -93,8 +93,9 @@ Use `uv run python -m rt_dataprep COMMAND --help` for exact arguments. Study exc
 `--workers N` (1 to 64, default 1; organize, convert and preprocess) processes N patients at a time, each in its own
 process. The output and row order are the same for any value. Budget about 7 GB of RAM per worker at the full
 701 x 701 x 433 grid. SimpleITK and BLAS threads are not capped per process, so N workers can use more than N cores.
-Ctrl-C in a terminal reaches the workers too. `kill -INT` sent to the parent process alone makes it wait for the patients
-already running, then stop with the report written.
+Ctrl-C in a terminal reaches the workers too. With N > 1, `kill -INT` sent to the parent process alone makes it wait for
+the patients already running, then stop with the report written; with N = 1 the patient runs in the parent and stops at
+once, as before.
 
 ## Input and output
 
