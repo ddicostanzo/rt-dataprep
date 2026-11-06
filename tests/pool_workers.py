@@ -107,3 +107,11 @@ except KeyboardInterrupt:
 def stop_now(value):
     from rt_dataprep import pool
     return pool.Stop(value)
+
+
+def exit_with(code):
+    raise SystemExit(code)
+
+
+def patient_exits_3(folder, *args, **kwargs):
+    raise SystemExit(3)

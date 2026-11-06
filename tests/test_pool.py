@@ -270,3 +270,10 @@ def test_a_stop_result_halts_submission_when_it_completes_not_when_its_turn_come
     delivered, error = run_guarded(workers, tasks)
     assert error is None
     assert delivered == [(0, 'slow 0'), (1, 'failed 1')]  # unwrapped, in input order; nothing after 1 ever started
+
+
+@BOTH
+@pytest.mark.parametrize('code, expected', [(3, 3), (None, None), ('SYNTHETIC_secret_message', 1)])
+def test_a_system_exit_keeps_its_sanitized_code_and_never_its_message(workers, code, expected):
+    delivered, error = run_guarded(workers, [Task(w.exit_with, (code,))])
+    assert error is None and delivered == [(0, Failed('SystemExit', expected))]

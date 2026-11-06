@@ -86,7 +86,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
         folder = folders[i]
         if isinstance(result, pool.Failed):  # escaped the worker wrapper (a broken pool...): only the type name is known
             if result.type_name == 'SystemExit':  # as before: exits the run with no row; the report is still written
-                raise SystemExit
+                raise SystemExit(result.code)  # its sanitized code, as quiet_call keeps it
             log.error('organize: %s: %s', REASON_INTERNAL, result.type_name)
             result = (None, _failure_row(folder, REASON_INTERNAL))
         result, failure = result

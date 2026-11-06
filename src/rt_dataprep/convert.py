@@ -133,7 +133,7 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwr
         i = dispatched[k]
         if isinstance(result, pool.Failed):  # escaped the worker wrapper (a broken pool...): only the type name is known
             if result.type_name == 'SystemExit':  # as before: exits the run with no row; the report is still written
-                raise SystemExit
+                raise SystemExit(result.code)  # its sanitized code, as quiet_call keeps it
             log.error('convert: %s: %s', REASON_INTERNAL, result.type_name)
             result = [ConvertRow(folders[i].name, '', OUTCOME_REFUSED, REASON_INTERNAL)], 0.0, 0, None, 0.0, True
         results[i] = result

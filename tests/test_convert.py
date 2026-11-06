@@ -1509,3 +1509,13 @@ def test_an_internal_error_in_one_patient_aborts_a_two_process_run_with_the_repo
     assert [(r['patient'], r['outcome'], r['reason']) for r in rows] == [('boom', conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
     err = capfd.readouterr().err
     assert pool_workers.SECRET not in err and 'RuntimeError' in err  # the worker logged the type and site, never the message
+
+
+@pytest.mark.parametrize('workers', [1, 2])
+def test_a_patient_system_exit_keeps_its_code(tmp_path, workers):
+    # Codex P2 on #176: the scheduler must not turn SystemExit(3) into a successful exit
+    import pool_workers
+    (tmp_path / 'org' / 'SYNTHETIC_P').mkdir(parents=True)
+    with pytest.raises(SystemExit) as raised:
+        conv.convert(tmp_path / 'org', tmp_path / 'out', workers=workers, _patient_fn=pool_workers.patient_exits_3)
+    assert raised.value.code == 3 and (tmp_path / 'out' / 'convert_report.csv').is_file()

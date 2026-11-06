@@ -21,8 +21,9 @@ class Task(NamedTuple):
 
 
 class Failed(NamedTuple):
-    """The result of a task whose function raised: only the exception type's name."""
+    """The result of a task whose function raised: only the exception type's name (and a SystemExit's sanitized code)."""
     type_name: str
+    code: int | None = None  # SystemExit only: an int code is kept, None stays None, anything else (a message) becomes 1
 
 
 class Stop(NamedTuple):
@@ -133,7 +134,8 @@ def run(workers, tasks, handle):
                     result = _SKIP
                 else:
                     stop = True
-                    result = _SKIP if interrupted else Failed(type(error).__name__)
+                    code = error.code if isinstance(error, SystemExit) and isinstance(error.code, int | None) else 1
+                    result = _SKIP if interrupted else Failed(type(error).__name__, code if isinstance(error, SystemExit) else None)
                 if first:
                     ready[index] = result
                 elif result is not _SKIP:

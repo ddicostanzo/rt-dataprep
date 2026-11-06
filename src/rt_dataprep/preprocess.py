@@ -399,7 +399,7 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
         i = dispatched[k]
         if isinstance(result, pool.Failed):  # escaped the worker wrapper (a broken pool...): only the type name is known
             if result.type_name == 'SystemExit':  # as before: exits the run with no row; the report is still written
-                raise SystemExit
+                raise SystemExit(result.code)  # its sanitized code, as quiet_call keeps it
             log.error('preprocess: %s: %s', REASON_INTERNAL, result.type_name)
             result = [PreprocessRow(folders[i].name, '', conv.OUTCOME_REFUSED, REASON_INTERNAL)], None, True
         results[i] = result
