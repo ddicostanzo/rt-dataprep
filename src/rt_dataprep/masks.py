@@ -48,7 +48,7 @@ def classify(struct, plan, frame_uid, taken=(), ct=None):
 
     Not kept: ROIs with no contour data, POINT ROIs (every contour POINT) and names containing 'dose'. Of the rest, ROIs
     with an OPEN_NONPLANAR contour or RTROIInterpretedType BRACHY_CHANNEL are applicators, the others masks. An
-    applicator ROI no plan channel references is dropped when a referenced one has its name (ignoring case) and its
+    applicator ROI no plan channel references is dropped when a referenced one has its file name (ignoring case) and its
     point count: the RTSTRUCT's library copy of that channel. An applicator named like a mask is written as
     '<name>_channel.nii.gz'. With `ct` (the planning CT image), a would-be mask ROI whose every non-POINT contour crosses
     CT slices (a reference line drawn on a reformatted plane) is a line instead: its points go to a text file like an

@@ -492,6 +492,30 @@ def test_an_applicator_named_like_a_mask_gets_the_channel_suffix(tmp_path):
     assert np.allclose(np.loadtxt(case / 'Cylinder1_channel.nii.gz'), channel_points(3), atol=1e-3)
 
 
+
+def test_an_unreferenced_applicator_with_another_name_and_the_same_point_count_is_kept(tmp_path):
+    rois = [dict(number=1, name='Ch 1', kind='channel', points=channel_points(6)),
+            dict(number=2, name='Other', kind='channel', points=channel_points(6) + 1)]  # same count, other name: not a twin
+    channels = [dict(applicator_id='Ring', dwells_mm=np.zeros((2, 3)), roi=1)]
+    result, case = run(tmp_path, make_plan(tmp_path, rois, channels))
+    assert result.files == ['planning_ct.nii.gz', 'Ring.nii.gz', 'Other.nii.gz']
+    assert np.allclose(np.loadtxt(case / 'Other.nii.gz'), channel_points(6) + 1, atol=1e-3)
+
+
+def test_an_unreferenced_applicator_named_like_a_mask_gets_the_channel_suffix(tmp_path):
+    rois = [box(1, 'ring', (1, 2), (1, 2), (1, 2)), dict(number=2, name='Ring', kind='channel', points=channel_points(3))]
+    result, case = run(tmp_path, make_plan(tmp_path, rois, []))
+    assert result.files == ['planning_ct.nii.gz', 'ring.nii.gz', 'Ring_channel.nii.gz']
+    assert np.allclose(np.loadtxt(case / 'Ring_channel.nii.gz'), channel_points(3), atol=1e-3)
+
+
+def test_two_applicators_that_both_take_one_masks_channel_suffix_refuse(tmp_path):
+    rois = [box(1, 'ring', (1, 2), (1, 2), (1, 2)),
+            dict(number=2, name='x', kind='channel', points=channel_points(3)),
+            dict(number=3, name='RING', kind='channel', points=channel_points(4))]  # another point count: not a dropped twin
+    channels = [dict(applicator_id='Ring', dwells_mm=np.zeros((2, 3)), roi=2)]
+    assert refused(tmp_path, make_plan(tmp_path, rois, channels)) == masks.REASON_ROI_NAMES
+
 # A reference line: one contour across the CT's slices (z 7..17 mm here), drawn on a reformatted plane.
 SPANNING = np.array([[-1.0, 8.0, 7.0], [-1.0, 8.0, 12.0], [-1.0, 8.0, 17.0]])
 
