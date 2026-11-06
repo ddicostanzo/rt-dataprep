@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -208,6 +209,26 @@ def rename_dir(src, dst):
     Path(src).rename(dst)
 
 
+def _clear_readonly(func, path, exc):
+    """rmtree onexc: clear a read-only bit (Windows) and retry the failed call once; a second failure propagates to remove_tree."""
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+def remove_tree(path):
+    """
+    Delete the tree at `path`; a symlink (dangling or not) is unlinked, never followed. Read-only files are cleared first.
+    Any OSError, a missing path included, is swallowed: a leftover is retried by the next recover.
+    """
+    try:
+        if os.path.islink(path):
+            os.unlink(path)
+        else:
+            shutil.rmtree(path, onexc=_clear_readonly)
+    except OSError:
+        pass
+
+
 def recover(out_root, name):
     """
     Settle what an interrupted --overwrite swap left for `name` under out_root: `.<name>.old` goes back to `<name>` when
@@ -218,10 +239,10 @@ def recover(out_root, name):
     target, old, partial = out_root / name, out_root / f'.{name}.old', out_root / f'.{name}.partial'
     if os.path.lexists(old):
         if os.path.lexists(target):
-            shutil.rmtree(old, ignore_errors=True)  # a leftover is retried by the next recover
+            remove_tree(old)  # a leftover is retried by the next recover
         else:
             rename_dir(old, target)
-    shutil.rmtree(partial, ignore_errors=True)
+    remove_tree(partial)
 
 
 def publish(out_root, name, *, overwrite, success):
@@ -242,7 +263,7 @@ def publish(out_root, name, *, overwrite, success):
     if not overwrite:
         raise ValueError('output folder exists and overwrite is off')
     if not success:
-        shutil.rmtree(partial, ignore_errors=True)
+        remove_tree(partial)
         return 'kept'
     rename_dir(target, old)  # a failure here moved nothing
     failure = None
@@ -256,5 +277,5 @@ def publish(out_root, name, *, overwrite, success):
         except OSError:
             pass  # .<name>.old stays; recover restores it on the next run
         raise failure
-    shutil.rmtree(old, ignore_errors=True)  # the new output is complete: a leftover is removed by the next recover
+    remove_tree(old)  # the new output is complete: a leftover is removed by the next recover
     return 'replaced'

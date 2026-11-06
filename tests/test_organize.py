@@ -759,6 +759,17 @@ def test_o2_overwrite_replaces_a_stale_folder_with_a_fresh_run(stale, caplog):
     assert counts(caplog) == (1, 0)
 
 
+def test_t1d_without_overwrite_a_dangling_link_at_the_output_name_is_an_existing_output(tree, caplog):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    out.mkdir()
+    (out / PID).symlink_to(out / 'SYNTHETIC_missing', target_is_directory=True)
+    caplog.set_level(logging.INFO)
+    report = organize(src, out)
+    assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_SKIPPED, org.REASON_EXISTS)]
+    assert (out / PID).is_symlink() and hidden(out) == []
+
+
 def test_o2_overwrite_with_no_existing_folder_is_a_plain_new_run(tree, caplog):
     src, out = tree
     planning_study(src / PID / 'p')

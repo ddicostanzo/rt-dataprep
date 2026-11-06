@@ -217,7 +217,7 @@ def _copy_patient(folder, out_root, name, cases, misc, overwrite):
     # would skip as already done.
     partial = out_root / f'.{name}.partial'
     copy_started = time.monotonic()
-    shutil.rmtree(partial, ignore_errors=True)
+    dicom_io.remove_tree(partial)
     try:
         for n, paths in enumerate(cases, start=1):
             _copy_all(paths, partial / f'plan_{n}')
@@ -226,7 +226,7 @@ def _copy_patient(folder, out_root, name, cases, misc, overwrite):
         status = dicom_io.publish(out_root, name, overwrite=overwrite, success=bool(cases))  # no plan (e.g. an unreadable RTPLAN) keeps the old folder
     except BaseException:  # Ctrl-C too: no hidden half-copied folder left behind
         # A second Ctrl-C during this rmtree leaves a partly deleted .partial: the source scan skips it and the next run removes it before copying.
-        shutil.rmtree(partial, ignore_errors=True)
+        dicom_io.remove_tree(partial)
         raise
     return time.monotonic() - copy_started, status
 

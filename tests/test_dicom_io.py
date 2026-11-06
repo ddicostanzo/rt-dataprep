@@ -2,6 +2,7 @@ import logging
 import errno
 import operator
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -538,3 +539,44 @@ def test_publish_ignores_a_failed_delete_of_the_old_folder(tmp_path, caplog):
         assert caplog.records == []
     finally:
         (root / f'.{NAME}.old' / 'locked').chmod(0o700)
+
+
+def _outside(tmp_path):
+    outside = tmp_path / 'outside'
+    _make(outside, {'keep.bin': b'SYNTHETIC_outside'})
+    return outside
+
+
+@pytest.mark.parametrize('dangling', [False, True])
+def test_recover_unlinks_a_symlinked_old_folder_and_never_follows_it(tmp_path, dangling):
+    root = _scene(tmp_path, {'a.bin': b'SYNTHETIC_kept'})
+    outside = _outside(tmp_path)
+    (root / f'.{NAME}.old').symlink_to(tmp_path / 'missing' if dangling else outside, target_is_directory=True)
+    dicom_io.recover(root, NAME)
+    assert not os.path.lexists(root / f'.{NAME}.old')
+    assert _snap(root / NAME) == {'a.bin': b'SYNTHETIC_kept'}
+    assert _snap(outside) == {'keep.bin': b'SYNTHETIC_outside'}
+
+
+def test_publish_replaces_a_symlinked_target_without_touching_the_folder_it_points_at(tmp_path):
+    root = _scene(tmp_path, partial=NEW)
+    outside = _outside(tmp_path)
+    (root / NAME).symlink_to(outside, target_is_directory=True)
+    assert dicom_io.publish(root, NAME, overwrite=True, success=True) == 'replaced'
+    assert not (root / NAME).is_symlink() and _snap(root / NAME) == NEW
+    assert not os.path.lexists(root / f'.{NAME}.old')
+    assert _snap(outside) == {'keep.bin': b'SYNTHETIC_outside'}
+
+
+def test_the_rmtree_handler_clears_the_read_only_bit_before_it_retries(tmp_path):
+    file = tmp_path / 'ro.bin'
+    file.write_bytes(b'SYNTHETIC_ro')
+    file.chmod(0o444)
+    seen = []
+
+    def func(p):
+        seen.append(os.stat(p).st_mode & stat.S_IWRITE)
+        assert seen[-1]  # the bit is back before the retry
+        os.unlink(p)
+    getattr(dicom_io, '_clear_readonly')(func, str(file), OSError())  # noqa: B009
+    assert seen and not file.exists()
