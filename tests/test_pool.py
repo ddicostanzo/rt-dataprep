@@ -208,6 +208,20 @@ def test_a_ctrl_c_to_the_parent_during_handle_starts_no_new_patient(tmp_path):
     assert 2 not in started(tmp_path)
 
 
+@pytest.mark.skipif(not (hasattr(signal, 'pthread_sigmask') and hasattr(signal, 'sigtimedwait')), reason='no signal masks to poll')
+def test_a_task_failing_after_a_parent_ctrl_c_with_every_slot_busy_is_skipped_not_failed():
+    main = threading.get_ident()
+    timer = threading.Timer(0.2, signal.pthread_kill, (main, signal.SIGINT))  # parent only, while both slots run
+    delivered = []
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):  # on the main thread: the mask is per thread
+            pool.run(2, [Task(w.sleep_then, (0, 1.0)), Task(w.fail, (1, 0.5))], lambda i, r: delivered.append((i, r)))
+    finally:
+        timer.cancel()
+    assert delivered == [(0, 0)]  # not (1, Failed('RuntimeError')): an interrupted run writes no error row (#177)
+
+
 def test_a_worker_info_line_reaches_stderr(capfd, caplog):
     caplog.set_level(logging.INFO)  # the parent's root level is what the pool initializer copies
     run_guarded(2, [Task(w.log_info, (7,))])
