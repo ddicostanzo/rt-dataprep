@@ -172,13 +172,14 @@ def test_a_raising_manager_wakeup_keeps_the_submitted_task(monkeypatch):
     real = process._ThreadWakeup.wakeup
 
     def wakeup(self):
-        if sys._getframe(1).f_globals['__name__'] == pool.__name__:  # only pool's own kick; CPython's calls stay real
+        if sys._getframe(1).f_globals.get('__name__') == pool.__name__:  # only pool's own kick; CPython's calls stay real
             raise RuntimeError(w.SECRET)
         return real(self)
 
     monkeypatch.setattr(process._ThreadWakeup, 'wakeup', wakeup)
     delivered, error = run_guarded(2, [Task(w.echo, (0,)), Task(w.echo, (1,))])
     assert error is None and delivered == [(0, 0), (1, 1)]
+
 
 def test_a_submit_that_raises_is_a_failed(monkeypatch):
     class Broken(ProcessPoolExecutor):
