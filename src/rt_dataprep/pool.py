@@ -73,7 +73,11 @@ def _take_ctrl_c():
 def _submit(executor, task):
     call = (task.fn,) if isinstance(executor, _Inline) else (_call, task.fn)  # inline: the parent's handler stays as it is
     try:
-        return executor.submit(*call, *task.args)
+        future = executor.submit(*call, *task.args)
+        if not isinstance(executor, _Inline):
+            # shortcut: private stdlib attribute (3.12-3.14). submit wakes the manager before it spawns the worker, so the manager can wait without that worker's sentinel and miss its death (#200); drop when CPython spawns first
+            executor._executor_manager_thread_wakeup.wakeup()
+        return future
     except Exception as exc:  # e.g. a pool that broke between two checks: the same Failed as any other escape
         future = Future()
         future.set_exception(exc)

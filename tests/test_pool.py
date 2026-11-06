@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -145,6 +146,23 @@ def test_a_dying_worker_is_a_failed_and_does_not_hang(tmp_path, capfd):
     assert delivered[0] == (0, Failed('BrokenProcessPool'))
     assert 2 not in {i for i, _ in delivered}  # task 1 may or may not have finished before the pool broke
 
+
+def test_a_worker_spawned_after_the_manager_waits_is_still_watched(tmp_path, monkeypatch, capfd):
+    """CPython's submit wakes its manager before spawning the worker: a late spawn is missing from the sentinels it waits on (#200)."""
+    real, calls = ProcessPoolExecutor._spawn_process, []
+
+    def late_second(self):
+        calls.append(1)
+        if len(calls) == 2:
+            time.sleep(1)  # the manager has already re-snapshotted its workers without this one
+        return real(self)
+
+    monkeypatch.setattr(ProcessPoolExecutor, '_spawn_process', late_second)
+    marker = tmp_path / 'dying'
+    tasks = [Task(w.after_file, (0, str(marker), 2.0)), Task(w.die_after_marker, (1, str(marker)))]
+    delivered, error = run_guarded(2, tasks)
+    assert error is None
+    assert delivered == [(0, Failed('BrokenProcessPool')), (1, Failed('BrokenProcessPool'))]  # task 0 ends when the pool breaks, not after its sleep
 
 def test_a_submit_that_raises_is_a_failed(monkeypatch):
     class Broken(ProcessPoolExecutor):
