@@ -25,3 +25,6 @@ Gotchas:
 - dicom_io has no module-level `open`; monkeypatch.setattr(dicom_io, 'open', ..., raising=False) shadows the builtin for that
   module only, so the path-selective raiser must hand every other path to builtins.open.
 - Full suite takes about 3m40s (1116 passed, 4 skipped).
+
+## review-1
+- No BLOCKING. WARNING: vanished-file tests (test_dicom_io ~:664, test_preprocess ~:288) don't assert the patch was reached (`modes == ['rb']`). NOTE: fail_python_open duplicated in test_dicom_io/test_preprocess (shared helper). NOTE: forced-PermissionError preprocess test checks type only (covered). All deferred.
