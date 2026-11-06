@@ -1026,6 +1026,18 @@ def test_a_target_outside_the_root_still_raises_value_error_not_an_internal_row(
     assert rows(out) == []
 
 
+def test_a_read_delivered_after_the_outside_root_raise_is_not_claimed_or_recovered(tree):
+    # #182: patient b's read was running when a's handle raised; it must not recover (delete) b's leftover partial
+    import pool_workers
+    src, out = tree
+    mk(src / 'a')
+    mk(src / 'b')
+    (out / '.b.partial').mkdir(parents=True)
+    error = call_guarded(lambda: organize(src, out, workers=2, _read_fn=pool_workers.organize_read_escaping))
+    assert isinstance(error, ValueError) and str(error) == org.REASON_OUTSIDE_ROOT
+    assert (out / '.b.partial').is_dir() and rows(out) == []
+
+
 @pytest.mark.parametrize('workers', [1, 2])
 def test_a_resumed_run_copies_nothing_and_creates_no_partial_for_a_skipped_patient(tree, tmp_path, workers):
     src, out = tree

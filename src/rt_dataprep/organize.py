@@ -86,6 +86,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
         folder = folders[i]
         if isinstance(result, pool.Failed):  # escaped the worker wrapper (a broken pool...): only the type name is known
             if result.type_name == 'SystemExit':  # as before: exits the run with no row; the report is still written
+                aborted = True  # #182: a read delivered after the raise is not claimed or recovered
                 raise SystemExit(result.code)  # its sanitized code, as quiet_call keeps it
             log.error('organize: %s: %s', REASON_INTERNAL, result.type_name)
             result = (None, _failure_row(folder, REASON_INTERNAL))
@@ -117,6 +118,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
         target = out_root / name
         try:
             if not target.resolve().is_relative_to(out_root.resolve()):
+                aborted = True  # #182: as for SystemExit above
                 raise ValueError(REASON_OUTSIDE_ROOT)
             dicom_io.recover(out_root, name)
         except OSError:  # its message names a path, i.e. the patient: report a fixed reason and go on

@@ -85,7 +85,9 @@ def run(workers, tasks, handle):
     reaches handle, one that raises gets no call, no follow-up runs, and the interrupt is raised once the running tasks end.
     Idle workers ignore Ctrl-C; a running task gets it as KeyboardInterrupt.
     An exception from handle stops submission like ABORT and drops the follow-ups handle returns after it; running tasks
-    still finish and reach handle (their output is published, so their rows must be kept), then the first one is raised.
+    still finish and reach handle (their output is published, so their rows must be kept), then the first one is raised;
+    a later exception from handle is dropped. A caller that must not start a delivered patient after its own raise (organize's
+    claim) refuses it in handle itself (#182).
     """
     queue = deque((i, task, True) for i, task in enumerate(tasks))  # (index, task, is the first stage)
     count = len(queue)

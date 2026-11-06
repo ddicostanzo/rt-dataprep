@@ -291,3 +291,12 @@ def test_a_raising_handle_still_delivers_the_running_tasks_then_raises(workers):
     delivered, error = run_guarded(workers, tasks, handle)
     assert isinstance(error, ValueError) and str(error) == 'SYNTHETIC_refusal'
     assert delivered == [(0, 'fast 0'), (1, 'slow 1')][:workers]  # N=1: patient 1 never started
+
+
+def test_when_handle_raises_twice_the_first_exception_is_raised():
+    # #182: two running patients both make handle raise (e.g. two SystemExit codes): input order decides, the second is dropped
+    def handle(index, result):
+        raise SystemExit(index + 3)
+
+    delivered, error = run_guarded(2, [Task(w.sleep_then, ('a', 0.5)), Task(w.echo, ('b',))], handle)
+    assert delivered == [(0, 'a'), (1, 'b')] and isinstance(error, SystemExit) and error.code == 3
