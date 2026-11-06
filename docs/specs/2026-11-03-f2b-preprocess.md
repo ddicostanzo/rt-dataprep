@@ -149,6 +149,7 @@ their native names.
 | a dose or mask is not on the native CT grid | plan row `refused`, `REASON_GRID`. Size must be equal; origin, spacing and direction are checked with `ORIGIN_ATOL_MM` and `series.DIRECTION_ATOL`, as F2a's mask check does (user, J3) |
 | a native dose or mask voxel with a nonzero value has its centre outside the final CT grid's buffer (continuous index outside [-0.5, n-0.5) on some axis), or a native mask with voxels comes out with none | plan row `refused`, `REASON_CROP` (user, plan review): a training label is never silently truncated |
 | OSError while writing | patient row `refused`, `REASON_IO_ERROR`; the partial is removed |
+| a file-system error while reading an input (a disk or permission error that SimpleITK reports as a bad file) | patient row `refused`, `REASON_IO_ERROR`; the partial is removed (#47) |
 | any other exception | row with preprocess's own `REASON_INTERNAL` text, report flushed, `PreprocessAborted` raised; the CLI exits 1 with the fixed text |
 
 A refused plan leaves its sibling plans in place. A patient whose plans were all refused is still renamed into

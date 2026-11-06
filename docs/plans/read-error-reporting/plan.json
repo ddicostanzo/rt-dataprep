@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "Classify a failed preprocess read with a Python re-read (_read_failure)",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify"
+      },
+      "test_approach": "Unit tests of the helper on real files in tmp_path. Forcing method (no builtins patch): write a garbage file so SimpleITK fails, then monkeypatch.setattr(pre, 'open', raiser, raising=False) so only preprocess's own open raises. A spy (monkeypatch pre._read_failure) for A6. TDD: each test red first. The raiser is path-selective: it raises only when the path is the garbage file and otherwise returns builtins.open(...), so series.csv and other reads are untouched. Forced-error variants run with workers=1 (a monkeypatch does not reach a spawned worker).",
+      "criteria": [
+        "preprocess has one helper _read_failure(path), called by read_image and read_info only after quiet_call raised CaseRefused, after the except block (read_series's shape), then the CaseRefused is raised",
+        "_read_failure opens the file with the bare builtin open(path, 'rb') (binary mode; not Path.open or os.open, so the module-level patch reaches it) and reads it in fixed-size chunks to the end outside quiet_call; it returns on a clean read",
+        "_read_failure returns (swallows) on FileNotFoundError",
+        "_read_failure raises MemoryError when dicom_io.allocation_failure(exc) is true for the OSError (ENOMEM)",
+        "_read_failure re-raises any other OSError (e.g. PermissionError, EIO)",
+        "A3 unit: a FileNotFoundError from the Python read keeps read_image's CaseRefused(REASON_FILE_UNREADABLE)",
+        "A3b unit: a forced PermissionError from the Python read makes read_image and read_info raise that OSError; a forced ENOMEM OSError raises MemoryError (runs as root too)",
+        "A2 unit: a truncated or garbage NIfTI still raises CaseRefused(REASON_FILE_UNREADABLE) from read_image and read_info",
+        "A6: when SimpleITK succeeds, _read_failure is not called (spy)",
+        "A MemoryError already raised by quiet_call (an allocation failure) does not call _read_failure",
+        "The MemoryError for ENOMEM is raised bare after the except block: its __context__ and __cause__ are None (no path-naming OSError attached)",
+        "read_image's and read_info's docstrings say a file-system error from the re-read propagates as OSError (and ENOMEM as MemoryError); only a malformed or vanished file is CaseRefused(REASON_FILE_UNREADABLE)"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "Patient-level I/O error through preprocess(); spec table row",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "tests/test_preprocess.py",
+        "docs/specs/2026-11-03-f2b-preprocess.md",
+        "README.md"
+      ],
+      "file_ops": {
+        "tests/test_preprocess.py": "modify",
+        "docs/specs/2026-11-03-f2b-preprocess.md": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "End-to-end preprocess() runs on synthetic converted trees (write_plan, add_series with reg_matrix='identity', report_rows). Real chmod 0 is skipped as root (skipif os.geteuid() == 0, as tests/test_dicom_io.py). Forcing method (no builtins patch): write a garbage file so SimpleITK fails, then monkeypatch.setattr(pre, 'open', raiser, raising=False) so only preprocess's own open raises. Every chmod test also has a forced-PermissionError variant that runs as root. The raiser is path-selective: it raises only when the path is the garbage file and otherwise returns builtins.open(...), so series.csv and other reads are untouched. Forced-error variants run with workers=1 (a monkeypatch does not reach a spawned worker).",
+      "criteria": [
+        "A1: a plan file with read permission removed gives exactly one patient-level REASON_IO_ERROR row for that patient and no plan rows; a second patient in the same run is preprocessed",
+        "A1 variant: the same outcome with a garbage file plus a forced PermissionError from preprocess's open (runs as root)",
+        "A3: a file named in series.csv but missing still refuses its plan with REASON_FILE_MISSING (the existing test passes, or one new test if none exists)",
+        "A4: a registered series with a valid reg matrix whose file has read permission removed gives the patient's REASON_IO_ERROR",
+        "A4 variant: the same outcome for the registered series with a garbage file plus a forced PermissionError (runs as root)",
+        "A5 (forced-PermissionError setup, so it runs as root): with workers=1, no caplog record and no text of preprocess_report.csv contains the unreadable file's path; the patient folder name appears only in the report's patient column",
+        "A7: the existing manifest tests pass unchanged",
+        "docs/specs/2026-11-03-f2b-preprocess.md's error table gains a row: a file-system error while reading an input -> patient row refused, REASON_IO_ERROR",
+        "README's troubleshooting or report notes say a disk or permission error while reading an input fails the whole patient with the I/O-error reason"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-06",
+    "spec": "docs/specs/2026-11-06-read-error-reporting.md",
+    "profile": "project-profile.yml",
+    "issue": 47,
+    "deferred_issues": [
+      209,
+      210
+    ]
+  }
+}

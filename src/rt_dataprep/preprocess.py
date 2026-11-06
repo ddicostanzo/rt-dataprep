@@ -80,19 +80,52 @@ class PreprocessSteps:
     new_shape: tuple = (701, 701, 433)  # voxels, (x, y, z)
 
 
+READ_CHUNK = 1 << 20  # bytes per read of the failure re-read: a large file needs no extra memory
+
+
+def _read_failure(path):
+    """After a SimpleITK failure: read `path` with plain Python to the end. A clean read or a vanished file returns (the caller refuses it); ENOMEM is MemoryError; any other OSError propagates."""
+    failure = None
+    try:
+        with open(path, 'rb') as handle:
+            while handle.read(READ_CHUNK):
+                pass
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        failure = exc
+    if failure is None:
+        return
+    if dicom_io.allocation_failure(failure):  # raised here, after the except block: nothing chained
+        raise MemoryError()
+    raise failure
+
+
 def read_image(path):
-    """The NIfTI at `path`; any failure raises CaseRefused(REASON_FILE_UNREADABLE) (ITK names the path)."""
-    return quiet_call(lambda: sitk.ReadImage(str(path)), REASON_FILE_UNREADABLE)
+    """The NIfTI at `path`. A malformed or vanished file raises CaseRefused(REASON_FILE_UNREADABLE) (ITK names the path); a file-system error from the Python re-read propagates as OSError (ENOMEM as MemoryError)."""
+    refusal = None
+    try:
+        return quiet_call(lambda: sitk.ReadImage(str(path)), REASON_FILE_UNREADABLE)
+    except CaseRefused as exc:
+        refusal = exc
+    _read_failure(path)
+    raise refusal
 
 
 def read_info(path):
-    """(size, origin, spacing, direction) from the header of the NIfTI at `path`, no pixels read; a failure is CaseRefused(REASON_FILE_UNREADABLE)."""
+    """(size, origin, spacing, direction) from the header of the NIfTI at `path`, no pixels read. A malformed or vanished file raises CaseRefused(REASON_FILE_UNREADABLE); a file-system error from the Python re-read propagates as OSError (ENOMEM as MemoryError)."""
     def read():
         reader = sitk.ImageFileReader()
         reader.SetFileName(str(path))
         reader.ReadImageInformation()
         return reader.GetSize(), reader.GetOrigin(), reader.GetSpacing(), reader.GetDirection()
-    return quiet_call(read, REASON_FILE_UNREADABLE)
+    refusal = None
+    try:
+        return quiet_call(read, REASON_FILE_UNREADABLE)
+    except CaseRefused as exc:
+        refusal = exc
+    _read_failure(path)
+    raise refusal
 
 
 def resampled_size(size, spacing, new_spacing):

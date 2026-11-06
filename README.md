@@ -306,6 +306,7 @@ class/module/line details. Reports and per-folder CSVs are sensitive artifacts a
 | Preprocessing reports no step is on | Pass a step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`), or enable applicable `PreprocessSteps` in Python. |
 | A series or plan is missing from the manifest | Check the refusal count, `series.csv`, file presence, and image headers. |
 | Split refuses existing content | Preserve the old cohort record and generate the new cohort in a separate output root. |
+| A patient fails with the I/O-error reason | A disk or permission error while reading one of its inputs fails the whole patient (no plan rows, no partial folder), and the run carries on with the next patient. Check the disk and file permissions, then rerun. A file that is missing or is not a valid image still refuses only its plan or series. |
 | Unexpected internal error | Preserve source data and reports in approved storage; report a synthetic reproducer and safe class/site details. |
 
 Patient outputs are staged under hidden partial directories and promoted when finished. Individual files are written
