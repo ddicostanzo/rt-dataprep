@@ -71,3 +71,8 @@ Decisions:
 Gotchas:
 - Path.is_file/is_dir take only follow_symlinks in 3.13, so the patched lambdas forward **kw.
 - The 0o444 tests are RED before the change only because of the is_file/is_dir -> False patch; on 3.13 the real chmod alone already raises.
+
+## review-3
+- No BLOCKING. entry_is matches 3.13 pathlib exactly; all five checks use it; A6/A8 RED on old code.
+- NOTE (deferred): misc_files is_dir check and salvage listing have no own test (reverting either fails nothing).
+- WARNING (deferred): hide_entries (test_convert) and hide_root_entries (test_cli) duplicated.
