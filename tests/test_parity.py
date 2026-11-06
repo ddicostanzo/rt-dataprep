@@ -14,6 +14,9 @@ spec = importlib.util.spec_from_file_location('parity', Path(__file__).resolve()
 parity = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(parity)
 
+# The plan's step set on the synthetic CT's own grid: every name gets the step prefixes, resolved through series.csv
+STEPS = pre.PreprocessSteps(resample=True, rescale=True, harmonize_spacing=True, reshape=True, legacy_linear_masks=True,
+                            new_spacing=tc.SPACING, final_spacing=tc.SPACING, new_shape=tc.SHAPE[::-1])
 ROIS = [dict(tc.BOX, number=1, name='HR-CTV'), dict(tc.BOX, number=2, name='Bladder', box=((1, 3), (1, 3), (1, 3)))]
 
 
@@ -22,7 +25,7 @@ def build(tmp_path):
     org, converted, out, pooled = (tmp_path / n for n in ('org', 'conv', 'pre', 'pooled'))
     tc.make_plan(org / tc.PID / 'plan_1', doses=[tc.dose_spec(10, 'PLAN')], rois=ROIS)
     conv.convert(org, converted)
-    pre.preprocess(converted, out, pre.PreprocessSteps(rescale=True))
+    pre.preprocess(converted, out, STEPS)
     new = parity.new_files(out / tc.PID / 'plan_1')
     old = pooled / f'{tc.PID}_x_1'
     old.mkdir(parents=True)
@@ -35,6 +38,10 @@ def build(tmp_path):
 
 def test_identical_output_passes_every_check(tmp_path):
     out, pooled, _ = build(tmp_path)
+    new = parity.new_files(out / tc.PID / 'plan_1')
+    prefix = 'reshape_resample_'  # the geometric steps every file gets; the CT also rescale_
+    assert new['ct'].name.startswith(prefix + 'rescale_') and new['dose'].name.startswith(prefix)
+    assert all(path.name.startswith(prefix) for path in new['mask'].values())
     s = parity.run(out, pooled)
     assert s['counts'] == {'pooled_folders': 1, 'ct_geometry_equal': 1, 'ct_pass': 1, 'dose_compared': 1, 'compared': 1}
     assert s['refused'] == {}
@@ -105,3 +112,12 @@ def test_a_root_of_symlinked_split_folders_is_searched(tmp_path):
     linked.mkdir()
     (linked / 'train_val').symlink_to(train_val, target_is_directory=True)
     assert parity.run(out, linked)['counts']['compared'] == 1
+
+
+def test_a_pair_with_no_overlapping_voxels_is_not_counted_as_compared(tmp_path):
+    out, pooled, old = build(tmp_path)
+    ct = sitk.ReadImage(str(old / 'ct.nii.gz'))
+    ct.SetOrigin([o + 1000.0 for o in ct.GetOrigin()])  # 1 m away: no new voxel lands on the legacy grid
+    sitk.WriteImage(ct, str(old / 'ct.nii.gz'))
+    s = parity.run(out, pooled)
+    assert s['counts'] == {'pooled_folders': 1, 'ct_geometry_differs': 1, 'ct_no_overlap': 1}

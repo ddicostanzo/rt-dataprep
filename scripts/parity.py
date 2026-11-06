@@ -202,7 +202,8 @@ def run(preprocessed, pooled):
             tally.refused[reason] += 1
         else:
             tally.merge(pair)  # only whole pairs, so every count covers the same pairs
-            tally.counts['compared'] += 1
+            if not pair.counts['ct_no_overlap']:  # 'compared': voxels were compared; a no-overlap pair shows only as ct_no_overlap
+                tally.counts['compared'] += 1
     return tally.summary()
 
 
