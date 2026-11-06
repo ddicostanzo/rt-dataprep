@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "Retire threaded header reading: serial reads under the pydicom quiet block",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/dicom_io.py",
+        "src/rt_dataprep/organize.py",
+        "src/rt_dataprep/convert.py",
+        "tests/test_dicom_io.py",
+        "tests/test_organize.py",
+        "tests/test_convert.py",
+        "tests/test_series.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/dicom_io.py": "modify",
+        "src/rt_dataprep/organize.py": "modify",
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_dicom_io.py": "modify",
+        "tests/test_organize.py": "modify",
+        "tests/test_convert.py": "modify",
+        "tests/test_series.py": "modify"
+      },
+      "test_approach": "Delete the read_pooled tests; add one test per caller (organize _organize_patient read, convert read_folder_headers) on a synthetic header that makes pydicom warn, asserting capfd stderr is empty and pydicom config/warnings state is restored afterwards.",
+      "criteria": [
+        "read_pooled and its ThreadPoolExecutor import are removed from dicom_io; no test references read_pooled",
+        "organize and convert read headers serially, each whole per-folder read held inside dicom_io._pydicom_quiet() (vault: pydicom-validates-lazily-on-first-tag-access)",
+        "A header read that makes pydicom warn prints nothing to stderr (capfd), in organize and in convert",
+        "read_folder_headers and _organize_patient no longer take a workers argument for threads; organize() and convert() keep accepting workers= and logging its value, unused until task-03/task-04",
+        "The tests/test_series.py:849 header seam takes and passes only `folder`",
+        "Full suite and ruff pass"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "One per-patient scheduler for every N (new module pool.py)",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/pool.py",
+        "tests/test_pool.py",
+        "tests/pool_workers.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/pool.py": "create",
+        "tests/test_pool.py": "create",
+        "tests/pool_workers.py": "create"
+      },
+      "test_approach": "Unit tests with module-level picklable worker functions in tests/pool_workers.py, parametrized over N=1 and N=2: result order, bounded submission (worker records start/end into files under tmp_path), hold-by-key, abort on an internal-error result and on an exception escaping the worker, Ctrl-C (KeyboardInterrupt raised in the N=1 path and from the parent wait), each consumer run under a thread join timeout to catch hangs. Worker logging checked with capfd in an N=2 run.",
+      "criteria": [
+        "N=1 calls the worker function directly in the calling process (no executor); N>1 runs the same worker function on ProcessPoolExecutor(N); both go through the same scheduling code, with no separate legacy loop",
+        "The executor is built with mp_context=multiprocessing.get_context('spawn') on every Python version (the venv is 3.13, whose Linux default is fork; forkserver workers keep the fd 2 of the test that started the server, so capfd misses their output in later tests, checked 2026-11-05); a test asserts an N=2 worker does not see a monkeypatch made in the parent",
+        "At most N tasks are submitted to the executor at any time; the next is submitted only when one completes",
+        "Results are handed to the caller in input (sorted) order regardless of completion order",
+        "A task carrying a hold key is not started while another task with the same key is running; it starts after that one completes",
+        "When the caller signals abort, or an exception escapes a worker, nothing further is submitted, running tasks finish and their results are delivered, then the scheduler returns; it never calls shutdown(cancel_futures=True) inside a wait loop (vault: processpool-cancel-futures-hangs-as-completed)",
+        "An exception escaping a worker (including BrokenProcessPool) is reported to the caller as an internal failure carrying only the exception type name; its message, traceback and _RemoteTraceback are never formatted, logged or chained",
+        "On KeyboardInterrupt nothing further is submitted and the interrupt propagates after running tasks end; tests prove no hang (join timeout)",
+        "The pool initializer configures logging with format '%(message)s' at the parent's root logger level (passed via initargs), so a worker log.info line reaches stderr in an N=2 run (vault: spawned-worker-without-logging-config-only-warning-survives)",
+        "After KeyboardInterrupt, a task that later returns a result keeps its row; a task that ends with KeyboardInterrupt or any exception adds no row; neither exception is ever formatted",
+        "A held task does not block later unrelated tasks: they may be submitted ahead of it; results are still delivered in input order",
+        "tests/pool_workers.py holds every module-level test worker function the later tasks need, including convert, preprocess, organize-read and organize-copy raisers selected by patient folder name",
+        "Full suite and ruff pass"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "convert and preprocess on the scheduler",
+      "depends_on": [
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_convert.py",
+        "tests/test_preprocess.py",
+        "examples/synthetic_workflow.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_convert.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "examples/synthetic_workflow.py": "modify"
+      },
+      "test_approach": "Existing suite (N=1 through the scheduler) must pass unchanged in behaviour. New tests on synthetic trees of at least 3 patients compare N=1 vs N=2 output file names, data-file bytes and report rows. Abort tests use the internal worker-callable argument with a module-level test function from tests/pool_workers.py that raises for one chosen patient.",
+      "criteria": [
+        "convert(..., workers=N) and preprocess(..., workers=N) run one patient per task; preprocess gains a workers keyword defaulting to 1",
+        "For a synthetic tree of at least 3 patients, N=2 writes the same file names and byte-identical data files and the same report rows in the same order as N=1",
+        "The parent claims the casefolded input folder name: under --overwrite a repeat gets REASON_NAME_CLAIMED without being dispatched (first in sorted order wins, as today); without --overwrite a repeat is held until the first completes and then runs as today, and N=2 rows equal N=1 rows",
+        "OSError in a patient gives that patient's REASON_IO_ERROR row inside the worker, as today",
+        "Another exception in a patient: the worker computes crash_site and logs the existing type/module/line line; the parent adds the REASON_INTERNAL row, starts no further patient, keeps the rows of patients already running, writes the report and raises ConvertAborted / PreprocessAborted; with N=2 the call returns (timeout-guarded test) and capfd stderr holds no exception message text",
+        "convert logs 'convert: %.1f s total, %.1f s reading (summed over patients), %.1f s converting (summed over patients), %d files, workers %d', where total is wall clock and converting is each patient's own time minus its reading, summed; outcome and replaced/kept counts are unchanged for N=1; the TIMING regexes in tests are updated to match",
+        "examples/synthetic_workflow.py keeps its __main__ guard and runs with workers=2 for all three stages",
+        "convert and preprocess docstrings describe workers as patient processes",
+        "The internal seam keyword `_patient_fn` (organize: `_read_fn` for task A, `_copy_fn` for task B) replaces only the inner per-patient call; the in-worker OSError and Exception conversion (and crash_site logging) still wraps it",
+        "Existing tests that monkeypatch or use caplog run at workers=1 only and their N>1 parametrization is dropped; the 1-vs-4 equality tests (test_organize.py:549, test_convert.py:682 and :1324) keep N=4 because they patch nothing",
+        "Full suite and ruff pass"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "organize on the scheduler: read task, parent claims, copy task",
+      "depends_on": [
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/organize.py",
+        "tests/test_organize.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/organize.py": "modify",
+        "tests/test_organize.py": "modify"
+      },
+      "test_approach": "Existing organize suite passes (N=1). New N=1 vs N=2 equality test on a synthetic export of at least 3 patients including two folders with one PatientID and one refused (no SOP UID) folder under --overwrite with an existing output. Abort test through the worker-callable argument. A resume test (no --overwrite, outputs present) asserts nothing is copied (no .partial created) for skipped patients.",
+      "criteria": [
+        "Task A (worker) walks, reads and groups one source folder and returns the sanitized name, a raw refusal or the per-plan and misc path lists (paths only), the unreadable count, the walked file count and reading seconds; headers are read once per run",
+        "The parent, in sorted source order, computes the kept status of a refused patient exactly as organize.py does today and does not claim its name; then claim check (REASON_NAME_CLAIMED), recover, existence check (OUTCOME_SKIPPED / REASON_EXISTS), then submits task B",
+        "Task B (worker) copies into .<name>.partial and publishes as today; nothing is copied for a patient that is refused or skipped",
+        "For the synthetic export, N=2 gives the same output tree, the same report rows in order and the same replaced/kept counts as N=1",
+        "An unexpected exception in organize: REASON_INTERNAL row, crash-site log line from the worker, no further patient started, report written, OrganizeAborted raised; no exception message text on stderr",
+        "The internal seam keyword `_patient_fn` (organize: `_read_fn` for task A, `_copy_fn` for task B) replaces only the inner per-patient call; the in-worker OSError and Exception conversion (and crash_site logging) still wraps it",
+        "Existing tests that monkeypatch or use caplog run at workers=1 only and their N>1 parametrization is dropped; the 1-vs-4 equality tests (test_organize.py:549, test_convert.py:682 and :1324) keep N=4 because they patch nothing",
+        "organize.REASON_INTERNAL = 'an unexpected error stopped the organizing; the report lists what was finished'; its row is PatientRow(sanitize_path_component(folder.name), 0, 0, 0, OUTCOME_REFUSED, REASON_INTERNAL)",
+        "An OSError in task A, task B or the parent's recover gives that patient's REASON_IO_ERROR row and warning, and the run goes on; ValueError(REASON_OUTSIDE_ROOT) propagates as today and is not turned into REASON_INTERNAL",
+        "organize's timing line labels reading and copying seconds '(summed over patients)', total stays wall clock; the TIMING regex in test_organize.py is updated",
+        "Full suite and ruff pass"
+      ]
+    },
+    {
+      "id": "task-05",
+      "title": "CLI, help text and README",
+      "depends_on": [
+        "task-03",
+        "task-04"
+      ],
+      "files": [
+        "src/rt_dataprep/__main__.py",
+        "tests/test_cli.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_cli.py": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "Extend the existing CLI seam tests at tests/test_cli.py:373-431 (recorded kwargs) to preprocess; update the help-text assertion at :431 to the new WORKERS_HELP; add an OrganizeAborted exit test; one subprocess CLI run of convert with --workers 2 on a tiny synthetic tree checking a worker INFO line reaches stderr.",
+      "criteria": [
+        "preprocess accepts --workers (same positive_int validation and cap) and passes workers= to preprocess(), asserted through the existing CLI seam; organize and convert pass it as today; manifest and split still reject it",
+        "WORKERS_HELP says patient processes, about 7 GB RAM each at 701x701x433, same output for any value",
+        "OrganizeAborted exits 1 with the fixed text f'rt_dataprep: {organize.REASON_INTERNAL}\\n', like ConvertAborted",
+        "README documents --workers as per-patient processes, the ~7 GB per worker figure, default 1, that SimpleITK/BLAS threads are not capped per process, and that kill -INT to the parent alone waits for running patients",
+        "A subprocess run with --workers 2 shows a worker INFO line on stderr",
+        "Full suite and ruff pass"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ],
+    [
+      "task-03",
+      "task-04"
+    ],
+    [
+      "task-05"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-05",
+    "spec": "docs/specs/2026-11-05-patient-process-pool.md",
+    "profile": "project-profile.yml",
+    "issue": 171
+  }
+}
