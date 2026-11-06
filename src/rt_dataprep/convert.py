@@ -112,7 +112,7 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwr
         raise ValueError(REASON_OUTSIDE_ORG)
     if overwrite and org_root.resolve().is_relative_to(out_root.resolve()):  # a replaced patient folder could hold the input
         raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
-    folders = sorted(p for p in org_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
+    folders = sorted(p for p in org_root.iterdir() if dicom_io.entry_is(p, 'dir') and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
     patient_fn = _patient_fn or _convert_patient
     # The parent owns the claims. Under overwrite a repeat of a casefolded name (a case-insensitive root would merge them) is refused here,
@@ -218,14 +218,14 @@ def _convert_patient(folder, out_root, exclude_models, overwrite):
     exists = os.path.lexists(target)  # lexists, as publish: a dangling link is an existing target
     if exists and not overwrite:
         return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_EXISTS)], 0.0, 0, None
-    plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(PLAN_FOLDER, p.name)),
+    plans = sorted((p for p in folder.iterdir() if dicom_io.entry_is(p, 'dir') and re.fullmatch(PLAN_FOLDER, p.name)),
                    key=lambda p: (int(p.name.split('_')[1]), p.name))  # plan_1 and fx_1: a fixed order
-    # Headers are read once per patient. An unreadable file in misc_files/ is not a series and is ignored: only its count
-    # reaches the log.
+    # Headers are read once per patient. A malformed file in misc_files/ is not a series and is ignored: only its count
+    # reaches the log. A file-system error on any file raises instead: the patient's I/O error.
     read_started = time.monotonic()
     plan_headers = [read_folder_headers(plan_dir) for plan_dir in plans]
     misc_dir = folder / 'misc_files'
-    misc_headers, misc_unreadable = read_folder_headers(misc_dir) if misc_dir.is_dir() else ([], False)
+    misc_headers, misc_unreadable = read_folder_headers(misc_dir) if dicom_io.entry_is(misc_dir, 'dir') else ([], False)
     reading = time.monotonic() - read_started
     files = sum(len(found) for found, _ in plan_headers) + len(misc_headers)  # a value: misc_headers is filtered below
     # An unreadable misc file may be a lost slice of any series of its study: those are skipped (#36). Its study is read
@@ -233,7 +233,7 @@ def _convert_patient(folder, out_root, exclude_models, overwrite):
     misc_taint = set(), False
     if misc_unreadable:
         read = {p for p, _ in misc_headers}
-        studies = [_salvage_study(p) for p in sorted(misc_dir.iterdir()) if p.is_file() and p not in read]
+        studies = [_salvage_study(p) for p in sorted(misc_dir.iterdir()) if dicom_io.entry_is(p, 'file') and p not in read]
         log.info('convert: %d unreadable files in misc_files', len(studies))
         misc_taint = {s for s in studies if s}, None in studies
     blank = [ds for _, ds in misc_headers if not str(ds.get('PatientID', '')).strip()]
@@ -480,19 +480,23 @@ def _convert_plan(headers, unreadable, case_dir):
 
 
 def read_folder_headers(folder):
-    """([(path, Dataset)] of every readable file in `folder`, sorted by path; whether any file was unreadable)."""
+    """([(path, Dataset)] of every readable file in `folder`, sorted by path; whether any file was malformed or gone).
+    A file-system error on a file raises OSError (the patient's I/O error); a malformed file never ends the folder read."""
     with dicom_io._pydicom_quiet():  # the whole folder read: pydicom's warnings and log records quote values
-        results = [_read_one(p) for p in sorted(p for p in Path(folder).iterdir() if p.is_file())]
+        results = [_read_one(p) for p in sorted(p for p in Path(folder).iterdir() if dicom_io.entry_is(p, 'file'))]
     headers = [(path, ds) for path, ds in results if ds is not None]
     return headers, len(headers) < len(results)
 
 
 def _read_one(path):
-    """(path, header), or (path, None) when the file is unreadable: one bad file never ends the folder read."""
+    """(path, header), or (path, None) when the file is malformed or gone. A file-system error on it (found by re-reading the file with
+    plain Python) propagates as OSError: the patient's I/O error. ENOMEM is MemoryError."""
     try:
         return path, dicom_io.read_header_core(path)  # via the module: a test patches this seam
     except OSError:
-        return path, None
+        pass
+    dicom_io.read_failure(path)  # after the except block: nothing chained; a clean re-read or a vanished file is just unreadable
+    return path, None
 
 
 def _of(headers, modality):
@@ -576,7 +580,14 @@ def _read_ct(paths, first):
         if image.GetSize() != expected:
             raise ValueError
         return image
-    return quiet_call(read, REASON_CT_UNREADABLE)
+    refusal = None
+    try:
+        return quiet_call(read, REASON_CT_UNREADABLE)
+    except CaseRefused as exc:
+        refusal = exc
+    for path in paths:  # after the except block: a file-system error on any slice is the patient's I/O error, not a bad CT
+        dicom_io.read_failure(path)
+    raise refusal
 
 
 def _dose_candidates(headers, plan):
@@ -639,7 +650,14 @@ def _read_dose(path, offsets, ct):
                 raise ValueError
             geometry.append(floats)
         return values, *geometry
-    values, iop, origin, spacing = quiet_call(extract, REASON_DOSE_UNREADABLE)
+    refusal = None
+    try:
+        values, iop, origin, spacing = quiet_call(extract, REASON_DOSE_UNREADABLE)
+    except CaseRefused as exc:
+        refusal = exc
+    if refusal is not None:
+        dicom_io.read_failure(path)  # after the except block; a file-system error is the patient's I/O error, not a bad dose
+        raise refusal
     # Row cosine runs along the columns (x), column cosine along the rows (y); frame k sits at
     # ImagePositionPatient + (o_k - o_0) n, which holds for relative (o_0 = 0) and absolute offsets alike.
     iop, origin = np.asarray(iop), np.asarray(origin)

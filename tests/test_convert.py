@@ -1,6 +1,8 @@
 """convert (task-04): assemble, planning CT, dose, atomic plan folders, report. Every tree is synthetic and built in tmp_path."""
 import ast
+import builtins
 import csv
+import errno
 import hashlib
 import inspect
 import logging
@@ -1547,3 +1549,248 @@ def test_a_patient_system_exit_keeps_its_code(tmp_path, workers):
     with pytest.raises(SystemExit) as raised:
         conv.convert(tmp_path / 'org', tmp_path / 'out', workers=workers, _patient_fn=pool_workers.patient_exits_3)
     assert raised.value.code == 3 and (tmp_path / 'out' / 'convert_report.csv').is_file()
+
+
+# ---------------------------------------------------------------- a failed input read: a file-system error is the patient's I/O error (#210)
+
+IO_ERRORS = [lambda path: PermissionError(errno.EACCES, 'denied', str(path)), lambda path: OSError(errno.EIO, 'input/output', str(path))]
+POSIX_USER = pytest.mark.skipif(os.name != 'posix' or os.geteuid() == 0, reason='mode bits do not stop root')
+
+
+def fail_open(monkeypatch, bad, error):
+    """Only dicom_io's own open, and only for `bad`, raises `error` (workers=1: a worker process would not see the patch); the modes asked for."""
+    modes = []
+
+    def raiser(path, *args, **kwargs):
+        if str(path) != str(bad):
+            return builtins.open(path, *args, **kwargs)
+        modes.append(args[0] if args else kwargs.get('mode', 'r'))
+        raise error
+    monkeypatch.setattr(dicom_io, 'open', raiser, raising=False)
+    return modes
+
+
+def spy_read_failure(monkeypatch):
+    """The paths dicom_io.read_failure is asked about; the real helper still runs."""
+    seen, real = [], dicom_io.read_failure
+    monkeypatch.setattr(dicom_io, 'read_failure', lambda path: (seen.append(str(path)), real(path))[1])
+    return seen
+
+
+def site_header(org):
+    plan = make_plan(org / PID / 'plan_1')
+    bad = plan['folder'] / 'junk.dcm'
+    bad.write_bytes(b'not a dicom file')  # no header: it never gets past the first read
+    return [bad], bad, conv.REASON_FILE_UNREADABLE
+
+
+def site_ct(org):
+    plan = make_plan(org / PID / 'plan_1')
+    truncate_pixels(plan)  # header intact: only ITK's pixel read fails
+    return [Path(p) for p in plan['ct']['paths']], Path(plan['ct']['paths'][1]), conv.REASON_CT_UNREADABLE
+
+
+def site_dose(org):
+    plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    resave_dose(plan['folder'], lambda ds: setattr(ds, 'DoseGridScaling', float('nan')))
+    bad = plan['folder'] / 'dose_0.dcm'
+    return [bad], bad, conv.REASON_DOSE_UNREADABLE
+
+
+def misc_series(org, cut=False):
+    """A non-planning MR series in misc_files; with `cut`, one slice loses pixel data (header intact): its pixel read fails."""
+    values = (np.arange(np.prod(SHAPE)) % 50).reshape(SHAPE)
+    mr = sd.write_ct_series(_mkdir(org / PID / 'misc_files'), values, patient_id=PID, prefix='mr', modality='MR')
+    paths = [Path(p) for p in mr['paths']]
+    if cut:
+        paths[1].write_bytes(paths[1].read_bytes()[:-40])
+    return paths
+
+
+def _mkdir(folder):
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def site_series(org):
+    make_plan(org / PID / 'plan_1')
+    paths = misc_series(org, cut=True)
+    return paths, paths[1], None  # the series is skipped: no refusal reason
+
+
+SITES = {'header': site_header, 'ct': site_ct, 'dose': site_dose, 'series': site_series}
+
+
+def report_cells(out):
+    """Every cell of convert_report.csv but the patient column's, and the header line."""
+    with open(out / conv.REPORT_NAME, newline='') as handle:
+        rows = list(csv.DictReader(handle))
+    return [rows[0].keys() if rows else [], *(v for row in rows for k, v in row.items() if k != 'patient')], rows
+
+
+def only_io_error_row(out, rows):
+    assert [(r.patient, r.folder, r.outcome, r.reason) for r in rows] == [(PID, '', conv.OUTCOME_REFUSED, conv.REASON_IO_ERROR)]
+    assert not (out / PID).exists()
+
+
+@pytest.mark.parametrize('site', SITES)
+def test_a4_the_failing_fixture_of_each_site_reaches_the_reread_of_its_files_and_keeps_its_refusal(tree, monkeypatch, site):
+    org, out = tree
+    paths, _, reason = SITES[site](org)
+    seen = spy_read_failure(monkeypatch)
+    rows = conv.convert(org, out).rows
+    # the refused plan's own CT is then read as another series, so its slices are asked about twice: the first calls are the site's
+    assert sorted(seen[:len(paths)]) == sorted(map(str, paths)) and set(seen) == set(map(str, paths))
+    plan_row = row_of(rows)
+    if reason is None:
+        assert (plan_row.outcome, plan_row.skipped_series) == (conv.OUTCOME_CONVERTED, 0)
+        assert [(r.outcome, r.skipped_series) for r in rows if r.folder == 'studies'] == [(conv.OUTCOME_SKIPPED, 1)]
+    else:
+        assert (plan_row.outcome, plan_row.reason) == (conv.OUTCOME_REFUSED, reason)
+
+
+@pytest.mark.parametrize('make_error', IO_ERRORS, ids=['EACCES', 'EIO'])
+@pytest.mark.parametrize('site', SITES)
+def test_a3_a_file_system_error_from_the_reread_is_the_patients_io_error(tree, monkeypatch, site, make_error):
+    org, out = tree
+    _, bad, _ = SITES[site](org)
+    modes = fail_open(monkeypatch, bad, make_error(bad))
+    only_io_error_row(out, conv.convert(org, out).rows)
+    assert modes == ['rb']  # the patch was reached, once, in binary
+
+
+def test_a3_the_ct_read_itself_reports_the_io_error(tree, monkeypatch):
+    org, out = tree
+    _, bad, _ = site_ct(org)
+    monkeypatch.setattr(conv.ser, 'read_series', lambda slices: None)  # the CT is read again as another series: only _read_ct's re-read is left
+    modes = fail_open(monkeypatch, bad, PermissionError(errno.EACCES, 'denied', str(bad)))
+    only_io_error_row(out, conv.convert(org, out).rows)
+    assert modes == ['rb']
+
+
+@pytest.mark.parametrize('site', SITES)
+def test_a5_a_forced_enomem_from_the_reread_is_the_internal_error_and_stops_the_run(tree, monkeypatch, site):
+    org, out = tree
+    _, bad, _ = SITES[site](org)
+    fail_open(monkeypatch, bad, OSError(errno.ENOMEM, 'no memory', str(bad)))
+    with pytest.raises(conv.ConvertAborted):
+        conv.convert(org, out)
+    with open(out / conv.REPORT_NAME, newline='') as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(r['patient'], r['outcome'], r['reason']) for r in rows] == [(PID, conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
+
+
+def deny_header_read(monkeypatch, bad, error):
+    """Root-safe twin of chmod 0 on `bad`: the header read fails as dcmread would at open, and so does the Python re-read."""
+    real = dicom_io.read_header_core
+
+    def core(path):
+        if str(path) == str(bad):
+            raise OSError(dicom_io.REASON_UNREADABLE)
+        return real(path)
+    monkeypatch.setattr(dicom_io, 'read_header_core', core)
+    return fail_open(monkeypatch, bad, error)
+
+
+def test_a1_a_plan_ct_slice_without_read_permission_is_the_patients_only_row_twin(tree, monkeypatch):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    bad = Path(plan['ct']['paths'][1])
+    deny_header_read(monkeypatch, bad, PermissionError(errno.EACCES, 'denied', str(bad)))
+    only_io_error_row(out, conv.convert(org, out).rows)
+
+
+def test_a2_a_misc_files_dicom_without_read_permission_is_the_patients_io_error_twin(tree, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    bad = misc_series(org)[1]
+    deny_header_read(monkeypatch, bad, PermissionError(errno.EACCES, 'denied', str(bad)))
+    only_io_error_row(out, conv.convert(org, out).rows)
+
+
+@POSIX_USER
+@pytest.mark.parametrize('where', ['plan', 'misc'])
+def test_a1_a2_a_dicom_without_read_permission_is_the_patients_io_error(tree, where):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    bad = Path(plan['ct']['paths'][1]) if where == 'plan' else misc_series(org)[1]
+    bad.chmod(0)
+    try:
+        rows = conv.convert(org, out).rows
+    finally:
+        bad.chmod(0o644)
+    only_io_error_row(out, rows)
+
+
+def assert_no_leak(caplog, out, secrets):
+    cells, _ = report_cells(out)
+    texts = [caplog.text, *(r.getMessage() for r in caplog.records), *map(str, cells)]
+    assert [s for s in secrets for t in texts if s in t] == []
+
+
+@pytest.mark.parametrize('site', SITES)
+def test_a9_a_forced_io_error_at_each_site_leaves_the_path_and_the_patient_folder_out_of_the_log_and_the_report(tree, monkeypatch, caplog, site):
+    org, out = tree
+    _, bad, _ = SITES[site](org)
+    fail_open(monkeypatch, bad, PermissionError(errno.EACCES, 'denied', str(bad)))
+    caplog.set_level(logging.DEBUG)
+    only_io_error_row(out, conv.convert(org, out).rows)
+    assert caplog.records
+    assert_no_leak(caplog, out, [str(bad), bad.name, str(org), PID])
+
+
+def test_a9_a_denied_plan_ct_slice_leaves_the_path_and_the_patient_folder_out_of_the_log_and_the_report(tree, monkeypatch, caplog):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    bad = Path(plan['ct']['paths'][1])
+    deny_header_read(monkeypatch, bad, PermissionError(errno.EACCES, 'denied', str(bad)))
+    caplog.set_level(logging.DEBUG)
+    only_io_error_row(out, conv.convert(org, out).rows)
+    assert_no_leak(caplog, out, [str(bad), bad.name, str(org), PID])
+
+
+def test_a10_a_happy_path_with_a_dose_and_a_misc_series_re_reads_nothing(tree, monkeypatch):
+    org, out = tree
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
+    misc_series(org)
+    seen = spy_read_failure(monkeypatch)
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome) for r in rows] == [('plan_1', 'converted'), ('studies', 'converted'), ('study_1/series_MR_1', 'converted')]
+    assert 'dose.nii.gz' in row_of(rows).files and (out / PID / 'study_1' / 'series_MR_1.nii.gz').is_file()  # all four readers ran
+    assert seen == []
+
+
+# ---------------------------------------------------------------- A6: a folder that lists but cannot be searched
+
+def hide_entries(monkeypatch, parent, deny=False):
+    """Python 3.14's is_file/is_dir answer False for an entry of `parent` whose stat fails; so do these, for that folder's entries only.
+    With `deny` the stat itself raises PermissionError there (the root-safe stand-in for mode 0o444). Every other path is untouched."""
+    real = {name: getattr(Path, name) for name in ('is_file', 'is_dir', 'stat')}
+    monkeypatch.setattr(Path, 'is_file', lambda self, **kw: False if self.parent == parent else real['is_file'](self, **kw))
+    monkeypatch.setattr(Path, 'is_dir', lambda self, **kw: False if self.parent == parent else real['is_dir'](self, **kw))
+    if deny:
+        def stat(self, *, follow_symlinks=True):
+            if self.parent == parent:
+                raise PermissionError(errno.EACCES, 'denied')
+            return real['stat'](self, follow_symlinks=follow_symlinks)
+        monkeypatch.setattr(Path, 'stat', stat)
+
+
+def test_a6_a_plan_folder_whose_entries_cannot_be_searched_is_the_patients_io_error_twin(tree, monkeypatch):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    hide_entries(monkeypatch, plan['folder'], deny=True)
+    only_io_error_row(out, conv.convert(org, out).rows)
+
+
+@POSIX_USER
+def test_a6_a_plan_folder_with_mode_0o444_is_the_patients_io_error(tree, monkeypatch):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    hide_entries(monkeypatch, plan['folder'])  # what 3.14 does with the EACCES; 3.13 raises it already
+    plan['folder'].chmod(0o444)
+    try:
+        rows = conv.convert(org, out).rows
+    finally:
+        plan['folder'].chmod(0o755)
+    only_io_error_row(out, rows)

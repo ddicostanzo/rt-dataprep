@@ -80,27 +80,6 @@ class PreprocessSteps:
     new_shape: tuple = (701, 701, 433)  # voxels, (x, y, z)
 
 
-READ_CHUNK = 1 << 20  # bytes per read of the failure re-read: a large file needs no extra memory
-
-
-def _read_failure(path):
-    """After a SimpleITK failure: read `path` with plain Python to the end. A clean read or a vanished file returns (the caller refuses it); ENOMEM is MemoryError; any other OSError propagates."""
-    failure = None
-    try:
-        with open(path, 'rb') as handle:
-            while handle.read(READ_CHUNK):
-                pass
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        failure = exc
-    if failure is None:
-        return
-    if dicom_io.allocation_failure(failure):  # raised here, after the except block: nothing chained
-        raise MemoryError()
-    raise failure
-
-
 def read_image(path):
     """The NIfTI at `path`. A malformed or vanished file raises CaseRefused(REASON_FILE_UNREADABLE) (ITK names the path); a file-system error from the Python re-read propagates as OSError (ENOMEM as MemoryError)."""
     refusal = None
@@ -108,7 +87,7 @@ def read_image(path):
         return quiet_call(lambda: sitk.ReadImage(str(path)), REASON_FILE_UNREADABLE)
     except CaseRefused as exc:
         refusal = exc
-    _read_failure(path)
+    dicom_io.read_failure(path)
     raise refusal
 
 
@@ -124,7 +103,7 @@ def read_info(path):
         return quiet_call(read, REASON_FILE_UNREADABLE)
     except CaseRefused as exc:
         refusal = exc
-    _read_failure(path)
+    dicom_io.read_failure(path)
     raise refusal
 
 

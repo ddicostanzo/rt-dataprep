@@ -30,6 +30,44 @@ def allocation_failure(exc):
     return isinstance(exc, RuntimeError) and ALLOCATION_FAILURE.search(str(exc)) is not None
 
 
+READ_CHUNK = 1 << 20  # bytes per read of the failure re-read: a large file needs no extra memory
+
+
+def read_failure(path):
+    """After a SimpleITK failure: read `path` with plain Python to the end. A clean read or a vanished file returns (the caller refuses it); ENOMEM is MemoryError; any other OSError propagates."""
+    failure = None
+    try:
+        with open(path, 'rb') as handle:
+            while handle.read(READ_CHUNK):
+                pass
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        failure = exc
+    if failure is None:
+        return
+    if allocation_failure(failure):  # raised here, after the except block: nothing chained
+        raise MemoryError()
+    raise failure
+
+
+_ABSENT = (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP)  # what Python 3.13's is_file/is_dir read as "not there"
+_KINDS = {'file': stat.S_ISREG, 'dir': stat.S_ISDIR}
+
+
+def entry_is(path, kind):
+    """Python 3.13's path.is_file()/is_dir() ('file'/'dir') on every version: False for an absent entry, any other OSError (EACCES...) raised; 3.14 hides it."""
+    is_kind = _KINDS[kind]
+    try:
+        return is_kind(path.stat().st_mode)
+    except OSError as exc:
+        if exc.errno in _ABSENT or getattr(exc, 'winerror', None) in (21, 123, 1921):
+            return False
+        raise
+    except ValueError:  # an embedded NUL in the name
+        return False
+
+
 @contextlib.contextmanager
 def _pydicom_quiet():
     """No validation, no warnings, no pydicom log records, for one read; all back as they were. Their text quotes values."""

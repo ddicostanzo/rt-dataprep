@@ -3,8 +3,9 @@ A non-planning image series (MR, PT, an unplanned CT) as one float32 volume, any
 
 check_volume(slices) validates the headers of one series and returns the slices sorted along the normal; read_series(slices)
 reads the pixels and sets origin, spacing and direction from those headers. Both return None for a series that is skipped
-(a bad or missing tag, not a uniform single-frame volume, an unreadable file): no exception escapes, and nothing here
-logs or raises text that holds a path, UID, date or description.
+(a bad or missing tag, not a uniform single-frame volume, a malformed file): no refusal escapes, and nothing here
+logs or raises text that holds a path, UID, date or description. A file-system error on a slice (found by re-reading it with
+plain Python after a failed read) is the one exception that escapes: an OSError, the patient's I/O error.
 
 registration(ct_frame, series_frame, regs, headers_by_sop) says whether a series is registered to the planning CT and
 gives its reg_matrix text (series frame -> CT frame). candidates(headers, exclude_models) picks the series and REGs of a
@@ -15,6 +16,7 @@ from collections import defaultdict
 import numpy as np
 import SimpleITK as sitk
 
+from rt_dataprep import dicom_io
 from rt_dataprep.dicom_io import CaseRefused, quiet_call
 
 SERIES_ATOL_MM = 0.01  # slice positions and pixel spacing (scanners round positions to ~0.01 mm)
@@ -114,7 +116,8 @@ def read_series(slices):
     """
     The float32 image of one series (stored x RescaleSlope + RescaleIntercept, each slice's own), origin = first position,
     spacing = (column, row, step), direction = (row cosine, column cosine, normal) as columns; all from the headers.
-    None (skip) when check_volume skips it, a pixel read fails or the image size differs from the headers.
+    None (skip) when check_volume skips it, a pixel read fails or the image size differs from the headers. A file-system error
+    on a slice raises OSError (ENOMEM as MemoryError) instead.
     """
     ordered = check_volume(slices)
     geometry = None if ordered is None else _or_none(_geometry, ordered)
@@ -133,6 +136,9 @@ def read_series(slices):
         image = quiet_call(read, REASON_SERIES_UNREADABLE)
     except CaseRefused:
         failed = True
+    if failed:
+        for path in paths:  # after the except block: a file-system error on any slice is not a skipped series
+            dicom_io.read_failure(path)
     if failed or image.GetSize() != size:
         return None
     image.SetOrigin(origin)
