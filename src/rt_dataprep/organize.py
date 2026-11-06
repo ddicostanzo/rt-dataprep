@@ -221,10 +221,10 @@ def _copy_patient(folder, out_root, name, cases, misc, overwrite):
     partial = out_root / f'.{name}.partial'
     copy_started = time.monotonic()  # the parent's recover already removed a leftover partial
     try:
+        partial.mkdir()  # a leftover (recover failed to remove it) raises: its stale plan folders must never be published
         for n, paths in enumerate(cases, start=1):
             _copy_all(paths, partial / f'plan_{n}')
         _copy_all(misc, partial / 'misc_files')
-        partial.mkdir(exist_ok=True)
         status = dicom_io.publish(out_root, name, overwrite=overwrite, success=bool(cases))  # no plan (e.g. an unreadable RTPLAN) keeps the old folder
     except BaseException:  # Ctrl-C too: no hidden half-copied folder left behind
         # A second Ctrl-C during this rmtree leaves a partly deleted .partial: the source scan skips it and the next run removes it before copying.
