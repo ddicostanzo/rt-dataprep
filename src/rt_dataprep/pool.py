@@ -48,10 +48,10 @@ class _Inline:
         return future
 
 
-def _init_worker(level):
+def _init_worker(level, keep_blocked=False):
     # An idle worker ignores Ctrl-C: one killed while waiting for work breaks the pool, which kills the busy ones mid-cleanup.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    if _MASKABLE:  # spawned with SIGINT blocked (the parent's mask): a Ctrl-C during startup is dropped here, not fatal (#177)
+    if _MASKABLE and not keep_blocked:  # spawned with SIGINT blocked (the parent's mask): a Ctrl-C during startup is dropped here, not fatal (#177); a caller's own block stays (#192)
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
     logging.basicConfig(level=level, format='%(message)s')  # a spawned worker starts with no handler: INFO would vanish
 
@@ -91,7 +91,7 @@ def run(workers, tasks, handle):
     After ABORT, a Failed, or a Stop result (from the moment it completes), no further first-stage task is submitted; running tasks finish and are delivered, and a
     follow-up of an index already started still runs (that patient was under way). KeyboardInterrupt, from a task or the waiting parent, stops submission the same way; a task that returns still
     reaches handle, one that raises gets no call, no follow-up runs, and the interrupt is raised once the running tasks end.
-    Idle workers ignore Ctrl-C; a running task gets it as KeyboardInterrupt.
+    Idle workers ignore Ctrl-C; a running task gets it as KeyboardInterrupt (unless the caller had SIGINT blocked, #192).
     An exception from handle stops submission like ABORT and drops the follow-ups handle returns after it; running tasks
     still finish and reach handle (their output is published, so their rows must be kept), then the first one is raised;
     a later exception from handle is dropped. A caller that must not start a delivered patient after its own raise (organize's
@@ -126,7 +126,7 @@ def run(workers, tasks, handle):
     try:
         context = (contextlib.nullcontext(_Inline()) if workers == 1 else
                    ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context('spawn'),  # fork would leak parent state
-                                       initializer=_init_worker, initargs=(logging.getLogger().level,)))
+                                       initializer=_init_worker, initargs=(logging.getLogger().level, masked and signal.SIGINT in saved)))
         with context as executor:
             while True:
                 while len(running) < workers:

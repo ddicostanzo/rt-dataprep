@@ -195,6 +195,16 @@ def test_workers_spawn_with_ctrl_c_blocked_but_a_running_task_gets_it_and_the_pa
 
 
 @pytest.mark.skipif(not (hasattr(signal, 'pthread_sigmask') and hasattr(signal, 'sigtimedwait')), reason='no signal masks to poll')
+def test_a_caller_that_blocked_ctrl_c_gets_workers_with_it_still_blocked():
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})  # run_guarded's thread inherits this mask
+    try:
+        delivered, error = run_guarded(2, [Task(w.sigint_state)])
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, before)
+    assert error is None and delivered == [(0, ([int(signal.SIGINT)], True))]  # #192
+
+
+@pytest.mark.skipif(not (hasattr(signal, 'pthread_sigmask') and hasattr(signal, 'sigtimedwait')), reason='no signal masks to poll')
 def test_a_ctrl_c_to_the_parent_during_handle_starts_no_new_patient(tmp_path):
     def handle(index, result):
         if index == 0:
