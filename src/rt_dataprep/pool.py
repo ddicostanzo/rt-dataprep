@@ -123,14 +123,15 @@ def run(workers, tasks, handle):
 
     masked = workers > 1 and _MASKABLE  # N=1 runs tasks in this process: they get Ctrl-C as before
     saved = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT}) if masked else None  # before any worker or thread exists
+    poll = masked and signal.SIGINT not in saved  # a caller's own block: its pending Ctrl-C stays its own (#194)
     try:
         context = (contextlib.nullcontext(_Inline()) if workers == 1 else
                    ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context('spawn'),  # fork would leak parent state
-                                       initializer=_init_worker, initargs=(logging.getLogger().level, masked and signal.SIGINT in saved)))
+                                       initializer=_init_worker, initargs=(logging.getLogger().level, masked and not poll)))
         with context as executor:
             while True:
                 while len(running) < workers:
-                    if masked and _take_ctrl_c():
+                    if poll and _take_ctrl_c():
                         stop = interrupted = True
                     busy = {key for _, key, _ in running.values()}
                     pick = next((e for e in queue if not (e[2] and stop) and not interrupted
@@ -144,11 +145,11 @@ def run(workers, tasks, handle):
                 if not running:
                     break
                 try:
-                    done, _ = wait(running, timeout=0.2 if masked else None, return_when=FIRST_COMPLETED)
+                    done, _ = wait(running, timeout=0.2 if poll else None, return_when=FIRST_COMPLETED)
                 except KeyboardInterrupt:  # the workers got the same signal; let them end, then re-raise
                     stop = interrupted = True
                     continue
-                if masked and _take_ctrl_c():  # before classifying: a task that raised after a parent-only Ctrl-C is skipped, not Failed
+                if poll and _take_ctrl_c():  # before classifying: a task that raised after a parent-only Ctrl-C is skipped, not Failed
                     stop = interrupted = True
                 for future in done:
                     index, _, first = running.pop(future)
@@ -176,7 +177,7 @@ def run(workers, tasks, handle):
                     elif not (stop and next_index not in started):  # never submitted after a stop: nobody waits for it
                         break
                     next_index += 1
-        if masked and _take_ctrl_c():  # one during shutdown: raised here, not by the mask restore below
+        if poll and _take_ctrl_c():  # one during shutdown: raised here, not by the mask restore below
             interrupted = True
         if interrupted:
             raise KeyboardInterrupt

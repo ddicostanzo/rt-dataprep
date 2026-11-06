@@ -205,6 +205,20 @@ def test_a_caller_that_blocked_ctrl_c_gets_workers_with_it_still_blocked():
 
 
 @pytest.mark.skipif(not (hasattr(signal, 'pthread_sigmask') and hasattr(signal, 'sigtimedwait')), reason='no signal masks to poll')
+def test_a_caller_that_blocked_ctrl_c_keeps_its_pending_one():
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})  # on the main thread: the mask is per thread
+    try:
+        signal.pthread_kill(threading.get_ident(), signal.SIGINT)  # pending, as the caller meant it
+        delivered = []
+        pool.run(2, [Task(w.echo, (0,))], lambda i, r: delivered.append(i))
+        assert delivered == [0]  # no KeyboardInterrupt: the pending Ctrl-C is the caller's (#194)
+        assert signal.SIGINT in signal.sigpending()
+    finally:
+        signal.sigtimedwait({signal.SIGINT}, 0)  # consumed here, or the restore below raises it
+        signal.pthread_sigmask(signal.SIG_SETMASK, before)
+
+
+@pytest.mark.skipif(not (hasattr(signal, 'pthread_sigmask') and hasattr(signal, 'sigtimedwait')), reason='no signal masks to poll')
 def test_a_ctrl_c_to_the_parent_during_handle_starts_no_new_patient(tmp_path):
     def handle(index, result):
         if index == 0:
