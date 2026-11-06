@@ -1293,7 +1293,7 @@ def test_an_attribute_error_from_our_own_frame_in_the_classifier_aborts_the_run(
 
 # ---------------------------------------------------------------- pooled header reads, workers, run timing line
 
-TIMING = re.compile(r'convert: (\d+\.\d) s total, (\d+\.\d) s reading, (\d+\.\d) s converting, (\d+) files, workers (\d+)')
+TIMING = re.compile(r'convert: (\d+\.\d) s total, (\d+\.\d) s reading \(summed over patients\), (\d+\.\d) s converting \(summed over patients\), (\d+) files, workers (\d+)')
 
 
 def add_bad_files(folder):
@@ -1311,12 +1311,11 @@ def rows_of(report):
     return [(r.patient, r.folder, r.outcome, r.reason, r.files, r.skipped_series) for r in report.rows]
 
 
-@pytest.mark.parametrize('workers', [1, 4])
-def test_read_folder_headers_sorted_by_path_with_the_flag_for_any_workers(tree, workers):
+def test_read_folder_headers_sorted_by_path_with_the_unreadable_flag(tree):
     org, _ = tree
     make_plan(org / PID / 'plan_1')
     add_bad_files(org / PID / 'plan_1')
-    headers, unreadable = conv.read_folder_headers(org / PID / 'plan_1', workers=workers)
+    headers, unreadable = conv.read_folder_headers(org / PID / 'plan_1')
     assert unreadable and [p for p, _ in headers] == sorted(p for p, _ in headers)
     assert sorted(p.name for p, _ in headers) == sorted(p.name for p in (org / PID / 'plan_1').glob('*.dcm') if 'empty' not in p.name)
 
@@ -1360,14 +1359,14 @@ def test_one_timing_line_after_the_summary_counts_the_headers_read_and_nothing_o
         return real(folder, *args, **kwargs)
     monkeypatch.setattr(conv, 'read_folder_headers', fail_misc_of_refused)
     caplog.set_level(logging.INFO)
-    rows = conv.convert(org, out, workers=2).rows
+    rows = conv.convert(org, out).rows  # a monkeypatch does not reach a worker process: workers=1
     assert (row_of(rows, '').reason, [r.reason for r in rows if r.patient == refused]) == (
         conv.REASON_NO_PLANS, [conv.REASON_IO_ERROR])
     texts = [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.convert']
     line = timing_records(caplog)
     assert len(line) == 1
     total, reading, converting, files, workers = TIMING.fullmatch(line[0]).groups()
-    assert (int(files), int(workers)) == (6 + 4 + 2, 2)  # 16 files on disk in the counted patients, 12 are headers; the refused patient adds nothing
+    assert (int(files), int(workers)) == (6 + 4 + 2, 1)  # 16 files on disk in the counted patients, 12 are headers; the refused patient adds nothing
     assert float(total) >= float(reading) >= 0 and float(converting) >= 0
     assert texts.index(line[0]) == next(i for i, t in enumerate(texts) if t.startswith('convert: ') and 'plan rows' in t) + 1
     assert 'SYNTHETIC' not in line[0] and '/' not in line[0]
@@ -1403,25 +1402,27 @@ def test_no_timing_line_on_ctrl_c(tree, caplog, monkeypatch):
 
 # ---------------------------------------------------------------- hardening B8 (#98): workers reach every read, the dicom_io seam
 
-def test_every_pooled_header_read_gets_the_workers_value(tree, monkeypatch):
-    org, out = tree
-    make_plan(org / PID / 'plan_1')
-    make_plan(org / PID / 'plan_2')
-    (org / PID / 'misc_files').mkdir()
-    sd.write_ct_series(org / PID / 'misc_files', np.zeros(SHAPE), patient_id=PID)
-    seen, real = [], conv.read_pooled
+def test_a_folder_header_read_that_makes_pydicom_warn_prints_nothing_and_restores_state(tmp_path, capfd, caplog):
+    sd.write_rtdose(tmp_path / 'dose.dcm', [[[1]]], invalid_values=True)
+    state = lambda: (pydicom.config.settings.reading_validation_mode, logging.getLogger('pydicom').disabled)  # noqa: E731
+    with warnings.catch_warnings(record=True) as control, caplog.at_level(logging.DEBUG):  # control: it warns unquieted
+        warnings.simplefilter('always')
+        for element in pydicom.dcmread(tmp_path / 'dose.dcm', stop_before_pixels=True).iterall():
+            _ = element.value
+    assert control or caplog.records
+    caplog.clear()
+    capfd.readouterr()
+    before, filters = state(), list(warnings.filters)
+    with warnings.catch_warnings(record=True) as caught, caplog.at_level(logging.DEBUG):
+        warnings.simplefilter('always')
+        headers, unreadable = conv.read_folder_headers(tmp_path)
+    out = capfd.readouterr()
+    assert len(headers) == 1 and not unreadable
+    assert caught == [] and caplog.records == [] and (out.out, out.err) == ('', '')
+    assert state() == before and list(warnings.filters) == filters
 
-    def record(step, paths, workers):
-        seen.append(workers)
-        return real(step, paths, workers)
 
-    monkeypatch.setattr(conv, 'read_pooled', record)
-    conv.convert(org, out, workers=3)
-    assert seen == [3, 3, 3]  # plan_1, plan_2 and misc_files
-
-
-@pytest.mark.parametrize('workers', [1, 4])
-def test_the_header_read_goes_through_the_dicom_io_module_attribute(tree, monkeypatch, workers):
+def test_the_header_read_goes_through_the_dicom_io_module_attribute(tree, monkeypatch):
     org, out = tree
     make_plan(org / PID / 'plan_1')
     real = getattr(dicom_io, 'read_header_core')  # noqa: B009
@@ -1432,6 +1433,89 @@ def test_the_header_read_goes_through_the_dicom_io_module_attribute(tree, monkey
         return real(path)
 
     monkeypatch.setattr(dicom_io, 'read_header_core', fail_plan_file)
-    rows = conv.convert(org, out, workers=workers).rows
+    rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.reason) for r in rows if r.folder == 'plan_1'] == [
         ('plan_1', conv.OUTCOME_REFUSED, conv.REASON_FILE_UNREADABLE)]
+
+
+# ---------------------------------------------------------------- patient processes (#171): N=2 equals N=1, parent-side claims, abort
+
+def three_patients(org, names=('SYNTHETICPTA', 'SYNTHETICPTB', 'SYNTHETICPTC')):
+    for k, name in enumerate(names):
+        make_plan(org / name / 'plan_1', doses=[dose_spec(10 + k, 'PLAN')], patient=name)
+
+
+def written_bytes(root):
+    """{relative path: bytes} of every file under root except the report copies (their names carry a timestamp)."""
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob('*')) if p.is_file() and 'report' not in p.name}
+
+
+def call_guarded(fn):
+    """Run fn in a daemon thread and fail instead of hanging; return (result, raised exception)."""
+    import threading
+    outcome = {}
+
+    def target():
+        try:
+            outcome['result'] = fn()
+        except BaseException as exc:  # noqa: BLE001
+            outcome['error'] = exc
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(120)
+    assert not thread.is_alive(), 'the call did not return'
+    return outcome.get('result'), outcome.get('error')
+
+
+def test_two_patient_processes_write_the_same_files_and_rows_as_one(tree, tmp_path):
+    org, _ = tree
+    three_patients(org)
+    one = conv.convert(org, tmp_path / 'out1')
+    two = conv.convert(org, tmp_path / 'out2', workers=2)
+    assert rows_of(two) == rows_of(one) and len(one.rows) >= 3
+    assert all(r.outcome == conv.OUTCOME_CONVERTED for r in one.rows if r.folder.startswith('plan_'))  # not a vacuous equality
+    assert written_bytes(tmp_path / 'out2') == written_bytes(tmp_path / 'out1') and written_bytes(tmp_path / 'out1')
+
+
+@pytest.mark.parametrize('workers', [1, 2])
+def test_under_overwrite_a_case_repeat_is_refused_by_the_parent_and_the_first_in_sorted_order_wins(tree, tmp_path, workers):
+    org, _ = tree
+    three_patients(org, ('SYNTHETICPTA', 'syntheticpta', 'SYNTHETICPTC'))  # sorted: ...PTA, ...PTC, syntheticpta
+    rows = rows_of(conv.convert(org, tmp_path / 'out', workers=workers, overwrite=True))
+    claimed = [r for r in rows if r[3] == conv.REASON_NAME_CLAIMED]
+    assert claimed == [('syntheticpta', '', conv.OUTCOME_REFUSED, conv.REASON_NAME_CLAIMED, [], 0)]
+    assert [r[0] for r in rows if r[1] == 'plan_1'] == ['SYNTHETICPTA', 'SYNTHETICPTC']
+    assert not (tmp_path / 'out' / 'syntheticpta').exists()
+
+
+def test_without_overwrite_a_case_repeat_is_held_and_the_rows_equal_those_of_one_process(tree, tmp_path):
+    org, _ = tree
+    three_patients(org, ('SYNTHETICPTA', 'syntheticpta', 'SYNTHETICPTC'))
+    one = rows_of(conv.convert(org, tmp_path / 'out1'))
+    two = rows_of(conv.convert(org, tmp_path / 'out2', workers=2))
+    assert two == one and not any(r[3] == conv.REASON_NAME_CLAIMED for r in one)
+    assert [r[0] for r in one if r[1] == 'plan_1'] == ['SYNTHETICPTA', 'SYNTHETICPTC', 'syntheticpta']  # the repeat ran, as today
+
+
+def test_an_internal_error_in_one_patient_aborts_a_two_process_run_with_the_report_and_no_message(tree, capfd):
+    import pool_workers
+    org, out = tree
+    for name in ('a', 'boom', 'c', 'd', 'e', 'f'):
+        (org / name).mkdir()
+    _, error = call_guarded(lambda: conv.convert(org, out, workers=2, _patient_fn=pool_workers.convert_patient))
+    assert isinstance(error, conv.ConvertAborted) and str(error) == conv.REASON_INTERNAL
+    with open(out / conv.REPORT_NAME, newline='') as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(r['patient'], r['outcome'], r['reason']) for r in rows] == [('boom', conv.OUTCOME_REFUSED, conv.REASON_INTERNAL)]
+    err = capfd.readouterr().err
+    assert pool_workers.SECRET not in err and 'RuntimeError' in err  # the worker logged the type and site, never the message
+
+
+@pytest.mark.parametrize('workers', [1, 2])
+def test_a_patient_system_exit_keeps_its_code(tmp_path, workers):
+    # Codex P2 on #176: the scheduler must not turn SystemExit(3) into a successful exit
+    import pool_workers
+    (tmp_path / 'org' / 'SYNTHETIC_P').mkdir(parents=True)
+    with pytest.raises(SystemExit) as raised:
+        conv.convert(tmp_path / 'org', tmp_path / 'out', workers=workers, _patient_fn=pool_workers.patient_exits_3)
+    assert raised.value.code == 3 and (tmp_path / 'out' / 'convert_report.csv').is_file()

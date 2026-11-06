@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import warnings
 from collections import Counter
 
 import numpy as np
@@ -506,8 +507,7 @@ def test_empty_sop_instance_uids_refuse_the_patient(tree):
     assert (rows(out)[0]['outcome'], rows(out)[0]['reason']) == ('refused', org.REASON_NO_SOP_UID)
 
 
-@pytest.mark.parametrize('workers', [1, 4])
-def test_ctrl_c_still_writes_the_report_of_what_was_done(tree, monkeypatch, workers):
+def test_ctrl_c_still_writes_the_report_of_what_was_done(tree, monkeypatch):
     src, out = tree
     planning_study(src / PID / 'a')
     planning_study(src / 'SYNTHETIC_SECOND' / 'a', pid='SYNTHETIC_SECOND')
@@ -520,7 +520,7 @@ def test_ctrl_c_still_writes_the_report_of_what_was_done(tree, monkeypatch, work
 
     monkeypatch.setattr(dicom_io, 'read_header_core', interrupt)
     with pytest.raises(KeyboardInterrupt):
-        organize(src, out, workers=workers)
+        organize(src, out)
     with open(out / org.REPORT_NAME, newline='') as handle:
         assert [row['outcome'] for row in csv.DictReader(handle)] == [org.OUTCOME_ORGANIZED]
     assert not [p for p in out.iterdir() if p.name.endswith('.partial')]
@@ -559,7 +559,7 @@ def test_workers_1_and_4_give_identical_rows_and_copied_trees(tree, tmp_path):
     assert [r.outcome for r in reports[1].rows] == [org.OUTCOME_ORGANIZED] * 2
 
 
-def test_a_preamble_oserror_refuses_that_patient_only_with_workers_4(tree, monkeypatch):
+def test_a_preamble_oserror_refuses_that_patient_only(tree, monkeypatch):
     src, out = tree
     planning_study(src / PID / 'a')
     planning_study(src / 'SYNTHETIC_SECOND' / 'a', pid='SYNTHETIC_SECOND')
@@ -571,13 +571,37 @@ def test_a_preamble_oserror_refuses_that_patient_only_with_workers_4(tree, monke
         return real(path)
 
     monkeypatch.setattr(org, '_has_preamble', flaky)
-    report = organize(src, out, workers=4)
+    report = organize(src, out)
     assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_ORGANIZED, ''), (org.OUTCOME_REFUSED, org.REASON_IO_ERROR)]
     assert (out / PID / 'plan_1').is_dir() and not (out / 'SYNTHETIC_SECOND').exists()
     assert not [p for p in out.iterdir() if p.name.endswith('.partial')]
 
 
-TIMING = re.compile(r'organize: (\d+\.\d) s total, (\d+\.\d) s reading, (\d+\.\d) s copying, (\d+) files, workers (\d+)')
+def test_a_patient_header_read_that_makes_pydicom_warn_prints_nothing_and_restores_state(tree, capfd, caplog):
+    src, out = tree
+    planning_study(src / PID / 'a')
+    sd.write_rtdose(src / PID / 'a' / 'odd.dcm', [[[1]]], patient_id=PID, invalid_values=True)
+    odd = src / PID / 'a' / 'odd.dcm'
+    state = lambda: (pydicom.config.settings.reading_validation_mode, logging.getLogger('pydicom').disabled)  # noqa: E731
+    with warnings.catch_warnings(record=True) as control, caplog.at_level(logging.DEBUG):  # control: it warns unquieted
+        warnings.simplefilter('always')
+        for element in pydicom.dcmread(odd, stop_before_pixels=True).iterall():
+            _ = element.value
+    assert control or caplog.records
+    caplog.clear()
+    capfd.readouterr()
+    before, filters = state(), list(warnings.filters)
+    with warnings.catch_warnings(record=True) as caught, caplog.at_level(logging.DEBUG):
+        warnings.simplefilter('always')
+        report = organize(src, out)
+    captured = capfd.readouterr()
+    assert [r.outcome for r in report.rows] == [org.OUTCOME_ORGANIZED]
+    assert caught == [] and [r for r in caplog.records if r.name.startswith('pydicom')] == []
+    assert (captured.out, captured.err) == ('', '')
+    assert state() == before and list(warnings.filters) == filters
+
+
+TIMING = re.compile(r'organize: (\d+\.\d) s total, (\d+\.\d) s reading \(summed over patients\), (\d+\.\d) s copying \(summed over patients\), (\d+) files, workers (\d+)')
 
 
 def test_one_timing_line_per_run_with_only_numbers_and_fixed_words(tree, caplog, monkeypatch):
@@ -594,10 +618,10 @@ def test_one_timing_line_per_run_with_only_numbers_and_fixed_words(tree, caplog,
 
     monkeypatch.setattr(org, '_has_preamble', flaky)
     with caplog.at_level(logging.INFO):
-        organize(src, out, workers=2)
+        organize(src, out)
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith('organize:') and ' s total' in r.getMessage()]
     assert len(lines) == 1 and TIMING.fullmatch(lines[0])
-    assert TIMING.fullmatch(lines[0]).group(4, 5) == ('7', '2')  # every walked file counts; the refused patient adds none
+    assert TIMING.fullmatch(lines[0]).group(4, 5) == ('7', '1')  # every walked file counts; the refused patient adds none
     assert 'SYNTHETIC' not in lines[0] and '/' not in lines[0]
 
 
@@ -651,21 +675,6 @@ def summary_and_timing(caplog):
     return texts, next(i for i, t in enumerate(texts) if 'patient folders' in t)
 
 
-def test_every_pooled_header_read_gets_the_workers_value(tree, monkeypatch):
-    src, out = tree
-    planning_study(src / PID / 'a')
-    planning_study(src / 'SYNTHETIC_SECOND' / 'a', pid='SYNTHETIC_SECOND')
-    seen, real = [], org.read_pooled
-
-    def record(step, paths, workers):
-        seen.append(workers)
-        return real(step, paths, workers)
-
-    monkeypatch.setattr(org, 'read_pooled', record)
-    organize(src, out, workers=3)
-    assert seen == [3, 3]  # one pooled read per patient folder
-
-
 def test_the_timing_line_comes_right_after_the_summary_line(tree, caplog):
     src, out = tree
     planning_study(src / PID / 'a')
@@ -675,8 +684,7 @@ def test_the_timing_line_comes_right_after_the_summary_line(tree, caplog):
     assert TIMING.fullmatch(texts[at + 1]) and len(texts) == at + 2
 
 
-@pytest.mark.parametrize('workers', [1, 4])
-def test_no_timing_line_on_ctrl_c(tree, monkeypatch, caplog, workers):
+def test_no_timing_line_on_ctrl_c(tree, monkeypatch, caplog):
     src, out = tree
     planning_study(src / PID / 'a')
     real = getattr(dicom_io, 'read_header_core')  # noqa: B009
@@ -689,7 +697,7 @@ def test_no_timing_line_on_ctrl_c(tree, monkeypatch, caplog, workers):
     monkeypatch.setattr(dicom_io, 'read_header_core', interrupt)
     caplog.set_level(logging.INFO)
     with pytest.raises(KeyboardInterrupt):
-        organize(src, out, workers=workers)
+        organize(src, out)
     assert not [r for r in caplog.records if ' s total' in r.getMessage()]
 
 
@@ -895,3 +903,150 @@ def test_o9_the_source_tree_is_unchanged_by_an_overwrite_run(stale):
     before = snapshot(src)
     organize(src, out, overwrite=True)
     assert snapshot(src) == before
+
+
+# ---------------------------------------------------------------- patient processes (#171): N=2 equals N=1, parent-side claims, abort
+
+def written(root):
+    """{relative path: sha256} of every file under root except the report copies (their names carry a timestamp)."""
+    return {k: v for k, v in snapshot(root).items() if 'report' not in k}
+
+
+def call_guarded(fn):
+    """Run fn in a daemon thread and fail instead of hanging; return the exception it raised (or None)."""
+    import threading
+    outcome = {}
+
+    def target():
+        try:
+            fn()
+        except BaseException as exc:  # noqa: BLE001
+            outcome['error'] = exc
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(120)
+    assert not thread.is_alive(), 'the call did not return'
+    return outcome.get('error')
+
+
+def test_two_patient_processes_give_the_same_tree_rows_and_counts_as_one_under_overwrite(tree, tmp_path, caplog):
+    src, _ = tree
+    planning_study(src / 'a1' / 'p', pid='SYNTHETIC_A')
+    planning_study(src / 'a2' / 'p', pid='SYNTHETIC_A', date=LATE)  # the same PatientID: the second folder is refused by the claim
+    planning_study(src / 'b' / 'p', pid='SYNTHETIC_B')  # has an old output: replaced
+    planning_study(src / 'c' / 'p', pid='SYNTHETIC_C')  # refused for its missing SOP UID, has an old output: kept
+    path = next((src / 'c' / 'p').glob('ct*.dcm'))
+    ds = pydicom.dcmread(path)
+    del ds.SOPInstanceUID
+    ds.save_as(path)
+    caplog.set_level(logging.INFO)
+    results = {}
+    for n in (1, 2):
+        out = tmp_path / f'out{n}'
+        for name in ('SYNTHETIC_B', 'SYNTHETIC_C'):
+            (out / name).mkdir(parents=True)
+            (out / name / 'old.txt').write_text('old')
+        caplog.clear()
+        results[n] = (organize(src, out, workers=n, overwrite=True).rows, written(out), counts(caplog), hidden(out))
+    assert results[2] == results[1]
+    rows1, tree1, counted, left = results[1]
+    assert [(r.patient, r.outcome, r.reason) for r in rows1] == [
+        ('SYNTHETIC_A', org.OUTCOME_ORGANIZED, ''), ('SYNTHETIC_A', org.OUTCOME_REFUSED, org.REASON_NAME_CLAIMED),
+        ('SYNTHETIC_B', org.OUTCOME_ORGANIZED, ''), ('SYNTHETIC_C', org.OUTCOME_REFUSED, org.REASON_NO_SOP_UID)]
+    assert counted == (1, 1) and left == [] and 'SYNTHETIC_C/old.txt' in tree1 and 'SYNTHETIC_B/old.txt' not in tree1
+
+
+def test_an_unexpected_error_in_the_read_task_aborts_a_two_process_run_with_the_report_and_no_message(tree, capfd):
+    import pool_workers
+    src, out = tree
+    for name in ('a', 'boom', 'c', 'd', 'e', 'f'):
+        mk(src / name)
+    error = call_guarded(lambda: organize(src, out, workers=2, _read_fn=pool_workers.organize_read))
+    assert isinstance(error, org.OrganizeAborted) and str(error) == org.REASON_INTERNAL
+    got = [(r['patient'], r['outcome'], r['reason']) for r in rows(out)]
+    assert got.count(('boom', org.OUTCOME_REFUSED, org.REASON_INTERNAL)) == 1
+    assert len(got) <= 2  # 'a' (before it) at most: a later read is delivered after the abort and adds no row or copy
+    err = capfd.readouterr().err
+    assert pool_workers.SECRET not in err and 'RuntimeError' in err  # the worker logged the type and site, never the message
+
+
+def test_an_unexpected_error_in_the_read_task_starts_no_further_patient_with_one_process(tree):
+    import pool_workers
+    src, out = tree
+    for name in ('a', 'boom', 'c', 'd'):
+        mk(src / name)
+    with pytest.raises(org.OrganizeAborted):
+        organize(src, out, _read_fn=pool_workers.organize_read)
+    assert [(r['patient'], r['outcome']) for r in rows(out)] == [('a', org.OUTCOME_ORGANIZED), ('boom', org.OUTCOME_REFUSED)]
+
+
+def test_an_unexpected_error_in_the_copy_task_aborts_the_run_and_leaves_no_partial_folder(tree, capfd):
+    import pool_workers
+    src, out = tree
+    planning_study(src / 'boom' / 'p', pid='SYNTHETIC_A')
+    error = call_guarded(lambda: organize(src, out, workers=2, _copy_fn=pool_workers.organize_copy))
+    assert isinstance(error, org.OrganizeAborted)
+    assert [(r['outcome'], r['reason']) for r in rows(out)] == [(org.OUTCOME_REFUSED, org.REASON_INTERNAL)]
+    assert pool_workers.SECRET not in capfd.readouterr().err and hidden(out) == []
+
+
+def test_an_oserror_in_the_copy_task_or_in_recover_refuses_that_patient_and_the_run_goes_on(tree, monkeypatch):
+    src, out = tree
+    planning_study(src / 'a' / 'p', pid='SYNTHETIC_A')
+    planning_study(src / 'b' / 'p', pid='SYNTHETIC_B')
+    planning_study(src / 'c' / 'p', pid='SYNTHETIC_C')
+    real_copy, real_recover = org._copy_all, dicom_io.recover  # noqa: SLF001
+
+    def copy(paths, folder):
+        if 'SYNTHETIC_A' in str(folder):
+            raise OSError('permission denied /secret/path')
+        return real_copy(paths, folder)
+
+    def recover(root, name):
+        if name == 'SYNTHETIC_B':
+            raise OSError('permission denied /secret/path')
+        return real_recover(root, name)
+
+    monkeypatch.setattr(org, '_copy_all', copy)
+    monkeypatch.setattr(dicom_io, 'recover', recover)
+    report = organize(src, out)
+    assert [(r.patient, r.outcome, r.reason) for r in report.rows] == [
+        ('a', org.OUTCOME_REFUSED, org.REASON_IO_ERROR), ('b', org.OUTCOME_REFUSED, org.REASON_IO_ERROR),
+        ('SYNTHETIC_C', org.OUTCOME_ORGANIZED, '')]
+    assert hidden(out) == [] and not (out / 'SYNTHETIC_A').exists()
+
+
+def test_a_target_outside_the_root_still_raises_value_error_not_an_internal_row(tree, monkeypatch):
+    src, out = tree
+    planning_study(src / 'a' / 'p', pid='SYNTHETIC_A')
+    real = org.sanitize_path_component
+    monkeypatch.setattr(org, 'sanitize_path_component', lambda text: '..' if text == 'SYNTHETIC_A' else real(text))  # a hostile id
+    with pytest.raises(ValueError, match=re.escape(org.REASON_OUTSIDE_ROOT)):
+        organize(src, out)
+    assert rows(out) == []
+
+
+@pytest.mark.parametrize('workers', [1, 2])
+def test_a_resumed_run_copies_nothing_and_creates_no_partial_for_a_skipped_patient(tree, tmp_path, workers):
+    src, out = tree
+    planning_study(src / 'a' / 'p', pid='SYNTHETIC_A')
+    planning_study(src / 'b' / 'p', pid='SYNTHETIC_B')
+    organize(src, out)
+    before = written(out)
+    seen = []
+    # a partial created and removed again would leave no trace: watch the directory from a thread
+    import threading
+    stop = threading.Event()
+
+    def watch():
+        while not stop.is_set():
+            seen.extend(p.name for p in out.iterdir() if p.name.endswith('.partial'))
+    thread = threading.Thread(target=watch, daemon=True)
+    thread.start()
+    try:
+        report = organize(src, out, workers=workers)
+    finally:
+        stop.set()
+        thread.join(10)
+    assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_SKIPPED, org.REASON_EXISTS)] * 2
+    assert seen == [] and written(out) == before

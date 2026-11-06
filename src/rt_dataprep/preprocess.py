@@ -25,7 +25,7 @@ import numpy as np
 import SimpleITK as sitk
 
 from rt_dataprep import convert as conv
-from rt_dataprep import dicom_io
+from rt_dataprep import dicom_io, pool
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
 from rt_dataprep.series import DIRECTION_ATOL, IDENTITY, IMAGE_MODALITIES, reg_matrix_array
 
@@ -359,11 +359,13 @@ class PreprocessReport:
     rows: list
 
 
-def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, overwrite=False):  # noqa: B008 (frozen, so the shared default is safe; with no step on it raises)
+def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, overwrite=False, _patient_fn=None):  # noqa: B008 (frozen, so the shared default is safe; with no step on it raises)
     """
     Preprocess every <patient>/plan_<n>/ and <patient>/study_<n>/ under converted_root into out_root and write preprocess_report.csv.
 
+    workers: patient processes, one patient per process (about 7 GB RAM each at 701x701x433); the output is the same for any N.
     overwrite: replace a patient's existing output folder once the new output holds a preprocessed row; otherwise the old one is kept.
+    _patient_fn: internal test seam, replaces the per-patient call only (module-level and picklable for workers > 1).
     """
     converted_root, out_root = Path(converted_root), Path(out_root)
     if out_root.resolve().is_relative_to(converted_root.resolve()):  # before any mkdir: nothing is written into the input
@@ -379,27 +381,39 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, overwrite=F
             raise ValueError(REASON_MASK_RETENTION_LIMIT)
     folders = sorted(p for p in converted_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
-    rows, aborted = [], False
-    claimed = set()  # casefolded folder names of this run, read only under overwrite: a case-insensitive root would merge them
-    replaced = kept = 0
+    patient_fn = _patient_fn or preprocess_patient
+    # The parent owns the claims, as in convert: an undispatched refusal under overwrite, a hold on the casefolded name otherwise.
+    dispatched, refused, claimed = [], {}, set()
+    for i, folder in enumerate(folders):
+        if overwrite and folder.name.casefold() in claimed:
+            refused[i] = [PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_NAME_CLAIMED)]
+        else:
+            dispatched.append(i)
+        claimed.add(folder.name.casefold())
+    tasks = [pool.Task(_preprocess_worker, (patient_fn, folders[i], out_root, steps, overwrite), folders[i].name.casefold())
+             for i in dispatched]
+    results, aborted = {}, False  # folder index -> (rows, status, internal)
+
+    def handle(k, result):
+        nonlocal aborted
+        i = dispatched[k]
+        if isinstance(result, pool.Failed):  # escaped the worker wrapper (a broken pool...): only the type name is known
+            if result.type_name == 'SystemExit':  # as before: exits the run with no row; the report is still written
+                raise SystemExit(result.code)  # its sanitized code, as quiet_call keeps it
+            log.error('preprocess: %s: %s', REASON_INTERNAL, result.type_name)
+            result = [PreprocessRow(folders[i].name, '', conv.OUTCOME_REFUSED, REASON_INTERNAL)], None, True
+        results[i] = result
+        if result[-1]:
+            aborted = True
+            return pool.ABORT
+
     try:
-        for folder in folders:
-            try:
-                found, status = preprocess_patient(folder, out_root, steps, overwrite, claimed)
-                rows += found
-                replaced, kept = replaced + (status == 'replaced'), kept + (status == 'kept')
-            except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
-                rows.append(PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_IO_ERROR))
-                log.warning('preprocess: %s', REASON_IO_ERROR)
-            except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
-                module, line = conv.crash_site(sys.exc_info()[2])
-                rows.append(PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_INTERNAL))
-                log.error('preprocess: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
-                aborted = True
-                break
+        pool.run(workers, tasks, handle)
     finally:  # Ctrl-C too: the report lists what was done
+        rows = conv.rows_in_order(len(folders), refused, {i: r[0] for i, r in results.items()})
         write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'],
                      ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows))
+    replaced, kept = (sum(r[1] == status for r in results.values()) for status in ('replaced', 'kept'))
     imaging_rows = [r for r in rows if r.folder.startswith('study_')]
     plan_rows = [r for r in rows if r.folder and not r.folder.startswith('study_')]
     patient_rows = [r for r in rows if r.folder == '']
@@ -413,12 +427,21 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, overwrite=F
     return PreprocessReport(rows)
 
 
-def preprocess_patient(folder, out_root, steps, overwrite=False, claimed=None):
+def _preprocess_worker(patient_fn, folder, out_root, steps, overwrite):
+    """One patient in a worker (or inline): patient_fn's (rows, status) plus an internal flag; failures become data here, as in convert."""
+    try:
+        return (*patient_fn(folder, out_root, steps, overwrite), False)
+    except OSError:  # its message names a path, i.e. the patient: one fixed reason, and no plan row of this patient
+        log.warning('preprocess: %s', REASON_IO_ERROR)
+        return [PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_IO_ERROR)], None, False
+    except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
+        module, line = conv.crash_site(sys.exc_info()[2])
+        log.error('preprocess: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
+        return pool.Stop(([PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_INTERNAL)], None, True))
+
+
+def preprocess_patient(folder, out_root, steps, overwrite=False):
     """(rows, status None/'new'/'replaced'/'kept'); a raise adds no status."""
-    if overwrite:  # first: a repeat of a name written this run must not recover, rename or replace anything
-        if folder.name.casefold() in claimed:
-            return [PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_NAME_CLAIMED)], None
-        claimed.add(folder.name.casefold())
     target = out_root / folder.name
     dicom_io.recover(out_root, folder.name)
     exists = os.path.lexists(target)  # lexists, as publish: a dangling link is an existing target

@@ -846,8 +846,8 @@ def test_raw_blank_study_uids_never_group_unrelated_series_or_change_valid_outpu
     unsafe_uids = {s['series_uid'] for s in unsafe}
     real_headers = conv.read_folder_headers
 
-    def headers(folder, workers=1):
-        found, unreadable = real_headers(folder, workers)
+    def headers(folder):
+        found, unreadable = real_headers(folder)
         for _, ds in found:
             if str(ds.get('SeriesInstanceUID', '')) in unsafe_uids:
                 # Exercise decoded raw text independently of pydicom's UI normalization, without private attributes.
