@@ -102,3 +102,8 @@ try:
 except KeyboardInterrupt:
     print('interrupted', sorted(got))
 '''
+
+
+def stop_now(value):
+    from rt_dataprep import pool
+    return pool.Stop(value)

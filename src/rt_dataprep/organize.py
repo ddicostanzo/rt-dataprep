@@ -165,7 +165,7 @@ def _worker(fn, folder, *args):
     except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
         module, line = convert.crash_site(sys.exc_info()[2])
         log.error('organize: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
-        return None, _failure_row(folder, REASON_INTERNAL)
+        return pool.Stop((None, _failure_row(folder, REASON_INTERNAL)))
 
 
 def _read_patient(folder, exclude_models):

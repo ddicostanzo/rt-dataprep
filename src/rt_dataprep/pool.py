@@ -25,6 +25,11 @@ class Failed(NamedTuple):
     type_name: str
 
 
+class Stop(NamedTuple):
+    """A task result that stops new first-stage submissions as soon as it completes; handle gets `value` in its turn."""
+    value: object
+
+
 ABORT = object()  # returned by handle: submit nothing further
 _SKIP = object()  # a first-stage task that ended with KeyboardInterrupt (or any exception once interrupted): no result
 
@@ -74,7 +79,7 @@ def run(workers, tasks, handle):
     First results reach handle in input order whatever the completion order; a result is a task's return value or Failed.
     handle returns None, ABORT, or a Task: a follow-up for the same index, queued ahead of unstarted work and sharing the
     slots; its result reaches handle(index, result) when it completes (in completion order) and may chain again.
-    After ABORT, or a Failed, no further first-stage task is submitted; running tasks finish and are delivered, and a
+    After ABORT, a Failed, or a Stop result (from the moment it completes), no further first-stage task is submitted; running tasks finish and are delivered, and a
     follow-up of an index already started still runs (that patient was under way). KeyboardInterrupt, from a task or the waiting parent, stops submission the same way; a task that returns still
     reaches handle, one that raises gets no call, no follow-up runs, and the interrupt is raised once the running tasks end.
     Idle workers ignore Ctrl-C; a running task gets it as KeyboardInterrupt.
@@ -121,6 +126,8 @@ def run(workers, tasks, handle):
                 error = future.exception()
                 if error is None:
                     result = future.result()
+                    if isinstance(result, Stop):  # at completion, not at its in-order delivery: a slow earlier patient must not let the rest start
+                        stop, result = True, result.value
                 elif isinstance(error, KeyboardInterrupt):
                     stop = interrupted = True
                     result = _SKIP

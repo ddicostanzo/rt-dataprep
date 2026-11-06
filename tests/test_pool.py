@@ -261,3 +261,12 @@ def test_a_failed_later_index_still_runs_the_follow_up_of_an_earlier_one(workers
     assert error is None
     assert (0, 'copy 0') in delivered and (1, Failed('RuntimeError')) in delivered
     assert all(i != 2 for i, _ in delivered) or workers == 1  # N=2 never starts 2 after the failure; N=1 ran it before
+
+
+@BOTH
+def test_a_stop_result_halts_submission_when_it_completes_not_when_its_turn_comes(workers):
+    # Codex P2 on #176: a slow patient 0 and an immediately failing patient 1 must not let the rest of the cohort start.
+    tasks = [Task(w.sleep_then, ('slow 0', 1.5)), Task(w.stop_now, ('failed 1',))] + [Task(w.echo, (f'later {i}',)) for i in range(2, 6)]
+    delivered, error = run_guarded(workers, tasks)
+    assert error is None
+    assert delivered == [(0, 'slow 0'), (1, 'failed 1')]  # unwrapped, in input order; nothing after 1 ever started

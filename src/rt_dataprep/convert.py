@@ -196,7 +196,7 @@ def _convert_worker(patient_fn, folder, out_root, exclude_models, overwrite):
     except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
         module, line = crash_site(sys.exc_info()[2])
         log.error('convert: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
-        return [ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_INTERNAL)], 0.0, 0, None, time.monotonic() - started, True
+        return pool.Stop(([ConvertRow(folder.name, '', OUTCOME_REFUSED, REASON_INTERNAL)], 0.0, 0, None, time.monotonic() - started, True))
 
 
 def crash_site(tb):

@@ -437,7 +437,7 @@ def _preprocess_worker(patient_fn, folder, out_root, steps, overwrite):
     except Exception as exc:  # not KeyboardInterrupt/SystemExit: those keep the flag-based cleanup and add no row
         module, line = conv.crash_site(sys.exc_info()[2])
         log.error('preprocess: %s: %s at %s:%d', REASON_INTERNAL, getattr(type(exc), '__name__'), module, line)  # noqa: B009 (no message)
-        return [PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_INTERNAL)], None, True
+        return pool.Stop(([PreprocessRow(folder.name, '', conv.OUTCOME_REFUSED, REASON_INTERNAL)], None, True))
 
 
 def preprocess_patient(folder, out_root, steps, overwrite=False):
