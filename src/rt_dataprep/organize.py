@@ -126,7 +126,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
             log.warning('organize: %s', REASON_IO_ERROR)
             return None
         # cases None: task A saw the target and did not group; recover never removes a target, so it is still a skip
-        if cases is None or not overwrite and os.path.lexists(target):  # lexists, as publish: a dangling link is an existing target
+        if cases is None or (not overwrite and os.path.lexists(target)):  # lexists, as publish: a dangling link is an existing target
             finish(i, PatientRow(name, 0, 0, unreadable, OUTCOME_SKIPPED, REASON_EXISTS), read_s, walked)
             return None
         held[i] = (read_s, walked, PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED))
@@ -173,7 +173,8 @@ def _worker(fn, folder, *args):
 
 def _read_patient(folder, exclude_models, skip_root=None):
     """
-    Task A, skip_root the out_root without --overwrite: (sanitized name, refusal, per-plan path lists (None: the output exists, not grouped), misc paths, unreadable count, files walked, reading seconds). The refusal is
+    Task A, skip_root the out_root without --overwrite: (sanitized name, refusal, per-plan path lists
+    (None: the output exists, not grouped), misc paths, unreadable count, files walked, reading seconds). The refusal is
     None or (row, whether its status may be 'kept'); the parent decides that and the claim. Paths only, no datasets. A raise (OSError) adds none.
     """
     started = time.monotonic()
