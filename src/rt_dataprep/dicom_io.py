@@ -30,6 +30,27 @@ def allocation_failure(exc):
     return isinstance(exc, RuntimeError) and ALLOCATION_FAILURE.search(str(exc)) is not None
 
 
+READ_CHUNK = 1 << 20  # bytes per read of the failure re-read: a large file needs no extra memory
+
+
+def read_failure(path):
+    """After a SimpleITK failure: read `path` with plain Python to the end. A clean read or a vanished file returns (the caller refuses it); ENOMEM is MemoryError; any other OSError propagates."""
+    failure = None
+    try:
+        with open(path, 'rb') as handle:
+            while handle.read(READ_CHUNK):
+                pass
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        failure = exc
+    if failure is None:
+        return
+    if allocation_failure(failure):  # raised here, after the except block: nothing chained
+        raise MemoryError()
+    raise failure
+
+
 @contextlib.contextmanager
 def _pydicom_quiet():
     """No validation, no warnings, no pydicom log records, for one read; all back as they were. Their text quotes values."""

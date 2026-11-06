@@ -257,7 +257,7 @@ def garbage_file(tmp_path):
 
 
 def fail_python_open(monkeypatch, bad, error):
-    """Only preprocess's own open, and only for `bad`, raises `error`; the modes asked for are returned."""
+    """Only dicom_io's own open, and only for `bad`, raises `error`; the modes asked for are returned."""
     modes = []
 
     def raiser(path, *args, **kwargs):
@@ -265,7 +265,7 @@ def fail_python_open(monkeypatch, bad, error):
             return builtins.open(path, *args, **kwargs)
         modes.append(args[0] if args else kwargs.get('mode', 'r'))
         raise error
-    monkeypatch.setattr(pre, 'open', raiser, raising=False)
+    monkeypatch.setattr(dicom_io, 'open', raiser, raising=False)
     return modes
 
 
@@ -276,8 +276,8 @@ READERS = (pre.read_image, pre.read_info)
 def test_a_garbage_file_python_reads_cleanly_is_still_unreadable(tmp_path, monkeypatch, read):
     bad = garbage_file(tmp_path)
     calls = []
-    real = pre._read_failure
-    monkeypatch.setattr(pre, '_read_failure', lambda path: (calls.append(path), real(path))[1])
+    real = dicom_io.read_failure
+    monkeypatch.setattr(dicom_io, 'read_failure', lambda path: (calls.append(path), real(path))[1])
     with pytest.raises(CaseRefused) as caught:
         read(bad)
     assert str(caught.value) == pre.REASON_FILE_UNREADABLE and calls == [bad]
@@ -322,31 +322,11 @@ def test_enomem_from_the_python_reread_is_a_bare_memory_error(tmp_path, monkeypa
     assert caught.value.__context__ is None and caught.value.__cause__ is None
 
 
-def test_read_failure_reads_in_chunks_to_the_end_and_returns(tmp_path, monkeypatch):
-    big = tmp_path / 'big.bin'
-    big.write_bytes(bytes(10))
-    sizes, real = [], builtins.open
-
-    def spy(path, mode='r', *args, **kwargs):
-        handle = real(path, mode, *args, **kwargs)
-        read = handle.read
-        handle.read = lambda size=-1: (sizes.append(size), read(size))[1]
-        return handle
-    monkeypatch.setattr(pre, 'open', spy, raising=False)
-    monkeypatch.setattr(pre, 'READ_CHUNK', 4)
-    assert pre._read_failure(big) is None
-    assert sizes == [4, 4, 4, 4]  # 4 + 4 + 2 bytes, then the empty read that ends it
-
-
-def test_read_failure_swallows_a_missing_file(tmp_path):
-    assert pre._read_failure(tmp_path / 'absent.nii.gz') is None
-
-
 @pytest.mark.parametrize('read', READERS)
 def test_a_successful_read_does_not_run_the_python_check(tmp_path, monkeypatch, read):
     good = tmp_path / 'ct.nii.gz'
     sitk.WriteImage(make_image(box((2, 2, 2), (4, 4, 4)), **grid()), str(good))
-    monkeypatch.setattr(pre, '_read_failure', lambda path: pytest.fail('the Python check ran'))
+    monkeypatch.setattr(dicom_io, 'read_failure', lambda path: pytest.fail('the Python check ran'))
     read(good)
 
 
@@ -358,7 +338,7 @@ def test_a_memory_error_from_quiet_call_does_not_run_the_python_check(tmp_path, 
         raise MemoryError()
     monkeypatch.setattr(pre.sitk, 'ReadImage', boom)
     monkeypatch.setattr(pre.sitk, 'ImageFileReader', boom)
-    monkeypatch.setattr(pre, '_read_failure', lambda path: pytest.fail('the Python check ran'))
+    monkeypatch.setattr(dicom_io, 'read_failure', lambda path: pytest.fail('the Python check ran'))
     with pytest.raises(MemoryError):
         read(bad)
 

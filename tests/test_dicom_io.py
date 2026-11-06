@@ -1,3 +1,4 @@
+import builtins
 import logging
 import errno
 import operator
@@ -625,3 +626,64 @@ def test_remove_tree_swallows_an_unreadable_folder_inside_the_tree(tmp_path):
     finally:
         (tree / 'locked').chmod(0o700)
     assert (tree / 'locked').is_dir()  # left for the next recover, nothing raised
+
+
+def fail_python_open(monkeypatch, bad, error):
+    """Only dicom_io's own open, and only for `bad`, raises `error`; the modes asked for are returned."""
+    modes = []
+
+    def raiser(path, *args, **kwargs):
+        if str(path) != str(bad):
+            return builtins.open(path, *args, **kwargs)
+        modes.append(args[0] if args else kwargs.get('mode', 'r'))
+        raise error
+    monkeypatch.setattr(dicom_io, 'open', raiser, raising=False)
+    return modes
+
+
+def test_read_failure_reads_in_chunks_to_the_end_and_returns(tmp_path, monkeypatch):
+    big = tmp_path / 'big.bin'
+    big.write_bytes(bytes(10))
+    sizes, real = [], builtins.open
+
+    def spy(path, mode='r', *args, **kwargs):
+        handle = real(path, mode, *args, **kwargs)
+        read = handle.read
+        handle.read = lambda size=-1: (sizes.append(size), read(size))[1]
+        return handle
+    monkeypatch.setattr(dicom_io, 'open', spy, raising=False)
+    monkeypatch.setattr(dicom_io, 'READ_CHUNK', 4)
+    assert dicom_io.read_failure(big) is None
+    assert sizes == [4, 4, 4, 4]  # 4 + 4 + 2 bytes, then the empty read that ends it
+
+
+def test_read_failure_swallows_a_missing_file(tmp_path):
+    assert dicom_io.read_failure(tmp_path / 'absent.nii.gz') is None
+
+
+def test_read_failure_swallows_a_file_that_vanishes_before_the_reread(tmp_path, monkeypatch):
+    bad = tmp_path / 'gone.bin'
+    bad.write_bytes(b'x')
+    fail_python_open(monkeypatch, bad, FileNotFoundError(errno.ENOENT, 'gone', str(bad)))
+    assert dicom_io.read_failure(bad) is None
+
+
+@pytest.mark.parametrize('error', [PermissionError(errno.EACCES, 'forced'), OSError(errno.EIO, 'forced')])
+def test_read_failure_propagates_any_other_oserror_unchained(tmp_path, monkeypatch, error):
+    bad = tmp_path / 'bad.bin'
+    bad.write_bytes(b'x')
+    modes = fail_python_open(monkeypatch, bad, error)
+    with pytest.raises(OSError) as caught:
+        dicom_io.read_failure(bad)
+    assert caught.value is error and modes == ['rb']
+    assert caught.value.__context__ is None and caught.value.__cause__ is None
+
+
+def test_read_failure_turns_enomem_into_a_bare_memory_error(tmp_path, monkeypatch):
+    bad = tmp_path / 'bad.bin'
+    bad.write_bytes(b'x')
+    fail_python_open(monkeypatch, bad, OSError(errno.ENOMEM, 'forced'))
+    with pytest.raises(MemoryError) as caught:
+        dicom_io.read_failure(bad)
+    assert type(caught.value) is MemoryError and caught.value.args == ()
+    assert caught.value.__context__ is None and caught.value.__cause__ is None
