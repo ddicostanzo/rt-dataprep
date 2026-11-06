@@ -392,6 +392,7 @@ def test_read_header_core_error_has_no_context(tmp_path):
 
 # recover / publish: the --overwrite swap helper. Folders are SYNTHETIC_ names in tmp_path.
 NAME = 'SYNTHETIC_pt'
+_OURS = (NAME, f'.{NAME}.old', f'.{NAME}.partial')  # the only folders the helpers may touch
 
 
 def _make(path, files):
@@ -411,17 +412,18 @@ def _scene(tmp_path, target=None, old=None, partial=None):
         if files is not None:
             (root / folder).mkdir(parents=True)
             _make(root / folder, files)
-    for folder in ('SYNTHETIC_other', '.SYNTHETIC_other.old', '.SYNTHETIC_other.partial'):
+    # '.<name>2.old' is hidden and shares the name prefix, so a '.{name}*' glob in the helper would take it (AC-H7)
+    for folder in ('SYNTHETIC_other', '.SYNTHETIC_other.old', '.SYNTHETIC_other.partial', f'.{NAME}2.old'):
         _make(root / folder, {'a.bin': b'SYNTHETIC_sibling'})
     return root
 
 
 def _others(root):
-    return {p.name: _snap(p) for p in root.iterdir() if NAME not in p.name}
+    return {p.name: _snap(p) for p in root.iterdir() if p.name not in _OURS}
 
 
 def _names(root):
-    return sorted(p.name for p in root.iterdir() if NAME in p.name)
+    return sorted(p.name for p in root.iterdir() if p.name in _OURS)
 
 
 def _failing_rename(monkeypatch, *sources):
@@ -468,8 +470,10 @@ def test_publish_without_a_target_is_new(tmp_path, overwrite, success):
 
 def test_publish_without_a_target_publishes_an_empty_partial(tmp_path):
     root = _scene(tmp_path, partial={})
+    before = _others(root)
     assert dicom_io.publish(root, NAME, overwrite=False, success=False) == 'new'
     assert _names(root) == [NAME] and _snap(root / NAME) == {}
+    assert _others(root) == before
 
 
 def test_publish_replaces_an_existing_target(tmp_path):
@@ -527,16 +531,28 @@ def test_publish_leaves_the_old_folder_for_recover_when_the_rollback_also_fails(
     assert _names(root) == [NAME] and _snap(root / NAME) == OLD
 
 
+def test_recover_raises_and_keeps_the_old_folder_when_it_cannot_restore_it(tmp_path, monkeypatch):
+    root = _scene(tmp_path, old=OLD)
+    before = _others(root)
+    _failing_rename(monkeypatch, f'.{NAME}.old')
+    with pytest.raises(OSError):
+        dicom_io.recover(root, NAME)
+    assert _names(root) == [f'.{NAME}.old'] and _snap(root / f'.{NAME}.old') == OLD
+    assert _others(root) == before
+
+
 def test_publish_ignores_a_failed_delete_of_the_old_folder(tmp_path, caplog):
     if os.geteuid() == 0:
         pytest.skip('root ignores directory permissions')
     root = _scene(tmp_path, {'locked/a.bin': b'SYNTHETIC_old'}, partial=NEW)
     (root / NAME / 'locked').chmod(0o500)  # r-x: its file cannot be unlinked
+    before = _others(root)
     try:
         with caplog.at_level(logging.DEBUG):
             assert dicom_io.publish(root, NAME, overwrite=True, success=True) == 'replaced'
         assert _snap(root / NAME) == NEW
         assert caplog.records == []
+        assert _others(root) == before
     finally:
         (root / f'.{NAME}.old' / 'locked').chmod(0o700)
 
@@ -552,7 +568,9 @@ def test_recover_unlinks_a_symlinked_old_folder_and_never_follows_it(tmp_path, d
     root = _scene(tmp_path, {'a.bin': b'SYNTHETIC_kept'})
     outside = _outside(tmp_path)
     (root / f'.{NAME}.old').symlink_to(tmp_path / 'missing' if dangling else outside, target_is_directory=True)
+    before = _others(root)
     dicom_io.recover(root, NAME)
+    assert _others(root) == before
     assert not os.path.lexists(root / f'.{NAME}.old')
     assert _snap(root / NAME) == {'a.bin': b'SYNTHETIC_kept'}
     assert _snap(outside) == {'keep.bin': b'SYNTHETIC_outside'}
@@ -562,7 +580,9 @@ def test_publish_replaces_a_symlinked_target_without_touching_the_folder_it_poin
     root = _scene(tmp_path, partial=NEW)
     outside = _outside(tmp_path)
     (root / NAME).symlink_to(outside, target_is_directory=True)
+    before = _others(root)
     assert dicom_io.publish(root, NAME, overwrite=True, success=True) == 'replaced'
+    assert _others(root) == before
     assert not (root / NAME).is_symlink() and _snap(root / NAME) == NEW
     assert not os.path.lexists(root / f'.{NAME}.old')
     assert _snap(outside) == {'keep.bin': b'SYNTHETIC_outside'}

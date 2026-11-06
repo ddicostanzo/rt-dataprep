@@ -4,10 +4,12 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import warnings
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 import pydicom
@@ -941,6 +943,36 @@ def test_t2b_a_refused_folder_then_an_organized_one_for_one_name_count_one_repla
     assert [r.outcome for r in report.rows] == [org.OUTCOME_REFUSED, org.OUTCOME_ORGANIZED]
     assert not (out / name / 'marker.txt').exists()
     assert counts(caplog) == (1, 0)
+
+
+def test_o7_the_refused_same_name_folders_never_recover_or_rename_and_the_first_output_equals_a_solo_run(tree, tmp_path, monkeypatch):
+    src, out = tree
+    name = 'SYNTHETIC_a_b'
+    planning_study(src / 'p1', pid='SYNTHETIC_a b', date=EARLY)
+    planning_study(src / 'p2', pid=name, date=LATE)  # refused by the claim
+    planning_study(src / 'p3', pid=name, date=LATE, tag='x')
+    _drop_sop_uid(src / 'p3')  # refused before the claim
+    solo = tmp_path / 'solo'
+    shutil.copytree(src / 'p1', solo / 'p1')
+    organize(solo, tmp_path / 'solo_out')
+    (out / name).mkdir(parents=True)
+    (out / name / 'marker.txt').write_text('stale')
+    recovered, renamed, real_recover, real_rename = [], [], dicom_io.recover, dicom_io.rename_dir
+
+    def spy_recover(root, n):
+        recovered.append(n)
+        return real_recover(root, n)
+
+    def spy_rename(source, target):
+        renamed.append(Path(source).name)
+        return real_rename(source, target)
+    monkeypatch.setattr(dicom_io, 'recover', spy_recover)
+    monkeypatch.setattr(dicom_io, 'rename_dir', spy_rename)
+    report = organize(src, out, overwrite=True)
+    assert [r.reason for r in report.rows[1:]] == [org.REASON_NAME_CLAIMED, org.REASON_NO_SOP_UID]
+    assert recovered == [name]  # the first folder's own call, none for the refused ones
+    assert renamed == [name, f'.{name}.partial']  # its swap: target aside, partial in
+    assert snapshot(out / name) == snapshot(tmp_path / 'solo_out' / name)
 
 
 def test_o8_an_output_folder_with_no_input_patient_is_untouched(stale):

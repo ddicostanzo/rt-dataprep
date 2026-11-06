@@ -2156,11 +2156,16 @@ def test_overwrite_refuses_a_second_folder_whose_name_differs_only_in_case(tmp_p
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     write_plan(converted)
     write_plan(converted, patient='syntheticpta')
+    pre.preprocess(converted, tmp_path / 'ref', SMALL, overwrite=True)  # the same source into an empty root: what the first folder's output must equal
+    canary = out / '.syntheticpta.old'  # named for the refused (second) folder: a recover run for it would consume it
+    canary.mkdir(parents=True)
+    (canary / 'keep.txt').write_text('keep')
     rows = pre.preprocess(converted, out, SMALL, overwrite=True).rows
     first, second = sorted(rows, key=lambda r: r.patient)
     assert (first.patient, first.outcome) == ('SYNTHETICPTA', 'preprocessed')
     assert (second.patient, second.folder, second.outcome, second.reason) == ('syntheticpta', '', 'refused', pre.REASON_NAME_CLAIMED)
-    assert (out / 'SYNTHETICPTA' / 'plan_1').is_dir() and no_hidden(out) == []
+    assert (out / 'SYNTHETICPTA' / 'plan_1').is_dir() and tree_state(out / 'SYNTHETICPTA') == tree_state(tmp_path / 'ref' / 'SYNTHETICPTA')
+    assert no_hidden(out) == [canary.name] and (canary / 'keep.txt').read_text() == 'keep' and not (out / 'syntheticpta').exists()
 
 
 def test_without_overwrite_names_differing_in_case_are_both_built_as_today(tmp_path):
@@ -2175,7 +2180,10 @@ def test_overwrite_leaves_an_unrelated_output_folder_alone(tmp_path):
     converted, out = stale_output(tmp_path)
     (out / 'SYNTHETICOTHER').mkdir()
     (out / 'SYNTHETICOTHER' / 'keep.txt').write_text('keep')
+    (out / '.SYNTHETICOTHER.old').mkdir()  # a hidden sibling: no recover or publish for SYNTHETICPTA may touch it
+    (out / '.SYNTHETICOTHER.old' / 'keep.txt').write_text('keep')
     pre.preprocess(converted, out, SMALL, overwrite=True)
+    assert (out / '.SYNTHETICOTHER.old' / 'keep.txt').read_text() == 'keep'
     assert (out / 'SYNTHETICOTHER' / 'keep.txt').read_text() == 'keep'
 
 
