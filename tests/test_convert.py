@@ -1758,3 +1758,39 @@ def test_a10_a_happy_path_with_a_dose_and_a_misc_series_re_reads_nothing(tree, m
     assert [(r.folder, r.outcome) for r in rows] == [('plan_1', 'converted'), ('studies', 'converted'), ('study_1/series_MR_1', 'converted')]
     assert 'dose.nii.gz' in row_of(rows).files and (out / PID / 'study_1' / 'series_MR_1.nii.gz').is_file()  # all four readers ran
     assert seen == []
+
+
+# ---------------------------------------------------------------- A6: a folder that lists but cannot be searched
+
+def hide_entries(monkeypatch, parent, deny=False):
+    """Python 3.14's is_file/is_dir answer False for an entry of `parent` whose stat fails; so do these, for that folder's entries only.
+    With `deny` the stat itself raises PermissionError there (the root-safe stand-in for mode 0o444). Every other path is untouched."""
+    real = {name: getattr(Path, name) for name in ('is_file', 'is_dir', 'stat')}
+    monkeypatch.setattr(Path, 'is_file', lambda self, **kw: False if self.parent == parent else real['is_file'](self, **kw))
+    monkeypatch.setattr(Path, 'is_dir', lambda self, **kw: False if self.parent == parent else real['is_dir'](self, **kw))
+    if deny:
+        def stat(self, *, follow_symlinks=True):
+            if self.parent == parent:
+                raise PermissionError(errno.EACCES, 'denied')
+            return real['stat'](self, follow_symlinks=follow_symlinks)
+        monkeypatch.setattr(Path, 'stat', stat)
+
+
+def test_a6_a_plan_folder_whose_entries_cannot_be_searched_is_the_patients_io_error_twin(tree, monkeypatch):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    hide_entries(monkeypatch, plan['folder'], deny=True)
+    only_io_error_row(out, conv.convert(org, out).rows)
+
+
+@POSIX_USER
+def test_a6_a_plan_folder_with_mode_0o444_is_the_patients_io_error(tree, monkeypatch):
+    org, out = tree
+    plan = make_plan(org / PID / 'plan_1')
+    hide_entries(monkeypatch, plan['folder'])  # what 3.14 does with the EACCES; 3.13 raises it already
+    plan['folder'].chmod(0o444)
+    try:
+        rows = conv.convert(org, out).rows
+    finally:
+        plan['folder'].chmod(0o755)
+    only_io_error_row(out, rows)

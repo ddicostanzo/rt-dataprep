@@ -51,6 +51,23 @@ def read_failure(path):
     raise failure
 
 
+_ABSENT = (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP)  # what Python 3.13's is_file/is_dir read as "not there"
+_KINDS = {'file': stat.S_ISREG, 'dir': stat.S_ISDIR}
+
+
+def entry_is(path, kind):
+    """Python 3.13's path.is_file()/is_dir() ('file'/'dir') on every version: False for an absent entry, any other OSError (EACCES...) raised; 3.14 hides it."""
+    is_kind = _KINDS[kind]
+    try:
+        return is_kind(path.stat().st_mode)
+    except OSError as exc:
+        if exc.errno in _ABSENT or getattr(exc, 'winerror', None) in (21, 123, 1921):
+            return False
+        raise
+    except ValueError:  # an embedded NUL in the name
+        return False
+
+
 @contextlib.contextmanager
 def _pydicom_quiet():
     """No validation, no warnings, no pydicom log records, for one read; all back as they were. Their text quotes values."""

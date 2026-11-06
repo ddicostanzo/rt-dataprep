@@ -1,10 +1,13 @@
 """CLI (task-06, task-03 of F2b): `python -m rt_dataprep convert` and `preprocess`, always run as a subprocess. Every tree is synthetic and built in tmp_path."""
 import csv
 import dataclasses
+import errno
 import json
+import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import SimpleITK as sitk
@@ -493,3 +496,43 @@ def test_overwrite_refuses_an_input_root_inside_the_output_root(tmp_path, comman
     assert result.returncode == 1 and result.stdout == ''
     assert result.stderr == f'rt_dataprep: {dicom_io.REASON_INPUT_INSIDE_OUTPUT}\n'
     assert sorted(p.name for p in out.rglob('*')) == ['SYNTHETICPT', 'input']
+
+
+# ---------------------------------------------------------------- A8: a source root whose entries cannot be searched
+
+def hide_root_entries(monkeypatch, root, deny=False):
+    """is_file/is_dir answer False (Python 3.14's way) for the entries of `root` only; with `deny` their stat raises PermissionError."""
+    real = {name: getattr(Path, name) for name in ('is_file', 'is_dir', 'stat')}
+    monkeypatch.setattr(Path, 'is_file', lambda self, **kw: False if self.parent == root else real['is_file'](self, **kw))
+    monkeypatch.setattr(Path, 'is_dir', lambda self, **kw: False if self.parent == root else real['is_dir'](self, **kw))
+    if deny:
+        def stat(self, *, follow_symlinks=True):
+            if self.parent == root:
+                raise PermissionError(errno.EACCES, 'denied')
+            return real['stat'](self, follow_symlinks=follow_symlinks)
+        monkeypatch.setattr(Path, 'stat', stat)
+
+
+def assert_root_refused(tmp_path, org, capsys):
+    out = tmp_path / 'out'
+    with pytest.raises(SystemExit) as exc:
+        cli.main(['convert', str(org), str(out)])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err == 'rt_dataprep: file system error on the source or output root\n' and captured.out == ''
+    assert not out.exists()
+
+
+def test_a8_a_source_root_whose_entries_cannot_be_searched_exits_1_without_an_output_root_twin(tmp_path, org, monkeypatch, capsys):
+    hide_root_entries(monkeypatch, org, deny=True)
+    assert_root_refused(tmp_path, org, capsys)
+
+
+@pytest.mark.skipif(os.name != 'posix' or os.geteuid() == 0, reason='mode bits do not stop root')
+def test_a8_a_source_root_with_mode_0o444_exits_1_without_an_output_root(tmp_path, org, monkeypatch, capsys):
+    hide_root_entries(monkeypatch, org)  # what 3.14 does with the EACCES; 3.13 raises it already
+    org.chmod(0o444)
+    try:
+        assert_root_refused(tmp_path, org, capsys)
+    finally:
+        org.chmod(0o755)

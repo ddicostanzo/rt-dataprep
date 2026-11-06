@@ -687,3 +687,60 @@ def test_read_failure_turns_enomem_into_a_bare_memory_error(tmp_path, monkeypatc
         dicom_io.read_failure(bad)
     assert type(caught.value) is MemoryError and caught.value.args == ()
     assert caught.value.__context__ is None and caught.value.__cause__ is None
+
+
+# ---------------------------------------------------------------- entry_is: Python 3.13's is_file/is_dir on every version
+
+def test_entry_is_answers_false_for_an_entry_that_is_not_there(tmp_path):
+    (tmp_path / 'plain').write_text('x')
+    (tmp_path / 'dangling').symlink_to(tmp_path / 'nowhere')
+    (tmp_path / 'loop').symlink_to(tmp_path / 'loop')
+    absent = [tmp_path / 'missing', tmp_path / 'dangling', tmp_path / 'loop', tmp_path / 'plain' / 'below', tmp_path / 'with\0nul']
+    assert [dicom_io.entry_is(p, kind) for p in absent for kind in ('file', 'dir')] == [False] * 10
+
+
+def test_entry_is_tells_a_file_from_a_folder_and_follows_a_link(tmp_path):
+    (tmp_path / 'plain').write_text('x')
+    (tmp_path / 'folder').mkdir()
+    (tmp_path / 'link').symlink_to(tmp_path / 'folder')
+    assert [dicom_io.entry_is(tmp_path / n, k) for n in ('plain', 'folder', 'link') for k in ('file', 'dir')] == \
+        [True, False, False, True, False, True]
+
+
+def test_entry_is_ignores_ebadf_and_raises_every_other_error(tmp_path, monkeypatch):
+    real = Path.stat
+
+    def stat(self, *, follow_symlinks=True):
+        if self.name != 'target':
+            return real(self, follow_symlinks=follow_symlinks)
+        raise OSError(code, 'forced')
+    monkeypatch.setattr(Path, 'stat', stat)
+    code = errno.EBADF
+    assert dicom_io.entry_is(tmp_path / 'target', 'file') is False
+    for code in (errno.EACCES, errno.EIO):
+        with pytest.raises(OSError) as raised:
+            dicom_io.entry_is(tmp_path / 'target', 'dir')
+        assert raised.value.errno == code
+
+
+def test_entry_is_raises_permission_error_for_a_parent_without_search_permission_twin(tmp_path, monkeypatch):
+    real = Path.stat
+
+    def stat(self, *, follow_symlinks=True):
+        if self.parent == tmp_path:
+            raise PermissionError(errno.EACCES, 'denied')
+        return real(self, follow_symlinks=follow_symlinks)
+    monkeypatch.setattr(Path, 'stat', stat)
+    with pytest.raises(PermissionError):
+        dicom_io.entry_is(tmp_path / 'any', 'file')
+
+
+@pytest.mark.skipif(os.name != 'posix' or os.geteuid() == 0, reason='mode bits do not stop root')
+def test_entry_is_raises_permission_error_for_a_parent_with_mode_0o444(tmp_path):
+    (tmp_path / 'inside').write_text('x')
+    tmp_path.chmod(0o444)
+    try:
+        with pytest.raises(PermissionError):
+            dicom_io.entry_is(tmp_path / 'inside', 'file')
+    finally:
+        tmp_path.chmod(0o755)
