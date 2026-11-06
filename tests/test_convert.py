@@ -846,6 +846,16 @@ def test_overwrite_without_the_flag_skips_and_treats_names_differing_in_case_as_
     assert [(r.patient, r.outcome) for r in rows if r.folder == 'plan_1'] == [(PID, 'converted'), (PID.lower(), 'converted')]
 
 
+def test_without_overwrite_a_dangling_link_at_the_output_name_is_an_existing_output(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    out.mkdir()
+    (out / PID).symlink_to(out / 'SYNTHETIC_missing', target_is_directory=True)
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'skipped', conv.REASON_EXISTS)]
+    assert (out / PID).is_symlink() and no_hidden(out) == []
+
+
 def test_overwrite_replaces_a_stale_folder_with_a_fresh_run(tree, caplog):
     org, out = stale_output(tree)
     started = time.time()
@@ -875,6 +885,7 @@ def test_overwrite_with_a_failed_build_keeps_the_old_folder(tree, monkeypatch, c
     assert tree_hashes(out / PID) == before
     assert no_hidden(out) == []
     assert any(m.endswith('; 0 replaced, 0 kept') for m in caplog.messages)
+    assert caplog.records and [r.getMessage() for r in caplog.records if PID in r.getMessage() or str(out) in r.getMessage()] == []
 
 
 def test_overwrite_with_a_failed_partial_rename_restores_the_old_folder(tree, monkeypatch, caplog):
@@ -938,22 +949,30 @@ def test_overwrite_keeps_the_old_folder_of_a_patient_without_plan_folders(tree, 
     assert any(m.endswith('; 0 replaced, 1 kept') for m in caplog.messages)
 
 
-def test_overwrite_refuses_a_second_folder_whose_name_differs_only_in_case(tree):
+def test_overwrite_refuses_a_second_folder_whose_name_differs_only_in_case(tree, tmp_path):
     org, out = tree
     make_plan(org / PID / 'plan_1')
     make_plan(org / PID.lower() / 'plan_1', patient=PID.lower())
+    conv.convert(org, tmp_path / 'ref', overwrite=True)  # the same source into an empty root: what the first folder's output must equal
+    canary = out / f'.{PID.lower()}.old'  # named for the refused (second) folder: a recover run for it would consume it
+    canary.mkdir(parents=True)
+    (canary / 'keep.txt').write_text('keep')
     rows = conv.convert(org, out, overwrite=True).rows
     first, second = sorted(rows, key=lambda r: r.patient)
     assert (first.patient, first.outcome) == (PID, 'converted')
     assert (second.patient, second.folder, second.outcome, second.reason) == (PID.lower(), '', 'refused', conv.REASON_NAME_CLAIMED)
-    assert (out / PID / 'plan_1').is_dir() and no_hidden(out) == []
+    assert (out / PID / 'plan_1').is_dir() and tree_hashes(out / PID) == tree_hashes(tmp_path / 'ref' / PID)
+    assert no_hidden(out) == [canary.name] and (canary / 'keep.txt').read_text() == 'keep' and not (out / PID.lower()).exists()
 
 
 def test_overwrite_leaves_an_unrelated_output_folder_alone(tree):
     org, out = stale_output(tree)
     (out / 'SYNTHETICOTHER').mkdir()
     (out / 'SYNTHETICOTHER' / 'keep.txt').write_text('keep')
+    (out / '.SYNTHETICOTHER.old').mkdir()  # a hidden sibling: no recover or publish for PID may touch it
+    (out / '.SYNTHETICOTHER.old' / 'keep.txt').write_text('keep')
     conv.convert(org, out, overwrite=True)
+    assert (out / '.SYNTHETICOTHER.old' / 'keep.txt').read_text() == 'keep'
     assert (out / 'SYNTHETICOTHER' / 'keep.txt').read_text() == 'keep'
 
 

@@ -4,10 +4,12 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import warnings
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 import pydicom
@@ -759,6 +761,17 @@ def test_o2_overwrite_replaces_a_stale_folder_with_a_fresh_run(stale, caplog):
     assert counts(caplog) == (1, 0)
 
 
+def test_t1d_without_overwrite_a_dangling_link_at_the_output_name_is_an_existing_output(tree, caplog):
+    src, out = tree
+    planning_study(src / PID / 'p')
+    out.mkdir()
+    (out / PID).symlink_to(out / 'SYNTHETIC_missing', target_is_directory=True)
+    caplog.set_level(logging.INFO)
+    report = organize(src, out)
+    assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_SKIPPED, org.REASON_EXISTS)]
+    assert (out / PID).is_symlink() and hidden(out) == []
+
+
 def test_o2_overwrite_with_no_existing_folder_is_a_plain_new_run(tree, caplog):
     src, out = tree
     planning_study(src / PID / 'p')
@@ -894,6 +907,72 @@ def test_o7_a_later_same_name_folder_is_refused_and_never_touches_the_first_outp
     assert report.rows[2].reason == org.REASON_NO_SOP_UID
     assert [p.name for p in (out / name).glob('plan_*')] == ['plan_1'] and not (out / name / 'marker.txt').exists()
     assert hidden(out) == [] and counts(caplog) == (1, 0)  # p3 was refused after p1 claimed the name: not kept
+
+
+def _drop_sop_uid(folder):
+    path = next(folder.glob('ct*.dcm'))
+    ds = pydicom.dcmread(path)
+    del ds.SOPInstanceUID  # refused before the claim: REASON_NO_SOP_UID
+    ds.save_as(path)
+
+
+def test_t2a_two_refused_folders_for_one_output_name_count_one_kept(tree, caplog):
+    src, out = tree
+    name = 'SYNTHETIC_twin'
+    planning_study(src / 'p1', pid=name, date=EARLY)
+    planning_study(src / 'p2', pid=name, date=LATE)
+    _drop_sop_uid(src / 'p1')
+    _drop_sop_uid(src / 'p2')
+    (out / name).mkdir(parents=True)
+    caplog.set_level(logging.INFO)
+    report = organize(src, out, overwrite=True)
+    assert [r.reason for r in report.rows] == [org.REASON_NO_SOP_UID, org.REASON_NO_SOP_UID]
+    assert counts(caplog) == (0, 1)
+
+
+def test_t2b_a_refused_folder_then_an_organized_one_for_one_name_count_one_replaced(tree, caplog):
+    src, out = tree
+    name = 'SYNTHETIC_twin'
+    planning_study(src / 'p1', pid=name, date=EARLY)
+    planning_study(src / 'p2', pid=name, date=LATE)
+    _drop_sop_uid(src / 'p1')  # sorts first: kept, then p2 replaces the same folder
+    (out / name).mkdir(parents=True)
+    (out / name / 'marker.txt').write_text('stale')
+    caplog.set_level(logging.INFO)
+    report = organize(src, out, overwrite=True)
+    assert [r.outcome for r in report.rows] == [org.OUTCOME_REFUSED, org.OUTCOME_ORGANIZED]
+    assert not (out / name / 'marker.txt').exists()
+    assert counts(caplog) == (1, 0)
+
+
+def test_o7_the_refused_same_name_folders_never_recover_or_rename_and_the_first_output_equals_a_solo_run(tree, tmp_path, monkeypatch):
+    src, out = tree
+    name = 'SYNTHETIC_a_b'
+    planning_study(src / 'p1', pid='SYNTHETIC_a b', date=EARLY)
+    planning_study(src / 'p2', pid=name, date=LATE)  # refused by the claim
+    planning_study(src / 'p3', pid=name, date=LATE, tag='x')
+    _drop_sop_uid(src / 'p3')  # refused before the claim
+    solo = tmp_path / 'solo'
+    shutil.copytree(src / 'p1', solo / 'p1')
+    organize(solo, tmp_path / 'solo_out')
+    (out / name).mkdir(parents=True)
+    (out / name / 'marker.txt').write_text('stale')
+    recovered, renamed, real_recover, real_rename = [], [], dicom_io.recover, dicom_io.rename_dir
+
+    def spy_recover(root, n):
+        recovered.append(n)
+        return real_recover(root, n)
+
+    def spy_rename(source, target):
+        renamed.append(Path(source).name)
+        return real_rename(source, target)
+    monkeypatch.setattr(dicom_io, 'recover', spy_recover)
+    monkeypatch.setattr(dicom_io, 'rename_dir', spy_rename)
+    report = organize(src, out, overwrite=True)
+    assert [r.reason for r in report.rows[1:]] == [org.REASON_NAME_CLAIMED, org.REASON_NO_SOP_UID]
+    assert recovered == [name]  # the first folder's own call, none for the refused ones
+    assert renamed == [name, f'.{name}.partial']  # its swap: target aside, partial in
+    assert snapshot(out / name) == snapshot(tmp_path / 'solo_out' / name)
 
 
 def test_o8_an_output_folder_with_no_input_patient_is_untouched(stale):
