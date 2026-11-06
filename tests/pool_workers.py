@@ -75,6 +75,14 @@ def organize_read(folder, *args, **kwargs):
     return Path(folder).name, None, [], [], 0, 0, 0.0  # name, refusal, per-plan paths, misc paths, unreadable, walked, reading seconds
 
 
+def organize_read_escaping(folder, *args, **kwargs):
+    """Folder 'a' reads as the hostile name '..'; any other folder reads after 1 s, so it is delivered after a's raise."""
+    if Path(folder).name == 'a':
+        return '..', None, [], [], 0, 0, 0.0
+    time.sleep(1.0)
+    return organize_read(folder)
+
+
 def organize_copy(folder, *args, **kwargs):
     _raise_for(folder)
     return 0.0, None  # copy seconds, status
