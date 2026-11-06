@@ -28,3 +28,24 @@ Gotchas:
 
 ## review-1
 - No BLOCKING. WARNING: vanished-file tests (test_dicom_io ~:664, test_preprocess ~:288) don't assert the patch was reached (`modes == ['rb']`). NOTE: fail_python_open duplicated in test_dicom_io/test_preprocess (shared helper). NOTE: forced-PermissionError preprocess test checks type only (covered). All deferred.
+
+## task-02
+
+Files changed: src/rt_dataprep/convert.py (_read_one, _read_ct, _read_dose call dicom_io.read_failure after the except block;
+_read_one, read_folder_headers docstrings and the _convert_patient misc_files comment updated), src/rt_dataprep/series.py
+(read_series re-reads every slice after a failed read; module and read_series docstrings; `from rt_dataprep import dicom_io`),
+tests/test_convert.py (new section at the end; imports builtins, errno). tests/test_series.py unchanged: the series site is
+covered through the shared SITES table in test_convert.py.
+
+Decisions:
+- One SITES table (header, ct, dose, series) drives A3, A4, A5 and A9; each entry returns (files the site re-reads, file whose open
+  is forced, expected refusal reason or None for the series site).
+- A1/A2 have a real-chmod test (POSIX non-root only, mode restored in a finally) and a root-safe twin (read_header_core and
+  dicom_io.open patched for that path only).
+- A4 asserts via a spy on dicom_io.read_failure that the fixture reaches its own site.
+
+Gotchas:
+- A refused plan's own CT is read again as an "other series" (it is not in `planning`), so with the truncated-pixels fixture
+  read_failure is asked about the CT slices twice (once from _read_ct, once from read_series). A4 compares the first calls and the set.
+- A refused plan leaves extra rows ('studies' skipped/converted) beside the plan_1 row; A4 filters on plan_1 (and the studies row for the series site).
+- Under dicom_io's `open` patch, pydicom's own opens are untouched (they live in pydicom), so only read_failure's re-read is forced.
