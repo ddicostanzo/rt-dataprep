@@ -1,0 +1,118 @@
+{
+ "version": 1,
+ "tasks": [
+  {
+   "id": "task-01",
+   "title": "Move the read-failure helper to dicom_io and share it",
+   "depends_on": [],
+   "files": [
+    "src/rt_dataprep/dicom_io.py",
+    "src/rt_dataprep/preprocess.py",
+    "tests/test_preprocess.py",
+    "tests/test_dicom_io.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/dicom_io.py": "modify",
+    "src/rt_dataprep/preprocess.py": "modify",
+    "tests/test_preprocess.py": "modify",
+    "tests/test_dicom_io.py": "modify"
+   },
+   "test_approach": "Move the existing helper unit tests (chunked read, missing file, forced PermissionError, ENOMEM -> MemoryError) to test_dicom_io.py against dicom_io.read_failure; retarget test_preprocess.py patches from pre.open / pre.READ_CHUNK / pre._read_failure to dicom_io.open / dicom_io.READ_CHUNK / dicom_io.read_failure. RED: the moved tests fail on the missing dicom_io.read_failure; GREEN after the move. Forced-error tests patch dicom_io.open path-selectively (raise only for the target file; every other path goes to builtins.open), binary mode, and run with workers=1 (a monkeypatch does not reach a spawned worker). POSIX chmod tests carry skipif(os.name != 'posix' or os.geteuid() == 0) and restore modes in a finally. Synthetic data only (tests/synthetic_dicom.py), generated at test time. Vault: [[simpleitk-read-errors-have-no-errno]]. The preprocess patches to retarget are monkeypatch.setattr(pre, 'open', ...) (test_preprocess.py ~:268, ~:335), monkeypatch.setattr(pre, 'READ_CHUNK', ...) and monkeypatch.setattr(pre, '_read_failure', ...); no other test file references them.",
+   "criteria": [
+    "dicom_io.read_failure(path) and dicom_io.READ_CHUNK exist with the behaviour of the former preprocess._read_failure / READ_CHUNK: bare builtin open(path, 'rb'), fixed chunks to the end, returns on a clean read or FileNotFoundError, bare MemoryError (raised after the except block) when allocation_failure is true, any other OSError re-raised after the except block",
+    "preprocess no longer defines _read_failure or READ_CHUNK; read_image and read_info call dicom_io.read_failure through the module (not a from-import), after the except block, then raise the CaseRefused",
+    "Spec A11: every preprocess read-error test passes with its patches retargeted to dicom_io.open, dicom_io.READ_CHUNK and dicom_io.read_failure; no preprocess test is deleted, skipped or xfailed",
+    "uv run --group dev pytest -q --tb=short and ruff check . pass"
+   ]
+  },
+  {
+   "id": "task-02",
+   "title": "Classify a failed convert input read (header, CT, dose, other series)",
+   "depends_on": [
+    "task-01"
+   ],
+   "files": [
+    "src/rt_dataprep/convert.py",
+    "src/rt_dataprep/series.py",
+    "tests/test_convert.py",
+    "tests/test_series.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/convert.py": "modify",
+    "src/rt_dataprep/series.py": "modify",
+    "tests/test_convert.py": "modify",
+    "tests/test_series.py": "modify"
+   },
+   "test_approach": "End-to-end convert() runs on a synthetic organized tree (existing test_convert helpers). A1/A2: chmod 0 on a plan CT slice / a misc_files DICOM. Per-site failing fixture (a garbage file never gets past the header read, so it cannot reach the CT, dose or series reads): header read = a garbage-bytes file in the plan folder; CT = truncate_pixels (test_convert.py ~:721) -> REASON_CT_UNREADABLE; dose = resave_dose with DoseGridScaling=NaN (test_convert.py ~:1240) -> REASON_DOSE_UNREADABLE; series = a non-planning series written with the synthetic CT writer into misc_files with one slice's pixel data cut short (header intact) -> that series' study row skipped. A3: the same per-site fixture plus dicom_io.open raising PermissionError (and an EIO OSError) for that file only. A4: the per-site fixture alone keeps the existing reason. Root-safe twins for A1/A2: patch dicom_io.read_header_core to raise OSError(dicom_io.REASON_UNREADABLE) and dicom_io.open to raise PermissionError, both for that path only. A9 runs over A1 and over A3 at each site, with caplog.set_level(logging.DEBUG). A10's happy-path fixture holds an RTDOSE and a non-planning series in misc_files, so all four sites run. A5: ENOMEM OSError from dicom_io.open -> REASON_INTERNAL row and ConvertAborted. A9: caplog + report text contain neither the file path nor (outside the patient column) the patient folder name. A10: spy on dicom_io.read_failure over a happy-path convert. Each test RED first. Forced-error tests patch dicom_io.open path-selectively (raise only for the target file; every other path goes to builtins.open), binary mode, and run with workers=1 (a monkeypatch does not reach a spawned worker). POSIX chmod tests carry skipif(os.name != 'posix' or os.geteuid() == 0) and restore modes in a finally. Synthetic data only (tests/synthetic_dicom.py), generated at test time. Vault: [[simpleitk-read-errors-have-no-errno]].",
+   "criteria": [
+    "convert._read_one: after read_header_core's OSError is caught, dicom_io.read_failure(path) runs after the except block; a clean re-read or a missing file still returns (path, None)",
+    "convert._read_ct calls dicom_io.read_failure on every slice path after quiet_call raised CaseRefused (after the except block), then re-raises the CaseRefused(REASON_CT_UNREADABLE)",
+    "convert._read_dose calls dicom_io.read_failure(path) after the extract quiet_call raised CaseRefused (after the except block), then re-raises CaseRefused(REASON_DOSE_UNREADABLE); the build step is not classified",
+    "series.py's series read calls dicom_io.read_failure on every slice path after the CaseRefused, after the except block, then returns None as today; the module docstring and the read_series docstring no longer claim that no exception escapes (an OSError from read_failure does)",
+    "convert's stale text is updated: _read_one's docstring ('one bad file never ends the folder read'), read_folder_headers' docstring, and the comment in _convert_patient saying an unreadable misc_files file is ignored now say a file-system error is raised (the patient's I/O error)",
+    "_salvage_study and masks._place_struct are unchanged",
+    "Spec A1: a plan CT slice with read permission removed gives exactly one convert_report row for the patient, REASON_IO_ERROR, no plan rows, and no output folder for the patient",
+    "Spec A2: a misc_files DICOM file with read permission removed gives the patient's REASON_IO_ERROR row",
+    "Spec A3: for each of the four sites, a forced PermissionError and a forced EIO OSError from the re-read after the reader fails give the patient's REASON_IO_ERROR row",
+    "Spec A4: the per-site failing fixture (test_approach) at each of the four sites keeps today's outcome (file unreadable / REASON_CT_UNREADABLE / REASON_DOSE_UNREADABLE / series skipped); all existing tests pass unchanged",
+    "Spec A5: a forced ENOMEM OSError from the re-read gives the patient's REASON_INTERNAL row and convert raises ConvertAborted (workers=1)",
+    "Spec A9: with workers=1 no caplog record and no convert_report.csv text contains the failing file's path, nor the patient folder name outside the report's patient column",
+    "Spec A10: on a happy-path convert with an RTDOSE and a non-planning misc_files series, dicom_io.read_failure is never called (spy)",
+    "uv run --group dev pytest -q --tb=short and ruff check . pass"
+   ]
+  },
+  {
+   "id": "task-03",
+   "title": "Folder checks raise a permission error on every Python version",
+   "depends_on": [
+    "task-02"
+   ],
+   "files": [
+    "src/rt_dataprep/dicom_io.py",
+    "src/rt_dataprep/convert.py",
+    "tests/test_dicom_io.py",
+    "tests/test_convert.py",
+    "tests/test_cli.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/dicom_io.py": "modify",
+    "src/rt_dataprep/convert.py": "modify",
+    "tests/test_dicom_io.py": "modify",
+    "tests/test_convert.py": "modify",
+    "tests/test_cli.py": "modify"
+   },
+   "test_approach": "Helper unit tests on real tmp_path entries (missing, dangling symlink, under a regular file, embedded NUL, chmod-0o444 parent). A6 and A8 patch Path.is_file and Path.is_dir to return False (Python 3.14's behaviour) so they are RED before the change on 3.13; root-safe twins patch Path.stat path-selectively to raise PermissionError for the target folder's entries only (never os.stat globally). A8 runs the CLI (test_cli.py's existing pattern) on a root with one patient folder. Forced-error tests patch dicom_io.open path-selectively (raise only for the target file; every other path goes to builtins.open), binary mode, and run with workers=1 (a monkeypatch does not reach a spawned worker). POSIX chmod tests carry skipif(os.name != 'posix' or os.geteuid() == 0) and restore modes in a finally. Synthetic data only (tests/synthetic_dicom.py), generated at test time. Vault: [[simpleitk-read-errors-have-no-errno]]. A8 runs in-process (a monkeypatch does not reach test_cli's subprocess runs): with pytest.raises(SystemExit) as e: cli.main(['convert', str(org), str(out)]); assert e.value.code == 1 and capsys err == 'rt_dataprep: file system error on the source or output root\\n' (pattern of test_cli.py ~:294). The Path.is_file/Path.is_dir -> False patch is path-selective: False only for the 0o444 folder's entries (A6) or the root's entries (A8), delegating to the original for every other path (a global patch breaks Path.mkdir(exist_ok=True) and other unrelated calls). Every Path.stat patch has the signature (self, *, follow_symlinks=True) and delegates to the original for every other path. Root-safe twins: A7's EACCES case via Path.stat raising PermissionError; A6/A8 twins apply the same path-selective is_file/is_dir -> False patch plus Path.stat raising PermissionError for those entries, so they are RED before the change (Path.stat alone makes 3.13's unpatched is_dir raise, which passes pre-fix).",
+   "criteria": [
+    "dicom_io has one helper (e.g. entry_is(path, kind)) that calls path.stat() and returns Python 3.13's is_file()/is_dir() result: False for ENOENT, ENOTDIR, EBADF, ELOOP and for ValueError; any other OSError is raised",
+    "convert's five folder checks use it through the module: the root's patient-folder listing, the patient's plan-folder listing, the misc_files check, read_folder_headers' file listing, and the misc_files listing for salvage; no Path.is_file/Path.is_dir call remains on convert's input side",
+    "Spec A6: with Path.is_file/Path.is_dir patched to return False, a plan folder with mode 0o444 gives the patient's REASON_IO_ERROR; the root-safe twin (Path.stat raising PermissionError for that folder's entries) gives the same",
+    "Spec A7: the helper returns False for a missing entry, a dangling symlink, an entry under a regular file and a name with an embedded NUL, and raises PermissionError for EACCES",
+    "Spec A8: with Path.is_file/Path.is_dir patched to return False, the organized root itself with mode 0o444, holding one patient folder, makes the CLI exit 1 with 'rt_dataprep: file system error on the source or output root' and the output root does not exist afterwards",
+    "uv run --group dev pytest -q --tb=short and ruff check . pass"
+   ]
+  }
+ ],
+ "groups": [
+  [
+   "task-01"
+  ],
+  [
+   "task-02"
+  ],
+  [
+   "task-03"
+  ]
+ ],
+ "metadata": {
+  "created": "2026-11-06",
+  "spec": "docs/specs/2026-11-06-convert-read-error-reporting.md",
+  "profile": "project-profile.yml",
+  "issue": 210,
+  "guardrails": [
+   "PHI: no path or patient id in log lines, exception messages, commits",
+   "Commit hook flags x._attr in the diff: CLAUDE_ALLOW_PRIVATE_API=1 and list the accesses in the commit body",
+   "Pre-push runs .venv/bin/pytest: sync with uv run --group dev first (vault: pre-push-uses-stale-dotvenv-pytest)"
+  ],
+  "deferred_in_spec": true
+ }
+}
