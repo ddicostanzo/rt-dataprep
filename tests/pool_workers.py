@@ -76,10 +76,16 @@ def organize_read(folder, *args, **kwargs):
 
 
 def organize_read_escaping(folder, *args, **kwargs):
-    """Folder 'a' reads as the hostile name '..'; any other folder reads after 1 s, so it is delivered after a's raise."""
+    """Folder 'a' reads as the hostile name '..'; any other folder reads normally (in-order delivery puts it after a's raise)."""
     if Path(folder).name == 'a':
         return '..', None, [], [], 0, 0, 0.0
-    time.sleep(1.0)
+    return organize_read(folder)
+
+
+def organize_read_a_exits(folder, *args, **kwargs):
+    """Folder 'a' exits with code 3; any other folder reads normally (in-order delivery puts it after a's raise)."""
+    if Path(folder).name == 'a':
+        raise SystemExit(3)
     return organize_read(folder)
 
 
