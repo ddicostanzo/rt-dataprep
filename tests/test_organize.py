@@ -211,6 +211,16 @@ def test_existing_output_folder_is_skipped_and_counted(tree):
                               outcome=org.OUTCOME_SKIPPED, reason=org.REASON_EXISTS)]
 
 
+def test_an_existing_output_folder_is_skipped_before_grouping(tree, monkeypatch):
+    """#180: a skipped patient is never grouped, so a grouping error cannot turn a skip into an abort."""
+    src, out = tree
+    planning_study(src / 'p')
+    (out / PID).mkdir(parents=True)
+    monkeypatch.setattr(org, '_group', lambda *a: 1 / 0)
+    report = organize(src, out)
+    assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_SKIPPED, org.REASON_EXISTS)]
+
+
 def test_colliding_sanitized_names_refuse_the_later_patient(tree, caplog):
     src, out = tree
     planning_study(src / 'p1', pid='SYNTHETIC_a b', date=EARLY)
