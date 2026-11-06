@@ -136,8 +136,8 @@ def test_escaping_exception_is_a_failed_with_only_its_type_name(workers, tmp_pat
     assert w.SECRET not in seen.out + seen.err + repr(delivered)
 
 
-def test_a_dying_worker_is_a_failed_and_does_not_hang(capfd):
-    tasks = [Task(w.die, (0,)), Task(w.sleep_then, (1, 0.5)), Task(w.echo, (2,))]
+def test_a_dying_worker_is_a_failed_and_does_not_hang(tmp_path, capfd):
+    tasks = [Task(w.die, (0, str(tmp_path))), Task(w.after_death, (1, str(tmp_path), 0.5)), Task(w.echo, (2,))]
     delivered, error = run_guarded(2, tasks)
     assert error is None
     assert delivered[0] == (0, Failed('BrokenProcessPool'))

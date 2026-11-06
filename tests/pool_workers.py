@@ -44,8 +44,19 @@ def interrupt(value):
     raise KeyboardInterrupt
 
 
-def die(value):
+def die(value, directory=None):
+    if directory:  # tells a task waiting in after_death that this worker is about to die
+        Path(directory, 'dying').touch()
     os.kill(os.getpid(), signal.SIGKILL)  # kills the worker process: BrokenProcessPool in the parent (never call it inline)
+
+
+def after_death(value, directory, seconds):
+    """Wait for die's marker, then sleep: the pool breaks before this returns, however slowly the dying worker started (#183)."""
+    deadline = time.monotonic() + 30
+    while not Path(directory, 'dying').exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(seconds)
+    return value
 
 
 def log_info(value):
