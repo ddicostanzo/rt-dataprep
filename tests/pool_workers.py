@@ -57,6 +57,11 @@ def after_file(value, path, seconds):
     return value
 
 
+def sigint_state():
+    """(blocked signal numbers, whether Ctrl-C raises KeyboardInterrupt) as a running task sees them."""
+    return sorted(int(n) for n in signal.pthread_sigmask(signal.SIG_BLOCK, [])), signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
 def log_info(value):
     logging.getLogger('pool_workers').info('SYNTHETIC worker line %s', value)
     return value

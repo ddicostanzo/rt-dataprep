@@ -1,6 +1,7 @@
 """The scheduler: one code path for N=1 (inline) and N>1 (spawned processes). Every consumer runs in a daemon thread under a timeout."""
 import logging
 import os
+import signal
 import threading
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -183,6 +184,14 @@ def test_keyboard_interrupt_in_the_parent_wait(workers, tmp_path, monkeypatch, c
     assert ({1} if workers == 2 else set()) == {i for i, _ in delivered}
     seen = capfd.readouterr()
     assert w.SECRET not in seen.out + seen.err
+
+
+@pytest.mark.skipif(not hasattr(signal, 'pthread_sigmask'), reason='POSIX signal masks')
+def test_workers_spawn_with_ctrl_c_blocked_but_a_running_task_gets_it_and_the_parent_mask_is_restored():
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    delivered, error = run_guarded(2, [Task(w.sigint_state)])
+    assert error is None and delivered == [(0, ([], True))]  # _init_worker unblocked it (#177)
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == before
 
 
 def test_a_worker_info_line_reaches_stderr(capfd, caplog):

@@ -33,6 +33,7 @@ class Stop(NamedTuple):
 
 ABORT = object()  # returned by handle: submit nothing further
 _SKIP = object()  # a first-stage task that ended with KeyboardInterrupt (or any exception once interrupted): no result
+_MASKABLE = hasattr(signal, 'pthread_sigmask')  # POSIX; on Windows Ctrl-C reaches the parent as before
 
 
 class _Inline:
@@ -50,6 +51,8 @@ class _Inline:
 def _init_worker(level):
     # An idle worker ignores Ctrl-C: one killed while waiting for work breaks the pool, which kills the busy ones mid-cleanup.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if _MASKABLE:  # spawned with SIGINT blocked (the parent's mask): a Ctrl-C during startup is dropped here, not fatal (#177)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
     logging.basicConfig(level=level, format='%(message)s')  # a spawned worker starts with no handler: INFO would vanish
 
 
@@ -88,6 +91,8 @@ def run(workers, tasks, handle):
     still finish and reach handle (their output is published, so their rows must be kept), then the first one is raised;
     a later exception from handle is dropped. A caller that must not start a delivered patient after its own raise (organize's
     claim) refuses it in handle itself (#182).
+    With N > 1 on POSIX the parent keeps SIGINT blocked except right after each wait returns (#177): workers start with it
+    blocked, and a Ctrl-C never lands inside wait's lock handling or between handle's bookkeeping steps.
     """
     queue = deque((i, task, True) for i, task in enumerate(tasks))  # (index, task, is the first stage)
     count = len(queue)
@@ -109,55 +114,68 @@ def run(workers, tasks, handle):
         elif follow is not None and not interrupted and raised is None:
             queue.appendleft((index, follow, False))
 
-    context = (contextlib.nullcontext(_Inline()) if workers == 1 else
-               ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context('spawn'),  # fork would leak parent state
-                                   initializer=_init_worker, initargs=(logging.getLogger().level,)))
-    with context as executor:
-        while True:
-            while len(running) < workers:
-                busy = {key for _, key, _ in running.values()}
-                pick = next((e for e in queue if not (e[2] and stop) and not interrupted
-                             and (e[1].key is None or e[1].key not in busy)), None)
-                if pick is None:
+    masked = workers > 1 and _MASKABLE  # N=1 runs tasks in this process: they get Ctrl-C as before
+    saved = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT}) if masked else None  # before any worker or thread exists
+    try:
+        context = (contextlib.nullcontext(_Inline()) if workers == 1 else
+                   ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context('spawn'),  # fork would leak parent state
+                                       initializer=_init_worker, initargs=(logging.getLogger().level,)))
+        with context as executor:
+            while True:
+                while len(running) < workers:
+                    busy = {key for _, key, _ in running.values()}
+                    pick = next((e for e in queue if not (e[2] and stop) and not interrupted
+                                 and (e[1].key is None or e[1].key not in busy)), None)
+                    if pick is None:
+                        break
+                    queue.remove(pick)
+                    index, task, first = pick
+                    running[_submit(executor, task)] = (index, task.key, first)
+                    started.add(index)
+                if not running:
                     break
-                queue.remove(pick)
-                index, task, first = pick
-                running[_submit(executor, task)] = (index, task.key, first)
-                started.add(index)
-            if not running:
-                break
-            try:
-                done, _ = wait(running, return_when=FIRST_COMPLETED)
-            except KeyboardInterrupt:  # the workers got the same signal; let them end, then re-raise
-                stop = interrupted = True
-                continue
-            for future in done:
-                index, _, first = running.pop(future)
-                error = future.exception()
-                if error is None:
-                    result = future.result()
-                    if isinstance(result, Stop):  # at completion, not at its in-order delivery: a slow earlier patient must not let the rest start
-                        stop, result = True, result.value
-                elif isinstance(error, KeyboardInterrupt):
+                try:
+                    done, _ = wait(running, return_when=FIRST_COMPLETED)
+                except KeyboardInterrupt:  # the workers got the same signal; let them end, then re-raise
                     stop = interrupted = True
-                    result = _SKIP
-                else:
-                    stop = True
-                    code = error.code if isinstance(error, SystemExit) and isinstance(error.code, int | None) else 1
-                    result = _SKIP if interrupted else Failed(type(error).__name__, code if isinstance(error, SystemExit) else None)
-                if first:
-                    ready[index] = result
-                elif result is not _SKIP:
-                    deliver(index, result)
-            while next_index < count:
-                if next_index in ready:
-                    result = ready.pop(next_index)
-                    if result is not _SKIP:
-                        deliver(next_index, result)
-                elif not (stop and next_index not in started):  # never submitted after a stop: nobody waits for it
-                    break
-                next_index += 1
-    if interrupted:
-        raise KeyboardInterrupt
-    if raised is not None:
-        raise raised
+                    continue
+                if masked:
+                    try:  # the one point a pending Ctrl-C is raised: before any new submission (#177)
+                        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+                    except KeyboardInterrupt:
+                        stop = interrupted = True
+                    finally:
+                        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+                for future in done:
+                    index, _, first = running.pop(future)
+                    error = future.exception()
+                    if error is None:
+                        result = future.result()
+                        if isinstance(result, Stop):  # at completion, not at its in-order delivery: a slow earlier patient must not let the rest start
+                            stop, result = True, result.value
+                    elif isinstance(error, KeyboardInterrupt):
+                        stop = interrupted = True
+                        result = _SKIP
+                    else:
+                        stop = True
+                        code = error.code if isinstance(error, SystemExit) and isinstance(error.code, int | None) else 1
+                        result = _SKIP if interrupted else Failed(type(error).__name__, code if isinstance(error, SystemExit) else None)
+                    if first:
+                        ready[index] = result
+                    elif result is not _SKIP:
+                        deliver(index, result)
+                while next_index < count:
+                    if next_index in ready:
+                        result = ready.pop(next_index)
+                        if result is not _SKIP:
+                            deliver(next_index, result)
+                    elif not (stop and next_index not in started):  # never submitted after a stop: nobody waits for it
+                        break
+                    next_index += 1
+        if interrupted:
+            raise KeyboardInterrupt
+        if raised is not None:
+            raise raised
+    finally:
+        if masked:
+            signal.pthread_sigmask(signal.SIG_SETMASK, saved)
