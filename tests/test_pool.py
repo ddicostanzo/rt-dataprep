@@ -164,6 +164,7 @@ def test_a_worker_spawned_after_the_manager_waits_is_still_watched(tmp_path, mon
     assert error is None
     assert delivered == [(0, Failed('BrokenProcessPool')), (1, Failed('BrokenProcessPool'))]  # task 0 ends when the pool breaks, not after its sleep
 
+
 def test_a_submit_that_raises_is_a_failed(monkeypatch):
     class Broken(ProcessPoolExecutor):
         def submit(self, *args, **kwargs):
