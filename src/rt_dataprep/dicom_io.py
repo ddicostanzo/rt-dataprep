@@ -211,6 +211,8 @@ def rename_dir(src, dst):
 
 def _clear_readonly(func, path, exc):
     """rmtree onexc: clear a read-only bit (Windows) and retry the failed call once; a second failure propagates to remove_tree."""
+    if func not in (os.unlink, os.rmdir):  # os.open/os.scandir/os.lstat take more than a path: report the original
+        raise exc
     if not os.path.islink(path):  # chmod follows links: never touch a file outside the tree
         os.chmod(path, stat.S_IWRITE)
     func(path)

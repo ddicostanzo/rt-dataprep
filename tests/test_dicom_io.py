@@ -588,17 +588,19 @@ def test_publish_replaces_a_symlinked_target_without_touching_the_folder_it_poin
     assert _snap(outside) == {'keep.bin': b'SYNTHETIC_outside'}
 
 
-def test_the_rmtree_handler_clears_the_read_only_bit_before_it_retries(tmp_path):
+def test_the_rmtree_handler_clears_the_read_only_bit_before_it_retries(tmp_path, monkeypatch):
     file = tmp_path / 'ro.bin'
     file.write_bytes(b'SYNTHETIC_ro')
     file.chmod(0o444)
     seen = []
+    unlink = os.unlink
 
     def func(p):
         seen.append(os.stat(p).st_mode & stat.S_IWRITE)
         assert seen[-1]  # the bit is back before the retry
-        os.unlink(p)
-    getattr(dicom_io, '_clear_readonly')(func, str(file), OSError())  # noqa: B009
+        unlink(p)
+    monkeypatch.setattr(os, 'unlink', func)  # the handler retries only os.unlink / os.rmdir
+    getattr(dicom_io, '_clear_readonly')(os.unlink, str(file), OSError())  # noqa: B009
     assert seen and not file.exists()
 
 
@@ -611,3 +613,15 @@ def test_the_rmtree_handler_never_changes_a_link_target(tmp_path):
     getattr(dicom_io, '_clear_readonly')(os.unlink, str(link), OSError())  # noqa: B009
     assert not os.path.lexists(link)
     assert stat.S_IMODE(outside.stat().st_mode) == 0o444
+
+
+@pytest.mark.skipif(os.name != 'posix' or os.geteuid() == 0, reason='needs a POSIX permission check root bypasses')
+def test_remove_tree_swallows_an_unreadable_folder_inside_the_tree(tmp_path):
+    tree = tmp_path / 'tree'
+    (tree / 'locked').mkdir(parents=True)
+    (tree / 'locked').chmod(0)
+    try:
+        dicom_io.remove_tree(tree)  # rmtree reports it with func=os.open, which takes more than a path
+    finally:
+        (tree / 'locked').chmod(0o700)
+    assert (tree / 'locked').is_dir()  # left for the next recover, nothing raised
