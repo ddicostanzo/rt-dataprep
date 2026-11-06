@@ -846,6 +846,16 @@ def test_overwrite_without_the_flag_skips_and_treats_names_differing_in_case_as_
     assert [(r.patient, r.outcome) for r in rows if r.folder == 'plan_1'] == [(PID, 'converted'), (PID.lower(), 'converted')]
 
 
+def test_without_overwrite_a_dangling_link_at_the_output_name_is_an_existing_output(tree):
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    out.mkdir()
+    (out / PID).symlink_to(out / 'SYNTHETIC_missing', target_is_directory=True)
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'skipped', conv.REASON_EXISTS)]
+    assert (out / PID).is_symlink() and no_hidden(out) == []
+
+
 def test_overwrite_replaces_a_stale_folder_with_a_fresh_run(tree, caplog):
     org, out = stale_output(tree)
     started = time.time()

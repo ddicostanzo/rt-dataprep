@@ -2056,6 +2056,16 @@ def test_overwrite_without_the_flag_skips_an_existing_folder_and_leaves_it_alone
     assert tree_state(out / 'SYNTHETICPTA') == before
 
 
+def test_without_overwrite_a_dangling_link_at_the_output_name_is_an_existing_output(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    out.mkdir()
+    (out / 'SYNTHETICPTA').symlink_to(out / 'SYNTHETIC_missing', target_is_directory=True)
+    rows = pre.preprocess(converted, out, SMALL).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows] == [('', 'skipped', pre.REASON_EXISTS)]
+    assert (out / 'SYNTHETICPTA').is_symlink() and no_hidden(out) == []
+
+
 def test_overwrite_replaces_a_stale_folder_with_a_fresh_run(tmp_path, caplog):
     converted, out = stale_output(tmp_path)
     started = time.time()
