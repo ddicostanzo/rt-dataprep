@@ -96,7 +96,7 @@ def run(workers, tasks, handle):
     still finish and reach handle (their output is published, so their rows must be kept), then the first one is raised;
     a later exception from handle is dropped. A caller that must not start a delivered patient after its own raise (organize's
     claim) refuses it in handle itself (#182).
-    With N > 1 on POSIX the parent keeps SIGINT blocked and polls for it before every pick and every 0.2 s of waiting
+    With N > 1 on POSIX the parent keeps SIGINT blocked and takes it before every pick (wait wakes every 0.2 s for that)
     (#177): workers start with it blocked, and a Ctrl-C never lands inside wait's lock handling or in handle. A task already
     running when the Ctrl-C reached only the parent (or a starting worker) runs to its end and is delivered. The mask is the
     calling thread's: call run from the main thread (the CLI does), or Ctrl-C reaches another thread unmasked.
