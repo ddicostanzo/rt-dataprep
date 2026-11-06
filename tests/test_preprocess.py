@@ -935,6 +935,59 @@ def test_an_oserror_while_writing_refuses_the_patient_and_removes_the_partial(tm
     assert listing(out) == ['SYNTHETICPTB', 'preprocess_report.csv']
 
 
+UNREADABLE = ['forced', pytest.param('chmod', marks=pytest.mark.skipif(os.geteuid() == 0, reason='root ignores file permissions'))]
+
+
+def make_unreadable(monkeypatch, path, how):
+    """'chmod': read permission removed. 'forced': garbage bytes, and preprocess's own open raises PermissionError for this path only (runs as root)."""
+    if how == 'chmod':
+        path.chmod(0)
+        return
+    path.write_bytes(b'not an image')
+    fail_python_open(monkeypatch, path, PermissionError(errno.EACCES, 'forced', str(path)))
+
+
+def run_two_patients(tmp_path, monkeypatch, how, unreadable, add=None):
+    """Patient A's `unreadable` file (relative to its plan_1) is made unreadable; patient B is untouched. Returns (report, out, the file)."""
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, rows = write_plan(converted)
+    if add:
+        add(folder, rows)
+    write_plan(converted, patient='SYNTHETICPTB')
+    bad = folder / unreadable
+    make_unreadable(monkeypatch, bad, how)
+    return pre.preprocess(converted, out, SMALL, workers=1), out, bad
+
+
+def assert_patient_io_error(report, out):
+    assert [(r.patient, r.folder, r.outcome, r.reason) for r in report.rows] == [
+        ('SYNTHETICPTA', '', 'refused', pre.REASON_IO_ERROR), ('SYNTHETICPTB', 'plan_1', 'preprocessed', '')]
+    assert [(r['patient'], r['folder'], r['reason']) for r in report_rows(out)] == [('SYNTHETICPTA', '', pre.REASON_IO_ERROR), ('SYNTHETICPTB', 'plan_1', '')]
+    assert listing(out) == ['SYNTHETICPTB', 'preprocess_report.csv'] and (out / 'SYNTHETICPTB' / 'plan_1' / CT_FILE).is_file()
+
+
+@pytest.mark.parametrize('how', UNREADABLE)
+def test_an_unreadable_plan_file_fails_the_patient_with_the_io_error_and_the_next_patient_runs(tmp_path, monkeypatch, how):
+    report, out, _ = run_two_patients(tmp_path, monkeypatch, how, 'ptv.nii.gz')
+    assert_patient_io_error(report, out)
+
+
+@pytest.mark.parametrize('how', UNREADABLE)
+def test_an_unreadable_registered_series_fails_the_patient_with_the_io_error(tmp_path, monkeypatch, how):
+    report, out, _ = run_two_patients(tmp_path, monkeypatch, how, 'series_MR_1.nii.gz', add=lambda folder, rows: add_series(folder, rows))
+    assert_patient_io_error(report, out)
+
+
+def test_a_forced_read_error_puts_no_path_and_no_patient_name_in_a_log_or_the_report_text(tmp_path, monkeypatch, caplog):
+    with caplog.at_level('DEBUG'):
+        report, out, bad = run_two_patients(tmp_path, monkeypatch, 'forced', 'ptv.nii.gz')
+    assert_patient_io_error(report, out)
+    text = (out / 'preprocess_report.csv').read_text()
+    assert caplog.records and not any(s in caplog.text or s in text for s in (str(bad), str(tmp_path), 'forced'))
+    assert 'SYNTHETICPTA' not in caplog.text
+    assert [k for r in report_rows(out) for k, v in r.items() if 'SYNTHETICPTA' in v] == ['patient'] and text.count('SYNTHETICPTA') == 1
+
+
 def test_a_compute_failure_aborts_with_a_flushed_report_and_nothing_chained(tmp_path, monkeypatch):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     write_plan(converted)

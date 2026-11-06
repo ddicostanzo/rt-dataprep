@@ -25,3 +25,14 @@ Gotchas:
 - Tests force errors with a path-selective `pre.open` raiser (`raising=False`, delegating to `builtins.open`); `read_series_csv` also uses bare `open`.
 - Chunk test: reads end on the empty read, so a 10-byte file with READ_CHUNK=4 gives four `read(4)` calls.
 - 4 skips in tests/test_preprocess.py are pre-existing (torchio not installed in this venv).
+
+## task-02
+
+Decisions:
+- Tests only (plus the spec table row and a README troubleshooting row); no src change. Helpers `make_unreadable`/`run_two_patients`/`assert_patient_io_error` sit before the compute-failure test.
+- One parametrization `UNREADABLE = ['forced', 'chmod' (skipif root)]` covers A1 and A4; A5 is a forced-only test with workers=1.
+- A3 needed no new test: `test_a_series_row_naming_a_missing_file_refuses_with_file_missing` and the missing-ptv test already assert REASON_FILE_MISSING.
+- Mutation check: with `_read_failure` returning immediately, all five new tests fail.
+
+Gotchas:
+- The forced raiser's PermissionError carries the path in its message, so A5 proves the worker handler never logs or reports exception text.
