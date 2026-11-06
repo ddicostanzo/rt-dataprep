@@ -76,3 +76,8 @@ Gotchas:
 - No BLOCKING. entry_is matches 3.13 pathlib exactly; all five checks use it; A6/A8 RED on old code.
 - NOTE (deferred): misc_files is_dir check and salvage listing have no own test (reverting either fails nothing).
 - WARNING (deferred): hide_entries (test_convert) and hide_root_entries (test_cli) duplicated.
+
+## review-loop-pass-1
+- code-review (opus): no BLOCKING. Deferred: stat before name filter; ENOTDIR/ELOOP race in read_failure (#214).
+- spec axis (opus): A1-A11 and all task criteria MET. Deferred: test gaps/duplicated helpers (#215), double CT re-read and misc log wording (#216). Spec wording for the winerror codes fixed in place.
+- CLEAN: no blocking fix, so no verification pass.
