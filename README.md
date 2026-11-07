@@ -394,7 +394,7 @@ With `workers` above 1, each worker is a new `spawn`ed process that imports the 
 | --- | --- | --- |
 | `organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overwrite=False)` | `OrganizeReport(rows)` of `PatientRow` | `organize_report.csv` |
 | `convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwrite=False)` | `ConvertReport(rows)` of `ConvertRow` | `convert_report.csv` |
-| `preprocess(converted_root, out_root, steps, *, workers=1, overwrite=False)` | `PreprocessReport(rows)` of `PreprocessRow` | `preprocess_report.csv` |
+| `preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, overwrite=False)` | `PreprocessReport(rows)` of `PreprocessRow` | `preprocess_report.csv` |
 | `manifest(root)` | `(written, refused)` case counts | `manifest.csv` |
 | `split(manifest_path, *, test_size, val_size, seed, external=None)` | the `splits.json` content as a dict | `splits.json` next to the manifest |
 
@@ -408,7 +408,8 @@ Report rows are dataclasses. Their fields match the report CSV columns, except t
 | `PreprocessRow` | `patient`, `folder`, `outcome`, `reason`, `files`, `skipped_series`, `cropped` | `preprocessed`, `skipped`, `refused` |
 
 `folder` is blank on a patient-level row, `plan_<n>` on a plan row, and `study_<n>/series_<MOD>_<k>` on an imaging row
-(`study_<n>` when a whole study is refused). `reason` is always one of the fixed `REASON_*` strings defined across the
+(`study_<n>` when a whole study is refused). A convert run also writes one `studies` row per patient that summarizes
+its study folders (`skipped` when there are none). `reason` is always one of the fixed `REASON_*` strings defined across the
 `rt_dataprep` modules (a convert row can carry one from `masks`, `series` or `dicom_io`); compare against those
 constants rather than matching text.
 
@@ -437,7 +438,11 @@ consistently when calling Python directly.
 Errors:
 
 - `ValueError` with a fixed reason text refuses the whole call before any patient is processed: an output root inside
-  the input, no step enabled, an invalid option combination, invalid split sizes, an `--external` patient overlap, or a `splits.json` with different content.
+  the input, no step enabled (the `steps` default enables none), an invalid option combination, invalid split sizes, a
+  manifest without the `patient`/`case_dir` columns or with a row missing them or not UTF-8, sizes that leave no patient
+  for train, a patient overlap with `external=`, or a `splits.json` with different content. One exception: organize
+  raises `ValueError` mid-run when a patient's output folder resolves outside `out_root`; patients before it are
+  already written.
 - `OrganizeAborted`, `ConvertAborted` and `PreprocessAborted` mean a patient hit an unexpected error. The report is
   already written for the patients that finished, and the run stops.
 - `OSError` on the input or output root propagates. Its message can contain a path, and therefore a patient ID.
