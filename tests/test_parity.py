@@ -1,4 +1,5 @@
 """scripts/parity.py on a synthetic plan against a fake pooled folder built from the same output."""
+import dataclasses
 import importlib.util
 import json
 import shutil
@@ -20,12 +21,12 @@ STEPS = pre.PreprocessSteps(resample=True, rescale=True, harmonize_spacing=True,
 ROIS = [dict(tc.BOX, number=1, name='HR-CTV'), dict(tc.BOX, number=2, name='Bladder', box=((1, 3), (1, 3), (1, 3)))]
 
 
-def build(tmp_path):
+def build(tmp_path, steps=STEPS):
     """(preprocessed root, pooled root) where the pooled folder is a copy of the new output under legacy names."""
     org, converted, out, pooled = (tmp_path / n for n in ('org', 'conv', 'pre', 'pooled'))
     tc.make_plan(org / tc.PID / 'plan_1', doses=[tc.dose_spec(10, 'PLAN')], rois=ROIS)
     conv.convert(org, converted)
-    pre.preprocess(converted, out, STEPS)
+    pre.preprocess(converted, out, steps)
     new = parity.new_files(out / tc.PID / 'plan_1')
     old = pooled / f'{tc.PID}_x_1'
     old.mkdir(parents=True)
@@ -121,3 +122,15 @@ def test_a_pair_with_no_overlapping_voxels_is_not_counted_as_compared(tmp_path):
     sitk.WriteImage(ct, str(old / 'ct.nii.gz'))
     s = parity.run(out, pooled)
     assert s['counts'] == {'pooled_folders': 1, 'ct_geometry_differs': 1, 'ct_no_overlap': 1}
+
+
+def test_a_resampled_linear_mask_is_thresholded_at_one_half(tmp_path):
+    # a coarser final grid than the CT's: --legacy-linear-masks leaves fractional values, 0.5 itself among them
+    out, pooled, old = build(tmp_path, dataclasses.replace(STEPS, final_spacing=(1.5, 2.25, 3.0)))
+    linear = sitk.ReadImage(str(old / 'bladder.nii.gz'))
+    values = sitk.GetArrayViewFromImage(linear)
+    assert ((values > 0) & (values < 0.5)).any() and (values == 0.5).any() and ((values > 0.5) & (values < 1)).any()
+    sitk.WriteImage(sitk.Cast(linear >= 0.5, sitk.sitkFloat32), str(old / 'bladder.nii.gz'))  # legacy: a binary mask
+    s = parity.run(out, pooled)
+    assert s['masks']['bladder'] == {'legacy': 1, 'pass': 1}
+    assert s['distributions']['dice_bladder']['min'] == 1.0  # > 0 or > 0.5 would disagree with the binary copy
