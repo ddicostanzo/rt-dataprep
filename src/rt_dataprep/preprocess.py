@@ -42,6 +42,7 @@ REASON_EXISTS = 'output folder already exists'
 REASON_NAME_CLAIMED = 'another folder of this run already maps to this output name (case-insensitive)'
 REASON_NO_CASES = 'patient folder holds no plan or study folder with a series.csv'
 STUDY_FOLDER = r'study_[0-9]+'
+PREPROCESSED_SERIES_COLUMNS = [*conv.SERIES_COLUMNS, 'retained']  # preprocess's series.csv; blank until a step sets it
 REASON_NO_CT = 'series.csv does not list exactly one ct file'
 REASON_DOSE_COUNT = 'series.csv lists more than one dose file'
 REASON_KIND = 'series.csv has a row of an unknown kind'
@@ -527,11 +528,11 @@ def preprocess_study(study_dir, out_dir, steps):
             log.warning('preprocess: series refused: %s', refusal)
             rows.append(PreprocessRow(patient, folder, conv.OUTCOME_REFUSED, str(refusal)))
             continue
-        written.append(row | {'file': name})
+        written.append(row | {'file': name, 'retained': ''})
         rows.append(PreprocessRow(patient, folder, OUTCOME_PREPROCESSED,
                                   files=[name, *([f'fovmask_{name}'] if steps.series_fov_mask else [])]))
     if written:
-        conv.write_series_csv(written, out_dir / conv.SERIES_NAME)
+        conv.write_series_csv(written, out_dir / conv.SERIES_NAME, PREPROCESSED_SERIES_COLUMNS)
         next(r for r in rows if r.outcome == OUTCOME_PREPROCESSED).files.append(conv.SERIES_NAME)
     return rows
 
@@ -613,13 +614,13 @@ def check_series_rows(series):
 
 
 def read_series_csv(folder):
-    """(rows, malformed) of a plan's or study's series.csv: malformed when unparseable, other columns, or a cell is missing or extra."""
+    """(rows, malformed) of a plan's or study's series.csv: malformed when unparseable, other columns than SERIES_COLUMNS with or without the trailing `retained`, or a cell is missing or extra."""
     malformed = False
     with open(folder / conv.SERIES_NAME, newline='', encoding='utf-8') as handle:
         try:
             reader = csv.DictReader(handle)
             rows = list(reader)
-            malformed = reader.fieldnames != conv.SERIES_COLUMNS or any(None in row or None in row.values() for row in rows)
+            malformed = reader.fieldnames not in (conv.SERIES_COLUMNS, PREPROCESSED_SERIES_COLUMNS) or any(None in row or None in row.values() for row in rows)
         except (ValueError, csv.Error):  # UnicodeDecodeError is a ValueError
             rows, malformed = [], True
     return rows, malformed
@@ -699,7 +700,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
             mask_name = f'fovmask_{name}'
             conv.write_atomic(image_fov_mask(ct, steps), out_dir / mask_name)
             files.append(mask_name)
-        series_rows.append(row | {'file': name})
+        series_rows.append(row | {'file': name, 'retained': ''})
     skipped = 0
     for row in series:  # one series at a time, after the CT: read, resampled, written, released
         matrix = reg_matrix_array(row['reg_matrix'])
@@ -721,8 +722,8 @@ def preprocess_plan(plan_dir, out_dir, steps):
             if fov is not None:  # the mask is listed after its series, not in series.csv
                 conv.write_atomic(fov, out_dir / f'fovmask_{name}')
                 files.append(f'fovmask_{name}')
-            series_rows.append(row | {'file': name, 'reg_matrix': IDENTITY, 'frame_of_reference_uid': kept[0]['frame_of_reference_uid']})
+            series_rows.append(row | {'file': name, 'retained': '', 'reg_matrix': IDENTITY, 'frame_of_reference_uid': kept[0]['frame_of_reference_uid']})
             del image
         del native, fov
-    conv.write_series_csv(series_rows, out_dir / conv.SERIES_NAME)
+    conv.write_series_csv(series_rows, out_dir / conv.SERIES_NAME, PREPROCESSED_SERIES_COLUMNS)
     return [*files, conv.SERIES_NAME], skipped

@@ -477,7 +477,7 @@ def test_series_csv_keeps_every_column_and_renames_files_and_lists_the_aligned_s
         written = list(csv.DictReader(handle))
     names = [CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt', pre.output_name('series_MR_1.nii.gz', SMALL)]
     assert [r['file'] for r in written] == names
-    assert [{k: v for k, v in r.items() if k != 'file'} for r in written] == [{k: v for k, v in r.items() if k != 'file'} for r in [*rows, series]]
+    assert [{k: v for k, v in r.items() if k != 'file'} for r in written] == [{k: v for k, v in r.items() if k != 'file'} | {'retained': ''} for r in [*rows, series]]
 
 
 def add_series(folder, rows, file='series_MR_1.nii.gz', modality='MR', write=True, **extra):
@@ -2413,3 +2413,57 @@ def test_an_internal_error_in_one_patient_aborts_a_two_process_run_with_the_repo
     assert [(r['patient'], r['outcome'], r['reason']) for r in report_rows(out)] == [('a', conv.OUTCOME_SKIPPED, ''), ('boom', conv.OUTCOME_REFUSED, pre.REASON_INTERNAL)]  # two slots: 'a' and 'boom' only
     err = capfd.readouterr().err
     assert pool_workers.SECRET not in err and 'RuntimeError' in err  # the worker logged the type and site, never the message
+
+
+# ---------------------------------------------------------------- allow-crop task-01: the trailing `retained` column
+
+def csv_header(path):
+    with open(path, newline='') as handle:
+        return next(csv.reader(handle))
+
+
+def test_every_series_csv_preprocess_writes_has_the_retained_column_and_convert_keeps_its_header(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    write_study_tree(converted)
+    pre.preprocess(converted, out, SMALL)
+    assert csv_header(converted / 'SYNTHETICPTA' / 'plan_1' / 'series.csv') == conv.SERIES_COLUMNS
+    assert pre.PREPROCESSED_SERIES_COLUMNS == [*conv.SERIES_COLUMNS, 'retained']
+    for folder in ('plan_1', 'study_1'):
+        assert csv_header(out / 'SYNTHETICPTA' / folder / 'series.csv') == pre.PREPROCESSED_SERIES_COLUMNS
+        assert {r['retained'] for r in pre.read_series_csv(out / 'SYNTHETICPTA' / folder)[0]} == {''}
+
+
+@pytest.mark.parametrize('columns, malformed', [
+    (conv.SERIES_COLUMNS, False),
+    ([*conv.SERIES_COLUMNS, 'retained'], False),
+    ([*conv.SERIES_COLUMNS, 'other'], True),
+    (['retained', *conv.SERIES_COLUMNS], True),
+    (conv.SERIES_COLUMNS[:-1], True),
+])
+def test_read_series_csv_accepts_exactly_the_two_headers(tmp_path, columns, malformed):
+    (tmp_path / 'series.csv').write_text(','.join(columns) + '\n' + ','.join('x' * len(columns)) + '\n', encoding='utf-8')
+    assert pre.read_series_csv(tmp_path)[1] is malformed
+
+
+@pytest.mark.parametrize('columns', [conv.SERIES_COLUMNS, pre.PREPROCESSED_SERIES_COLUMNS])
+def test_read_series_csv_still_refuses_a_missing_or_extra_cell(tmp_path, columns):
+    for cells in (len(columns) - 1, len(columns) + 1):
+        (tmp_path / 'series.csv').write_text(','.join(columns) + '\n' + ','.join(['x'] * cells) + '\n', encoding='utf-8')
+        assert pre.read_series_csv(tmp_path)[1] is True
+
+
+def test_preprocessing_a_preprocessed_tree_succeeds_and_sets_retained_from_this_run(tmp_path):
+    first, second = tmp_path / 'first', tmp_path / 'second'
+    write_plan(tmp_path / 'converted')
+    write_study_tree(tmp_path / 'converted')
+    pre.preprocess(tmp_path / 'converted', first, SMALL)
+    for path in first.rglob('series.csv'):  # as if the first run had set it: the second must not carry it over
+        rows = pre.read_series_csv(path.parent)[0]
+        conv.write_series_csv([r | {'retained': 'STALE'} for r in rows], path, pre.PREPROCESSED_SERIES_COLUMNS)
+    report = pre.preprocess(first, second, SMALL)
+    assert {(r.folder, r.outcome) for r in report.rows} == {('plan_1', 'preprocessed'), ('study_1/series_CT_1', 'preprocessed'),
+                                                            ('study_1/series_MR_1', 'preprocessed')}
+    for folder in ('plan_1', 'study_1'):
+        rows, malformed = pre.read_series_csv(second / 'SYNTHETICPTA' / folder)
+        assert not malformed and {r['retained'] for r in rows} == {''}

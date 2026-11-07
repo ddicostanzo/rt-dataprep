@@ -405,3 +405,23 @@ def test_ac5_an_ahe_aligned_plan_series_is_listed_under_its_ahe_output_name(tmp_
     run_plan(tmp_path, [mr_spec(MR_RAMP, rigid(0, (4, 0, 0)))], steps=SMALL_AHE)
     assert series_column(tmp_path / 'out') == [{'file': AHE_MR_OUT, 'modality': 'MR'}]
     assert AHE_MR_OUT != MR_OUT
+
+
+def test_a_converted_tree_and_a_preprocessed_tree_both_pass_the_checks_and_the_manifest(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    write_study_tree(converted)
+    pre.preprocess(converted, out, SMALL)
+    for root, columns in ((converted, conv.SERIES_COLUMNS), (out, pre.PREPROCESSED_SERIES_COLUMNS)):
+        pre.check_rows(root / 'SYNTHETICPTA' / 'plan_1')
+        study = pre.check_study_rows(root / 'SYNTHETICPTA' / 'study_1')
+        assert list(study[0]) == columns
+        assert man.manifest(root) == (3, 0)
+
+
+def test_a_series_csv_header_matching_neither_column_list_is_malformed_and_left_out(tmp_path):
+    root = tmp_path / 'converted'
+    path, rows = write_plan(root)
+    conv.write_series_csv(rows, path / 'series.csv', [*conv.SERIES_COLUMNS, 'other'])
+    assert pre.read_series_csv(path)[1] is True
+    assert man.manifest(root) == (0, 1)
