@@ -1,6 +1,5 @@
 """convert (task-04): assemble, planning CT, dose, atomic plan folders, report. Every tree is synthetic and built in tmp_path."""
 import ast
-import builtins
 import csv
 import errno
 import hashlib
@@ -21,6 +20,7 @@ import pydicom
 import pytest
 import SimpleITK as sitk
 import synthetic_dicom as sd
+from test_dicom_io import fail_python_open as fail_open  # workers=1 where used: a worker process would not see the patch
 
 from rt_dataprep import convert as conv
 from rt_dataprep import dicom_io
@@ -1557,23 +1557,11 @@ IO_ERRORS = [lambda path: PermissionError(errno.EACCES, 'denied', str(path)), la
 POSIX_USER = pytest.mark.skipif(os.name != 'posix' or os.geteuid() == 0, reason='mode bits do not stop root')
 
 
-def fail_open(monkeypatch, bad, error):
-    """Only dicom_io's own open, and only for `bad`, raises `error` (workers=1: a worker process would not see the patch); the modes asked for."""
-    modes = []
-
-    def raiser(path, *args, **kwargs):
-        if str(path) != str(bad):
-            return builtins.open(path, *args, **kwargs)
-        modes.append(args[0] if args else kwargs.get('mode', 'r'))
-        raise error
-    monkeypatch.setattr(dicom_io, 'open', raiser, raising=False)
-    return modes
-
-
 def spy_read_failure(monkeypatch):
-    """The paths dicom_io.read_failure is asked about; the real helper still runs."""
+    """The (calling function, path) pairs dicom_io.read_failure is asked about; the real helper still runs."""
     seen, real = [], dicom_io.read_failure
-    monkeypatch.setattr(dicom_io, 'read_failure', lambda path: (seen.append(str(path)), real(path))[1])
+    monkeypatch.setattr(dicom_io, 'read_failure',
+                        lambda path: (seen.append((inspect.currentframe().f_back.f_code.co_name, str(path))), real(path))[1])
     return seen
 
 
@@ -1619,6 +1607,7 @@ def site_series(org):
 
 
 SITES = {'header': site_header, 'ct': site_ct, 'dose': site_dose, 'series': site_series}
+SITE_CALLERS = {'header': '_read_one', 'ct': '_read_ct', 'dose': '_read_dose', 'series': 'read_series'}  # the reader that re-reads
 
 
 def report_cells(out):
@@ -1639,7 +1628,8 @@ def test_a4_the_failing_fixture_of_each_site_reaches_the_reread_of_its_files_and
     paths, _, reason = SITES[site](org)
     seen = spy_read_failure(monkeypatch)
     rows = conv.convert(org, out).rows
-    assert sorted(seen) == sorted(map(str, paths))  # each once: a refused plan's CT is not read again as another series (#216)
+    # each once, by the site's own reader: a refused plan's CT is not read again as another series (#216)
+    assert sorted(seen) == sorted((SITE_CALLERS[site], str(p)) for p in paths)
     plan_row = row_of(rows)
     if reason is None:
         assert (plan_row.outcome, plan_row.skipped_series) == (conv.OUTCOME_CONVERTED, 0)
@@ -1795,6 +1785,31 @@ def test_a6_a_plan_folder_with_mode_0o444_is_the_patients_io_error(tree, monkeyp
     finally:
         plan['folder'].chmod(0o755)
     only_io_error_row(out, rows)
+
+
+def test_a6_a_misc_files_folder_whose_stat_fails_is_the_patients_io_error_twin(tree, monkeypatch):
+    """The misc_files check itself (#215): a failed stat is not "no misc_files"."""
+    org, out = tree
+    misc_series(org)  # no plan folder: no other entry of the patient is stat'ed first
+    hide_entries(monkeypatch, org / PID, deny=True)
+    only_io_error_row(out, conv.convert(org, out).rows)
+
+
+def test_a6_a_misc_files_entry_whose_stat_fails_at_the_salvage_listing_is_the_patients_io_error_twin(tree, monkeypatch):
+    """The second listing of misc_files, for the study of a malformed file (#215): a failed stat is not "no such file"."""
+    org, out = tree
+    make_plan(org / PID / 'plan_1')
+    misc = misc_series(org)[0].parent
+    (misc / 'junk.dcm').write_bytes(b'not a dicom file')
+    real = conv.read_folder_headers
+
+    def read_then_hide(folder):
+        found = real(folder)
+        if Path(folder) == misc:
+            hide_entries(monkeypatch, misc, deny=True)  # setup: the entries fail their stat only after the header read
+        return found
+    monkeypatch.setattr(conv, 'read_folder_headers', read_then_hide)
+    only_io_error_row(out, conv.convert(org, out).rows)
 
 
 def test_an_unstatable_entry_the_name_filters_drop_is_never_statted(tree, monkeypatch):

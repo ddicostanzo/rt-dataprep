@@ -1,6 +1,5 @@
 """preprocess: grid, crop/pad, rescale, names, CT pipeline, dose and mask resampling (task-01); the tree walk (task-02)."""
 import ast
-import builtins
 import csv
 import dataclasses
 import errno
@@ -15,6 +14,7 @@ import weakref
 import numpy as np
 import pytest
 import SimpleITK as sitk
+from test_dicom_io import fail_python_open
 
 from rt_dataprep import convert as conv
 from rt_dataprep import dicom_io
@@ -256,19 +256,6 @@ def garbage_file(tmp_path):
     return bad
 
 
-def fail_python_open(monkeypatch, bad, error):
-    """Only dicom_io's own open, and only for `bad`, raises `error`; the modes asked for are returned."""
-    modes = []
-
-    def raiser(path, *args, **kwargs):
-        if str(path) != str(bad):
-            return builtins.open(path, *args, **kwargs)
-        modes.append(args[0] if args else kwargs.get('mode', 'r'))
-        raise error
-    monkeypatch.setattr(dicom_io, 'open', raiser, raising=False)
-    return modes
-
-
 READERS = (pre.read_image, pre.read_info)
 
 
@@ -287,10 +274,10 @@ def test_a_garbage_file_python_reads_cleanly_is_still_unreadable(tmp_path, monke
 @pytest.mark.parametrize('read', READERS)
 def test_a_file_that_vanishes_before_the_python_reread_is_unreadable(tmp_path, monkeypatch, read):
     bad = garbage_file(tmp_path)
-    fail_python_open(monkeypatch, bad, FileNotFoundError(errno.ENOENT, 'gone', str(bad)))
+    modes = fail_python_open(monkeypatch, bad, FileNotFoundError(errno.ENOENT, 'gone', str(bad)))
     with pytest.raises(CaseRefused) as caught:
         read(bad)
-    assert str(caught.value) == pre.REASON_FILE_UNREADABLE
+    assert str(caught.value) == pre.REASON_FILE_UNREADABLE and modes == ['rb']
 
 
 @pytest.mark.parametrize('read', READERS)
