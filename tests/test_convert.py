@@ -535,7 +535,7 @@ def test_an_unreadable_file_in_misc_files_is_ignored_and_only_its_count_is_logge
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.files, r.skipped_series) for r in rows] == [
         ('plan_1', conv.OUTCOME_CONVERTED, ['planning_ct.nii.gz', 'series.csv'], 0)]
-    assert 'convert: 1 unreadable files in misc_files' in caplog.messages
+    assert 'convert: 1 malformed or vanished files in misc_files' in caplog.messages
     assert all(secret not in text for text in caplog.messages for secret in (PID, 'SYNTHETIC_junk', str(org)))
 
 
@@ -1639,14 +1639,15 @@ def test_a4_the_failing_fixture_of_each_site_reaches_the_reread_of_its_files_and
     paths, _, reason = SITES[site](org)
     seen = spy_read_failure(monkeypatch)
     rows = conv.convert(org, out).rows
-    # the refused plan's own CT is then read as another series, so its slices are asked about twice: the first calls are the site's
-    assert sorted(seen[:len(paths)]) == sorted(map(str, paths)) and set(seen) == set(map(str, paths))
+    assert sorted(seen) == sorted(map(str, paths))  # each once: a refused plan's CT is not read again as another series (#216)
     plan_row = row_of(rows)
     if reason is None:
         assert (plan_row.outcome, plan_row.skipped_series) == (conv.OUTCOME_CONVERTED, 0)
         assert [(r.outcome, r.skipped_series) for r in rows if r.folder == 'studies'] == [(conv.OUTCOME_SKIPPED, 1)]
     else:
         assert (plan_row.outcome, plan_row.reason) == (conv.OUTCOME_REFUSED, reason)
+    if site == 'ct':  # unread, the CT is still counted as a skipped series, as when its second read failed
+        assert [(r.outcome, r.skipped_series) for r in rows if r.folder == 'studies'] == [(conv.OUTCOME_SKIPPED, 1)]
 
 
 @pytest.mark.parametrize('make_error', IO_ERRORS, ids=['EACCES', 'EIO'])
