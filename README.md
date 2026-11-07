@@ -22,6 +22,7 @@ See [Security and data handling](SECURITY.md) before processing clinical exports
 - [Manifests and patient splits](#manifests-and-patient-splits)
 - [Reports, reruns, and troubleshooting](#reports-reruns-and-troubleshooting)
 - [Python API](#python-api)
+- [Integrating into a workflow](#integrating-into-a-workflow)
 - [Development](#development)
 - [License](#license)
 
@@ -81,7 +82,7 @@ count before accepting the cohort. Successful process completion can include ref
 | --- | --- | --- |
 | `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers 1..64` (default 1); `--overwrite` |
 | `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers 1..64` (default 1); `--overwrite` |
-| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers 1..64` (default 1); at least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--new-spacing`, `--final-spacing`, `--new-shape`, `--allow-crop`, `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
+| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers 1..64` (default 1); at least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--new-spacing`, `--final-spacing`, `--new-shape`, `--allow-crop`, `--min-mask-retention`, `--ahe-kernel-mm`, `--ahe-bins`, `--ahe-clip-limit`, `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
 | `manifest ROOT` | Write `ROOT/manifest.csv` and a dated copy. | Works on converted or preprocessed trees. |
 | `split ROOT` | Read `ROOT/manifest.csv`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
 
@@ -245,7 +246,7 @@ uv run python -m rt_dataprep manifest /secure/equalized
 ```
 
 Combine `--ahe` with any other step flag. AHE can require several additional volume-sized arrays; include those in
-memory planning; real-data peak-memory profiling remains tracked in #47. Tune the histogram or use a physical window:
+memory planning; real-data peak-memory profiling remains tracked in #209. Tune the histogram or use a physical window:
 
 ```bash
 uv run python -m rt_dataprep preprocess /secure/converted /secure/equalized-tuned --ahe --ahe-kernel-mm 16 16 16 --ahe-bins 128 --ahe-clip-limit 0.05 --series-fov-mask
@@ -358,7 +359,8 @@ uv run python -m rt_dataprep convert /secure/organized /secure/converted --overw
 
 ## Python API
 
-The functions mirror the CLI. Example using separate directories in approved storage:
+The functions mirror the CLI one to one. Import them from their modules; the package itself exports nothing.
+Paths may be `str` or `Path`. Example using separate directories in approved storage:
 
 ```python
 from pathlib import Path
@@ -366,19 +368,167 @@ from pathlib import Path
 from rt_dataprep.convert import convert
 from rt_dataprep.manifest import manifest
 from rt_dataprep.organize import organize
+from rt_dataprep.preprocess import PreprocessSteps, preprocess
 from rt_dataprep.split import split
 
-workspace = Path('/secure/project')
-organize(workspace / 'export', workspace / 'organized', workers=4)
-conversion = convert(workspace / 'organized', workspace / 'converted', workers=4)
-written, refused = manifest(workspace / 'converted')
-cohorts = split(workspace / 'converted' / 'manifest.csv', test_size=0.2, val_size=0.2, seed=42)
-# Inspect conversion.rows and refused in approved storage; do not print patient-bearing rows into shared logs.
+def main():
+    workspace = Path('/secure/project')
+    organize(workspace / 'export', workspace / 'organized', workers=4)
+    conversion = convert(workspace / 'organized', workspace / 'converted', workers=4)
+    steps = PreprocessSteps(resample=True, rescale=True, harmonize_spacing=True, reshape=True, new_shape=(320, 320, 256))
+    prep = preprocess(workspace / 'converted', workspace / 'preprocessed', steps, workers=4)
+    written, refused = manifest(workspace / 'preprocessed')
+    cohorts = split(workspace / 'preprocessed' / 'manifest.csv', test_size=0.2, val_size=0.2, seed=42)
+    # Inspect conversion.rows, prep.rows and refused in approved storage; do not print patient-bearing rows into shared logs.
+
+
+if __name__ == '__main__':  # required with workers > 1
+    main()
 ```
 
-`organize()`, `convert()` and `preprocess()` take `overwrite=True` (keyword only), which matches the CLI's `--overwrite`.
+With `workers` above 1, each worker is a new `spawn`ed process that imports the calling script. Keep the calls under an
+`if __name__ == '__main__':` guard, as above; without it every worker re-runs the script and the stage aborts. With
+`workers=1` the patients run in the calling process and no guard is needed.
+
+| Function | Returns | Report written |
+| --- | --- | --- |
+| `organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overwrite=False)` | `OrganizeReport(rows)` of `PatientRow` | `organize_report.csv` |
+| `convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwrite=False)` | `ConvertReport(rows)` of `ConvertRow` | `convert_report.csv` |
+| `preprocess(converted_root, out_root, steps, *, workers=1, overwrite=False)` | `PreprocessReport(rows)` of `PreprocessRow` | `preprocess_report.csv` |
+| `manifest(root)` | `(written, refused)` case counts | `manifest.csv` |
+| `split(manifest_path, *, test_size, val_size, seed, external=None)` | the `splits.json` content as a dict | `splits.json` next to the manifest |
+
+Report rows are dataclasses. Their fields match the report CSV columns, except that `organize_report.csv` names
+`plans`, `misc` and `unreadable` as `plan_count`, `misc_count` and `unreadable_count`:
+
+| Row | Fields | `outcome` values |
+| --- | --- | --- |
+| `PatientRow` (organize) | `patient`, `plans`, `misc`, `unreadable`, `outcome`, `reason` | `organized`, `skipped`, `refused` |
+| `ConvertRow` | `patient`, `folder`, `outcome`, `reason`, `files`, `skipped_series` | `converted`, `skipped`, `refused` |
+| `PreprocessRow` | `patient`, `folder`, `outcome`, `reason`, `files`, `skipped_series`, `cropped` | `preprocessed`, `skipped`, `refused` |
+
+`folder` is blank on a patient-level row, `plan_<n>` on a plan row, and `study_<n>/series_<MOD>_<k>` on an imaging row
+(`study_<n>` when a whole study is refused). `reason` is always one of the fixed `REASON_*` strings defined across the
+`rt_dataprep` modules (a convert row can carry one from `masks`, `series` or `dicom_io`); compare against those
+constants rather than matching text.
+
+`PreprocessSteps` is a frozen dataclass. Two field names differ from their CLI flags, because the flags are named after
+their output prefix:
+
+| `PreprocessSteps` field | CLI flag | Default |
+| --- | --- | --- |
+| `resample` | `--initial-resample` | `False` |
+| `rescale` | `--rescale` | `False` |
+| `ahe` | `--ahe` | `False` |
+| `harmonize_spacing` | `--resample` | `False` |
+| `reshape` | `--reshape` | `False` |
+| `new_spacing` | `--new-spacing` | `(1, 1, 1)` mm |
+| `final_spacing` | `--final-spacing` | `(1.25, 1.25, 1.25)` mm |
+| `new_shape` | `--new-shape` | `(701, 701, 433)` voxels |
+| `allow_crop` | `--allow-crop` | `False` |
+| `min_mask_retention` | `--min-mask-retention` | `None` |
+| `ahe_kernel_mm`, `ahe_bins`, `ahe_clip_limit` | `--ahe-kernel-mm`, `--ahe-bins`, `--ahe-clip-limit` | `None`, `128`, `0.05` |
+| `legacy_linear_masks` | `--legacy-linear-masks` | `False` |
+| `series_fov_mask` | `--series-fov-mask` | `False` |
+
+The CLI also checks that a grid option comes with its step flag and that spacings are at least 0.1 mm; set those fields
+consistently when calling Python directly.
+
+Errors:
+
+- `ValueError` with a fixed reason text refuses the whole call before any patient is processed: an output root inside
+  the input, no step enabled, an invalid option combination, invalid split sizes, an `--external` patient overlap, or a `splits.json` with different content.
+- `OrganizeAborted`, `ConvertAborted` and `PreprocessAborted` mean a patient hit an unexpected error. The report is
+  already written for the patients that finished, and the run stops.
+- `OSError` on the input or output root propagates. Its message can contain a path, and therefore a patient ID.
+
+A refused patient, plan, or series is **not** an exception; it is a report row. Check `rows` after every call.
 
 The API is under active development. Pin a reviewed commit and `uv.lock` when reproducing an analysis.
+
+## Integrating into a workflow
+
+### Add rt-dataprep to another project
+
+Install it from Git into the training or analysis project, pinned to a reviewed commit:
+
+```bash
+uv add "rt-dataprep @ git+https://github.com/ddicostanzo/rt-dataprep@<commit>"
+```
+
+The CLI is then available as `uv run python -m rt_dataprep`, and the API as described above.
+
+### Gate each stage on its report, not on the exit status
+
+The CLI exits 0 when a run finishes, even when it refused patients, plans, or series. It exits 1 for a fixed-reason
+refusal of the whole run, an aborted run, or a file system error on a root, and 2 for invalid arguments. A pipeline step
+(Make, Snakemake, a scheduler, CI) should therefore read the report after each stage and decide whether the cohort is
+acceptable. A minimal gate in Python:
+
+```python
+import csv
+import sys
+
+with open('/secure/project/converted/convert_report.csv', newline='') as f:
+    refused = sum(row['outcome'] == 'refused' for row in csv.DictReader(f))
+if refused:
+    sys.exit(f'convert: {refused} refused rows; review the report before continuing')  # counts only, no IDs
+```
+
+Through the API, apply the same check to `report.rows`. Decide in advance which refusals are acceptable for the analysis
+(for example, imaging series refused for an unsupported volume) instead of requiring zero.
+
+### Rerun rules
+
+- Use a fresh output root for every changed configuration. Existing patient folders are skipped unless `--overwrite` is
+  given, so a rerun into the same root with different flags keeps the old results for those patients, with only a `skipped`
+  report row to show it.
+- Run one writer per output root.
+- Regenerate `manifest` after any `preprocess` or `--overwrite` run; it is not updated for you.
+- Keep each root's `manifest.csv` and `splits.json` as the cohort record. `split` refuses to replace a `splits.json`
+  with different content, so a changed cohort belongs in a new root.
+
+See [Replacing existing output with `--overwrite`](#replacing-existing-output-with---overwrite) for the replacement rules.
+
+### Load cases for training
+
+`manifest.csv` lists the cases, `splits.json` assigns them to `train`, `val`, and `test`, and each case folder's
+`series.csv` names its files. Do not derive file names from case IDs: preprocessing adds step prefixes, and imaging
+`case_dir` values are IDs, not paths.
+
+```python
+import csv
+import json
+from pathlib import Path
+
+import SimpleITK as sitk
+
+root = Path('/secure/project/preprocessed')
+splits = json.loads((root / 'splits.json').read_text())
+cases_by_id = {row['case_dir']: row for row in csv.DictReader(open(root / 'manifest.csv', newline=''))}
+
+
+def load(case_dir):
+    row = cases_by_id[case_dir]
+    if row['case_type'] == 'imaging':  # case_dir is patient/study_<n>/series_<MOD>_<k>
+        return {'image': sitk.ReadImage(root / row['patient'] / case_dir.split('/')[1] / row['image'])}
+    folder = root / row['patient'] / row['fx']
+    files = list(csv.DictReader(open(folder / 'series.csv', newline='')))
+    case = {'image': sitk.ReadImage(folder / next(f['file'] for f in files if f['kind'] == 'ct'))}
+    case.update({f['roi_name'] or f['kind']: sitk.ReadImage(folder / f['file'])
+                 for f in files if f['kind'] in ('dose', 'mask')})
+    return case
+
+
+train = [load(case) for cases in splits['train'].values() for case in cases]
+```
+
+In a plan's `series.csv`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, or `line`.
+Applicator and line files are gzip-compressed coordinate text, not NIfTI; see [Conversion behavior](#conversion-behavior).
+After a geometric `preprocess` run, the `retained` column gives the fraction of each dose (summed dose) and mask (volume)
+kept on the final grid. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should
+not be used. The optional `fov_mask` manifest column and `fov_mask` entries in
+the `series` JSON name support masks for excluding fill voxels from losses or metrics.
 
 ## Development
 
