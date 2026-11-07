@@ -81,7 +81,7 @@ count before accepting the cohort. Successful process completion can include ref
 | --- | --- | --- |
 | `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers 1..64` (default 1); `--overwrite` |
 | `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers 1..64` (default 1); `--overwrite` |
-| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers 1..64` (default 1); at least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
+| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers 1..64` (default 1); at least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--new-spacing`, `--final-spacing`, `--new-shape`, `--allow-crop`, `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
 | `manifest ROOT` | Write `ROOT/manifest.csv` and a dated copy. | Works on converted or preprocessed trees. |
 | `split ROOT` | Read `ROOT/manifest.csv`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
 
@@ -186,16 +186,27 @@ uv run python -m rt_dataprep split /secure/preprocessed --test-size 0.2 --val-si
 
 | Flag | Step | Output prefix |
 | --- | --- | --- |
-| `--initial-resample` | Resample to 1 mm spacing | `initialresample_` |
+| `--initial-resample` | Resample to 1 mm spacing (`--new-spacing X Y Z`) | `initialresample_` |
 | `--rescale` | Apply `(HU + 1024) / 4096` to CT | `rescale_` |
 | `--ahe` | CLAHE adaptive histogram equalization | `ahe_` |
-| `--resample` | Resample to 1.25 mm spacing | `resample_` |
-| `--reshape` | Centred crop/pad to **701 × 701 × 433 voxels (x, y, z)** | `reshape_` |
+| `--resample` | Resample to 1.25 mm spacing (`--final-spacing X Y Z`) | `resample_` |
+| `--reshape` | Centred crop/pad to **701 × 701 × 433 voxels (x, y, z)** (`--new-shape X Y Z`) | `reshape_` |
+
+`--new-spacing` and `--final-spacing` take positive finite millimetre values, `--new-shape` positive integers, all in x y z
+order. Each is refused unless its step flag (`--initial-resample`, `--resample`, `--reshape`) is also given; without them the
+defaults above apply.
 
 Steps always run in the order of the table, whichever flags are given. One float32 image at the `--reshape` size occupies
 about **812 MiB** before processing copies and other volumes; plan memory and storage accordingly. The CT formula is not
 intensity clipping. `--reshape` without `--initial-resample` or `--resample` crops/pads at the CT's own spacing, which can
 pad a large extent at native spacing.
+
+By default a plan whose dose or mask extends past the final CT grid is refused. `--allow-crop` (needs at least one of
+`--initial-resample`, `--resample`, `--reshape`) writes the plan anyway, with the dose and masks cut to the final grid. In
+`series.csv`, the `retained` column of each dose and mask row is the fraction of that file's native-grid content (summed dose,
+mask volume) kept by the crop: exactly `1.0` when nothing is cut, and blank for CT, applicator, line and series rows and on runs
+without a geometric step. In `preprocess_report.csv`, the `cropped` column counts the dose and mask files the final grid cut; a
+negligible tail counts. A dose or mask that the final grid empties entirely refuses the plan, with or without `--allow-crop`.
 
 CT study series receive all enabled steps. MR/PT study series receive geometric steps and optional AHE, and skip HU rescaling. `--rescale`
 alone (or the same Python configuration) refuses MR/PT because it has no applicable step. With no geometric step (`--rescale` and/or

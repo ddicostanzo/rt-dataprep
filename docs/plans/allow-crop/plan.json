@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "metadata": {
+    "title": "preprocess --allow-crop: crop dose and masks at a smaller final grid, recorded per file (#174)",
+    "spec": "docs/specs/2026-11-07-allow-crop.md",
+    "issue": 174,
+    "branch": "feat/allow-crop-174",
+    "created": "2026-11-07",
+    "profile": "project-profile.yml",
+    "notes": "Run tests with `uv run --group dev pytest -q --tb=short` inside ../rt-dataprep-allow-crop-174 (no .venv there; the main repo's .venv imports main's src). The commit gate refuses more than 5 staged files. Synthetic data only; shared helpers are imported from sibling test modules (no conftest). Orchestrator gates before merge: wait for the Codex review on the PR, fix blocking threads, reply 'deferred: #<issue>' to the rest, resolve every thread via GraphQL; file the plan's Deferred items as hardening issues and list them in the PR body."
+  },
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "series.csv: preprocess writes a trailing `retained` column; the reader accepts both headers",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py",
+        "tests/test_manifest.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "tests/test_manifest.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_preprocess.py and tests/test_manifest.py. convert.write_series_csv gains an optional columns argument (default SERIES_COLUMNS, so convert is unchanged); preprocess defines PREPROCESSED_SERIES_COLUMNS = conv.SERIES_COLUMNS + ['retained'] and writes every plan and study series.csv with it, setting 'retained' on every row it writes (blank in this task). read_series_csv accepts fieldnames equal to either list; all other malformed checks stay. Tests: header of a preprocessed plan and study series.csv; a converted tree and a preprocessed tree both pass check_rows, check_study_rows and manifest; a header matching neither is malformed; preprocessing a preprocessed tree succeeds (spec AC10).",
+      "criteria": [
+        "Every series.csv preprocess writes (plan and study folders) has header SERIES_COLUMNS + ['retained']; convert's series.csv header is unchanged",
+        "read_series_csv accepts exactly two headers, SERIES_COLUMNS and SERIES_COLUMNS + ['retained']; any other header, a missing cell or an extra cell is still malformed",
+        "A converted tree and a preprocessed tree both pass check_rows, check_study_rows and manifest",
+        "Preprocessing an already preprocessed synthetic tree (plan with dose, masks, applicator; one study) returns a preprocessed row for each folder, and every row it writes sets 'retained' from this run",
+        "Full suite passes: `uv run --group dev pytest -q --tb=short`; `uv run --group dev ruff check .` is clean"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "PreprocessSteps.allow_crop, native-grid `retained` per dose and mask, empty-dose refusal, `cropped` report column",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py",
+        "tests/test_series.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "tests/test_series.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_preprocess.py, reusing crop_case / write_plan / box / FOUR_STEPS / blank / make_image. A new function returns the native in-grid fraction (spec D6): the nonzero (dose: sum of values; mask: sum of values) part of the native image whose voxel centres have continuous final index in [-0.5, n - 0.5) on every axis, over the total; 1.0 for an empty image. It must not transform every voxel: per axis, two point transforms give the first and last in-grid native index (dose and masks share the CT direction, as check_crop already assumes), then a slice sum. preprocess_plan computes it for every dose and mask on a geometric run and writes it to the row's 'retained'; with allow_crop False check_crop refuses exactly as today, with allow_crop True the file is written; the crop predicate (not retained) drives both the refusal and the cropped count. A dose whose native has voxels and whose output has none refuses with REASON_CROP. PreprocessRow gains `cropped` (count of the plan's dose and mask files the predicate flags; blank on non-plan rows) written as the trailing report column; update the pinned report-header assertions (tests/test_preprocess.py, tests/test_series.py rows that list every report column). preprocess() raises ValueError with a new fixed REASON_ constant when allow_crop is set and no geometric step is. retained is 1.0 by the check_crop bounding-box test when nothing lies outside, else the float64 in-grid sum over the float64 total. The empty-output refusal for dose (native has voxels, output none) applies with allow_crop on and off. Pinned report headers: tests/test_preprocess.py:410 and tests/test_series.py:981 (tests/test_convert.py:481 pins convert's report: leave it).",
+      "criteria": [
+        "With allow_crop False, the existing crop tests (dose cut off, mask cut off, check_crop exact half-voxel boundaries) pass unchanged: REASON_CROP refusal",
+        "With allow_crop True, a plan whose dose and a mask are partly cut by new_shape is preprocessed; the dose and mask outputs have the final CT's size, spacing, origin and direction",
+        "With allow_crop True, a mask entirely outside the final grid refuses with REASON_CROP, and a dose entirely outside the final grid refuses with REASON_CROP. The rule is exactly 'native has voxels and output has none'; retained == 0.0 alone does not refuse",
+        "The empty-dose refusal (native has voxels, output has none, REASON_CROP) applies whether allow_crop is on or off",
+        "With allow_crop True and min_mask_retention above a cropped mask's output/input retention, the plan refuses with REASON_MASK_RETENTION",
+        "preprocess() with allow_crop True and no geometric step raises ValueError whose message is a new fixed REASON_ constant; REASON_NO_STEPS is checked first, the new check next, both before any mkdir",
+        "check_crop is refactored around a boolean predicate (a nonzero native voxel centre outside the final grid, continuous index outside [-0.5, n - 0.5)) that it still raises on; its existing boundary tests pass unchanged. With allow_crop False, check_crop is called exactly as today (the refusal is never derived from retained)",
+        "A dose and a mask whose foreground sits away from the grid edges have retained exactly 1.0, also with a final_spacing different from the native spacing",
+        "retained is informational: exactly 1.0 when the predicate is false; otherwise the float64 in-grid sum over the float64 total. A test with a native dose grid larger than the final grid, nonzero float32 values only inside it, expects retained == 1.0 and cropped == 0",
+        "A synthetic box with a known cut (e.g. half its voxels outside new_shape) has retained equal to that fraction for the mask, and to the in-grid share of the summed dose for the dose",
+        "On a geometric run, series.csv dose and mask rows hold repr(float(x)) (a plain decimal such as 0.5 or 1.0, never np.float64(...)); a test asserts float(cell) parses and the cell contains no 'np.'; CT, applicator, line and series rows are blank; on a non-geometric run every retained cell is blank",
+        "preprocess_report.csv's header ends with 'cropped'; it is an int on preprocessed plan rows of a geometric run (the count of the plan's dose and mask files for which the predicate is true, 0 when none; a negligible tail past the edge counts even if retained rounds to 1.0) and blank on refused plan rows, on every row of a non-geometric run, and on patient-level, 'studies' and study rows",
+        "allow_crop adds no filename prefix: output names with and without it are identical",
+        "No log line or exception message carries a patient id or path (REASON_ constants only)",
+        "Full suite passes: `uv run --group dev pytest -q --tb=short`; `uv run --group dev ruff check .` is clean"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "CLI: --allow-crop, --new-shape, --new-spacing, --final-spacing; help texts and README",
+      "depends_on": [
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/__main__.py",
+        "tests/test_cli.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_cli.py": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "TDD in tests/test_cli.py with the in-process monkeypatched-preprocess pattern the existing step-flag cases use: each option's mapping onto PreprocessSteps, each usage error (option without its step flag, non-positive or non-finite values, wrong count, --allow-crop with no geometric step flag), and one end-to-end run with --reshape --new-shape and --allow-crop on a synthetic tree whose dose is cut, checking the report's cropped column and series.csv retained. README and help text checked by the existing help test where it applies.",
+      "criteria": [
+        "--allow-crop sets PreprocessSteps.allow_crop True; absent it is False",
+        "--new-shape X Y Z (positive ints) sets new_shape=(X, Y, Z); --new-spacing X Y Z sets new_spacing; --final-spacing X Y Z sets final_spacing; all positive finite floats in x y z order",
+        "--new-shape without --reshape, --new-spacing without --initial-resample, and --final-spacing without --resample each exit with a usage error before any work",
+        "Non-positive or non-finite values for any grid option exit with a usage error",
+        "--allow-crop without --initial-resample, --resample or --reshape exits with a usage error",
+        "Without the new options, the PreprocessSteps built by the CLI equal those built today (defaults 701 701 433 / 1 1 1 / 1.25 1.25 1.25)",
+        "An end-to-end CLI run with --reshape --new-shape and --allow-crop on a synthetic plan whose dose is cut writes the plan, a cropped count of at least 1 and a dose retained below 1",
+        "The --initial-resample, --resample and --reshape help texts name their option for the size and give the default; README documents --allow-crop, the three grid options, series.csv's retained column (native-grid fraction kept by the crop, exactly 1.0 when nothing is cut) and the report's cropped column",
+        "Full suite passes: `uv run --group dev pytest -q --tb=short`; `uv run --group dev ruff check .` is clean"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ],
+    [
+      "task-03"
+    ]
+  ],
+  "Deferred": [
+    "Crop centred on the dose or a named structure (hardening issue)",
+    "Applicator and reference-line points outside the final grid (hardening issue)",
+    "manifest.csv min-retained column (hardening issue)",
+    "Run summary log line counting plans with low retained (hardening issue)",
+    "Dose with negative or cancelling values (hardening issue)"
+  ]
+}

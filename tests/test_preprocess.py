@@ -407,7 +407,7 @@ def state(root):
 def report_rows(out):
     with open(out / 'preprocess_report.csv', newline='') as handle:
         reader = csv.DictReader(handle)
-        assert reader.fieldnames == ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series']
+        assert reader.fieldnames == ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series', 'cropped']
         return list(reader)
 
 
@@ -439,7 +439,7 @@ def test_four_steps_write_the_prefixed_files_and_leave_the_input_alone(tmp_path)
     assert (row.outcome, row.reason, row.files) == ('preprocessed', '', expected) and len(report.rows) == 1
     assert sorted(p.name for p in (out / 'SYNTHETICPTA' / 'plan_1').iterdir()) == sorted(expected)
     assert listing(out) == ['SYNTHETICPTA', 'preprocess_report.csv']  # no partial left
-    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='plan_1', outcome='preprocessed', reason='', files=';'.join(expected), skipped_series='0')]
+    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='plan_1', outcome='preprocessed', reason='', files=';'.join(expected), skipped_series='0', cropped='0')]
     done = out / 'SYNTHETICPTA' / 'plan_1'
     assert (done / 'applicator_a.txt').read_bytes() == APPLICATOR_BYTES
     final = sitk.ReadImage(str(done / CT_FILE))
@@ -477,7 +477,7 @@ def test_series_csv_keeps_every_column_and_renames_files_and_lists_the_aligned_s
         written = list(csv.DictReader(handle))
     names = [CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt', pre.output_name('series_MR_1.nii.gz', SMALL)]
     assert [r['file'] for r in written] == names
-    assert [{k: v for k, v in r.items() if k != 'file'} for r in written] == [{k: v for k, v in r.items() if k != 'file'} for r in [*rows, series]]
+    assert [{k: v for k, v in r.items() if k != 'file'} for r in written] == [{k: v for k, v in r.items() if k != 'file'} | {'retained': '1.0' if r['kind'] in ('dose', 'mask') else ''} for r in [*rows, series]]  # SMALL cuts nothing
 
 
 def add_series(folder, rows, file='series_MR_1.nii.gz', modality='MR', write=True, **extra):
@@ -978,7 +978,7 @@ def test_a_compute_failure_aborts_with_a_flushed_report_and_nothing_chained(tmp_
     chain = ''.join(traceback.format_exception(caught.value))
     assert 'direct cause' not in chain and 'During handling' not in chain  # nothing chained
     assert not issubclass(pre.PreprocessAborted, (ValueError, OSError))
-    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='', skipped_series='0')]
+    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='', skipped_series='0', cropped='')]
     assert listing(out) == ['preprocess_report.csv']  # no partial, and the next patient was not started
 
 
@@ -992,7 +992,7 @@ def test_running_out_of_memory_reading_a_nifti_aborts_instead_of_refusing_the_pl
     monkeypatch.setattr(sitk, 'ReadImage', no_memory)
     with pytest.raises(pre.PreprocessAborted):
         pre.preprocess(converted, out, SMALL)
-    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='', skipped_series='0')]
+    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='', skipped_series='0', cropped='')]
     assert listing(out) == ['preprocess_report.csv']
 
 
@@ -1485,7 +1485,7 @@ def test_an_internal_error_in_a_study_series_aborts_the_run_and_removes_the_part
     assert str(caught.value) == pre.REASON_INTERNAL
     chain = ''.join(traceback.format_exception(caught.value))
     assert 'direct cause' not in chain and 'During handling' not in chain
-    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='', skipped_series='0')]
+    assert report_rows(out) == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='', skipped_series='0', cropped='')]
     assert listing(out) == ['preprocess_report.csv']
 
 
@@ -1803,7 +1803,7 @@ def test_ac7_an_internal_error_while_resampling_a_series_still_stops_the_run(tmp
     monkeypatch.setattr(sitk, 'Resample', resample)
     with pytest.raises(pre.PreprocessAborted):
         run_plan(tmp_path, [mr_spec(np.ones((4, 4, 4)), rigid(0, (1, 0, 0)))])
-    assert report_rows(tmp_path / 'out') == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='', skipped_series='0')]
+    assert report_rows(tmp_path / 'out') == [dict(patient='SYNTHETICPTA', folder='', outcome='refused', reason=pre.REASON_INTERNAL, files='', skipped_series='0', cropped='')]
 
 
 def test_ac9_rescale_only_resamples_an_mr_onto_the_native_ct_grid_and_keeps_its_name(tmp_path):
@@ -2413,3 +2413,256 @@ def test_an_internal_error_in_one_patient_aborts_a_two_process_run_with_the_repo
     assert [(r['patient'], r['outcome'], r['reason']) for r in report_rows(out)] == [('a', conv.OUTCOME_SKIPPED, ''), ('boom', conv.OUTCOME_REFUSED, pre.REASON_INTERNAL)]  # two slots: 'a' and 'boom' only
     err = capfd.readouterr().err
     assert pool_workers.SECRET not in err and 'RuntimeError' in err  # the worker logged the type and site, never the message
+
+
+# ---------------------------------------------------------------- allow-crop task-01: the trailing `retained` column
+
+def csv_header(path):
+    with open(path, newline='') as handle:
+        return next(csv.reader(handle))
+
+
+def test_every_series_csv_preprocess_writes_has_the_retained_column_and_convert_keeps_its_header(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    write_study_tree(converted)
+    pre.preprocess(converted, out, SMALL)
+    assert csv_header(converted / 'SYNTHETICPTA' / 'plan_1' / 'series.csv') == conv.SERIES_COLUMNS
+    assert pre.PREPROCESSED_SERIES_COLUMNS == [*conv.SERIES_COLUMNS, 'retained']
+    for folder in ('plan_1', 'study_1'):
+        assert csv_header(out / 'SYNTHETICPTA' / folder / 'series.csv') == pre.PREPROCESSED_SERIES_COLUMNS
+    assert {r['retained'] for r in pre.read_series_csv(out / 'SYNTHETICPTA' / 'study_1')[0]} == {''}
+    assert {r['kind']: r['retained'] for r in pre.read_series_csv(out / 'SYNTHETICPTA' / 'plan_1')[0]} == {'ct': '', 'dose': '1.0', 'mask': '1.0', 'applicator': ''}
+
+
+@pytest.mark.parametrize('columns, malformed', [
+    (conv.SERIES_COLUMNS, False),
+    ([*conv.SERIES_COLUMNS, 'retained'], False),
+    ([*conv.SERIES_COLUMNS, 'other'], True),
+    (['retained', *conv.SERIES_COLUMNS], True),
+    (conv.SERIES_COLUMNS[:-1], True),
+])
+def test_read_series_csv_accepts_exactly_the_two_headers(tmp_path, columns, malformed):
+    (tmp_path / 'series.csv').write_text(','.join(columns) + '\n' + ','.join('x' * len(columns)) + '\n', encoding='utf-8')
+    assert pre.read_series_csv(tmp_path)[1] is malformed
+
+
+@pytest.mark.parametrize('columns', [conv.SERIES_COLUMNS, pre.PREPROCESSED_SERIES_COLUMNS])
+def test_read_series_csv_still_refuses_a_missing_or_extra_cell(tmp_path, columns):
+    for cells in (len(columns) - 1, len(columns) + 1):
+        (tmp_path / 'series.csv').write_text(','.join(columns) + '\n' + ','.join(['x'] * cells) + '\n', encoding='utf-8')
+        assert pre.read_series_csv(tmp_path)[1] is True
+
+
+def test_preprocessing_a_preprocessed_tree_succeeds_and_sets_retained_from_this_run(tmp_path):
+    first, second = tmp_path / 'first', tmp_path / 'second'
+    write_plan(tmp_path / 'converted')
+    write_study_tree(tmp_path / 'converted')
+    pre.preprocess(tmp_path / 'converted', first, SMALL)
+    for path in first.rglob('series.csv'):  # as if the first run had set it: the second must not carry it over
+        rows = pre.read_series_csv(path.parent)[0]
+        conv.write_series_csv([r | {'retained': 'STALE'} for r in rows], path, pre.PREPROCESSED_SERIES_COLUMNS)
+    report = pre.preprocess(first, second, SMALL)
+    assert {(r.folder, r.outcome) for r in report.rows} == {('plan_1', 'preprocessed'), ('study_1/series_CT_1', 'preprocessed'),
+                                                            ('study_1/series_MR_1', 'preprocessed')}
+    for folder in ('plan_1', 'study_1'):
+        rows, malformed = pre.read_series_csv(second / 'SYNTHETICPTA' / folder)
+        assert not malformed and {r['retained'] for r in rows} == ({'', '1.0'} if folder == 'plan_1' else {''})  # never 'STALE'
+
+
+# ---------------------------------------------------------------- allow-crop task-02: allow_crop, native-grid `retained`, `cropped`
+
+CUT = PreprocessSteps(reshape=True, new_shape=(6, 6, 6), allow_crop=True)  # a centred crop of the 12^3 plan: native indices 3..8 stay
+CUT_OFF = dataclasses.replace(CUT, allow_crop=False)
+HALF_OUT = box((3, 3, 0), (9, 9, 6))  # z indices 0..5: half of them (0..2) are outside the final grid
+# 1 on z 0..2 (outside), 3 on z 3..5 (inside): the in-grid share of the summed dose is 9 / 12
+DOSE_SPLIT = np.where(np.arange(12)[:, None, None] < 3, 1.0, 3.0) * HALF_OUT
+
+
+def series_cells(out, folder='plan_1'):
+    """{file: retained cell} of an output plan's or study's series.csv."""
+    return {r['file']: r['retained'] for r in pre.read_series_csv(out / 'SYNTHETICPTA' / folder)[0]}
+
+
+def test_allow_crop_defaults_off_and_adds_no_filename_prefix(tmp_path):
+    assert PreprocessSteps().allow_crop is False
+    write_plan(tmp_path / 'converted')
+    pre.preprocess(tmp_path / 'converted', tmp_path / 'off', dataclasses.replace(SMALL, allow_crop=False))
+    pre.preprocess(tmp_path / 'converted', tmp_path / 'on', dataclasses.replace(SMALL, allow_crop=True))
+    assert listing(tmp_path / 'off' / 'SYNTHETICPTA' / 'plan_1') == listing(tmp_path / 'on' / 'SYNTHETICPTA' / 'plan_1')
+    assert pre.output_name('dose.nii.gz', CUT) == pre.output_name('dose.nii.gz', CUT_OFF)
+
+
+def test_allow_crop_writes_a_plan_whose_dose_and_mask_are_cut_on_the_final_ct_grid(tmp_path, caplog):
+    write_plan(tmp_path / 'converted', dose=DOSE_SPLIT, masks={'ptv': HALF_OUT, 'bladder': box((5, 5, 5), (8, 8, 8))})
+    with caplog.at_level('INFO'):
+        report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    assert (plan_row(report).outcome, plan_row(report).reason) == ('preprocessed', '')
+    folder = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
+    final = sitk.ReadImage(str(folder / pre.output_name(conv.CT_NAME, CUT, ct=True, image=True)))
+    assert final.GetSize() == (6, 6, 6)
+    for name in ('dose', 'ptv', 'bladder'):
+        image = sitk.ReadImage(str(folder / pre.output_name(f'{name}.nii.gz', CUT)))
+        assert (image.GetSize(), image.GetSpacing(), image.GetOrigin(), image.GetDirection()) == \
+            (final.GetSize(), final.GetSpacing(), final.GetOrigin(), final.GetDirection())
+    assert sitk.GetArrayFromImage(sitk.ReadImage(str(folder / pre.output_name('ptv.nii.gz', CUT)))).sum() > 0
+    assert not any('SYNTHETIC' in record.getMessage() for record in caplog.records)
+
+
+def test_retained_is_the_native_in_grid_fraction_of_the_summed_dose_and_of_the_mask(tmp_path):
+    write_plan(tmp_path / 'converted', dose=DOSE_SPLIT, masks={'ptv': HALF_OUT, 'bladder': box((5, 5, 5), (8, 8, 8))})
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    cells = series_cells(tmp_path / 'out')
+    assert cells == {pre.output_name(conv.CT_NAME, CUT, ct=True, image=True): '', pre.output_name('dose.nii.gz', CUT): '0.75',
+                     pre.output_name('ptv.nii.gz', CUT): '0.5', pre.output_name('bladder.nii.gz', CUT): '1.0', 'applicator_a.txt': ''}
+    assert all('np.' not in cell and (not cell or float(cell) == float(cell)) for cell in cells.values())
+    assert plan_row(report).cropped == 2  # the dose and the ptv
+
+
+def test_a_cut_plan_without_allow_crop_still_refuses_and_records_no_cropped_count(tmp_path):
+    write_plan(tmp_path / 'converted', dose=DOSE_SPLIT)
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT_OFF)
+    assert (plan_row(report).outcome, plan_row(report).reason, plan_row(report).cropped) == ('refused', pre.REASON_CROP, '')
+
+
+def test_check_crop_is_called_as_before_without_allow_crop_and_never_with_it(tmp_path, monkeypatch):
+    write_plan(tmp_path / 'converted')
+    calls = []
+    real = pre.check_crop
+    monkeypatch.setattr(pre, 'check_crop', lambda native, final: (calls.append(1), real(native, final))[1])
+    pre.preprocess(tmp_path / 'converted', tmp_path / 'off', dataclasses.replace(SMALL, allow_crop=False))
+    assert len(calls) == 3  # dose and two masks
+    pre.preprocess(tmp_path / 'converted', tmp_path / 'on', dataclasses.replace(SMALL, allow_crop=True))
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize('what', ['dose', 'mask'])
+def test_allow_crop_refuses_a_dose_or_mask_entirely_outside_the_final_grid(tmp_path, what):
+    outside = box((0, 0, 0), (2, 2, 2), value=2.0)  # indices 0..1: outside the kept 3..8
+    plan = dict(dose=outside) if what == 'dose' else dict(masks={'ptv': outside})
+    write_plan(tmp_path / 'converted', **plan)
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_CROP)
+    assert not (tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1').exists()
+
+
+def test_a_retained_of_zero_alone_does_not_refuse_when_the_output_still_holds_voxels(tmp_path):
+    # 2 mm native, 1 mm final, 4 voxels: the one dose voxel (centre x = 3) lies outside the grid (edge at 2), but linear
+    # interpolation puts a quarter of it into the final centre at 1.5
+    single = np.zeros((12, 12, 12))
+    single[6, 6, 7] = 1.0
+    steps = PreprocessSteps(harmonize_spacing=True, final_spacing=(1, 1, 1), reshape=True, new_shape=(4, 4, 4), allow_crop=True)
+    write_plan(tmp_path / 'converted', spacing=2.0, dose=single, masks={})
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    assert (plan_row(report).outcome, plan_row(report).cropped) == ('preprocessed', 1)
+    assert series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', steps)] == '0.0'
+    dose = sitk.ReadImage(str(tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1' / pre.output_name('dose.nii.gz', steps)))
+    assert sitk.GetArrayFromImage(dose).sum() > 0
+
+
+@pytest.mark.parametrize('allow_crop', [False, True])
+def test_a_dose_that_resampling_empties_refuses_with_and_without_allow_crop(tmp_path, allow_crop):
+    # 12 voxels at 1 mm into 5 mm voxels: the final centres (+-2.5 mm) are 2 mm from the one voxel at 0.5 mm, beyond linear reach
+    single = np.zeros((12, 12, 12))
+    single[6, 6, 6] = 1.0
+    steps = PreprocessSteps(harmonize_spacing=True, final_spacing=(5, 5, 5), allow_crop=allow_crop)
+    write_plan(tmp_path / 'converted', dose=single, masks={})
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_CROP)
+    assert not (tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1').exists()
+
+
+def test_allow_crop_with_a_min_mask_retention_above_the_cropped_masks_retention_refuses(tmp_path):
+    write_plan(tmp_path / 'converted', masks={'ptv': HALF_OUT})
+    strict = dataclasses.replace(CUT, min_mask_retention=0.9)
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', strict)
+    assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_MASK_RETENTION)
+    lax = dataclasses.replace(CUT, min_mask_retention=0.4)
+    assert plan_row(pre.preprocess(tmp_path / 'converted', tmp_path / 'out2', lax)).outcome == 'preprocessed'
+
+
+@pytest.mark.parametrize('steps', [PreprocessSteps(allow_crop=True), PreprocessSteps(allow_crop=True, rescale=True, ahe=True)])
+def test_allow_crop_without_a_geometric_step_raises_before_any_mkdir(tmp_path, steps):
+    write_plan(tmp_path / 'converted')
+    with pytest.raises(ValueError) as caught:
+        pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    assert str(caught.value) == (pre.REASON_NO_STEPS if not (steps.rescale or steps.ahe) else pre.REASON_ALLOW_CROP_STEPS)
+    assert not (tmp_path / 'out').exists()
+
+
+def test_the_allow_crop_reason_is_a_fixed_constant_distinct_from_no_steps():
+    assert pre.REASON_ALLOW_CROP_STEPS != pre.REASON_NO_STEPS and 'allow_crop' in pre.REASON_ALLOW_CROP_STEPS
+
+
+@pytest.mark.parametrize('steps', [dataclasses.replace(SMALL, allow_crop=False), dataclasses.replace(SMALL, allow_crop=True),
+                                   dataclasses.replace(CUT, new_shape=(12, 12, 12)), PreprocessSteps(reshape=True, new_shape=(6, 6, 6), allow_crop=True)])
+def test_a_dose_and_mask_away_from_the_edges_have_retained_exactly_one(tmp_path, steps):
+    inner = box((4, 4, 4), (8, 8, 8), value=0.1)  # float32 values whose sum is not exact: the 1.0 is by the bounding-box test
+    write_plan(tmp_path / 'converted', dose=inner, masks={'ptv': box((4, 4, 4), (8, 8, 8))})
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    cells = series_cells(tmp_path / 'out')
+    assert (plan_row(report).outcome, plan_row(report).cropped) == ('preprocessed', 0)
+    assert [cells[pre.output_name(f'{n}.nii.gz', steps)] for n in ('dose', 'ptv')] == ['1.0', '1.0']
+
+
+def test_a_native_dose_grid_larger_than_the_final_grid_with_values_only_inside_has_retained_one_and_cropped_zero(tmp_path):
+    write_plan(tmp_path / 'converted', dose=box((3, 3, 3), (9, 9, 9), value=0.1), masks={})
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    assert series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', CUT)] == '1.0'
+    assert plan_row(report).cropped == 0
+
+
+def test_a_negligible_tail_past_the_edge_counts_as_cropped_even_when_retained_rounds_to_one(tmp_path):
+    tail = box((3, 3, 3), (9, 9, 9), value=1.0)
+    tail[3, 6, 2] = 1e-9  # one native voxel centre just outside the kept indices 3..8
+    write_plan(tmp_path / 'converted', dose=tail, masks={})
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    assert plan_row(report).cropped == 1
+    assert 0.99999 < float(series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', CUT)]) <= 1.0
+
+
+def test_native_retained_of_an_empty_image_is_one_and_of_a_cut_box_the_in_grid_share():
+    final = blank((6, 6, 6), origin=(-2.5, -2.5, -2.5))  # centres -2.5..2.5: native centres 0..11 mm shifted below
+    native = make_image(np.zeros((12, 12, 12)), origin=(-5.5, -5.5, -5.5))
+    assert pre.native_retained(native, final) == 1.0
+    cut = make_image(HALF_OUT, origin=(-5.5, -5.5, -5.5))
+    assert pre.native_retained(cut, final) == 0.5
+
+
+@pytest.mark.parametrize('axis', range(3))
+@pytest.mark.parametrize(('first', 'share'), [(-1.5, 0.5), (-0.5, 1.0), (8.5, 0.5), (7.5, 1.0)])  # two voxels of 1: the one centred at 9.5 is out, at -0.5 in
+def test_native_retained_keeps_the_low_half_voxel_edge_and_drops_the_high_one(axis, first, share):
+    final = blank((10, 10, 10))
+    origin = [4.0, 4.0, 4.0]
+    origin[axis] = first
+    size = [1, 1, 1]
+    size[axis] = 2
+    native = make_image(np.ones(size[::-1]), origin=tuple(origin))
+    assert pre.native_retained(native, final) == share
+
+
+def test_a_non_geometric_run_leaves_retained_and_cropped_blank(tmp_path):
+    write_plan(tmp_path / 'converted')
+    write_study_tree(tmp_path / 'converted')
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', PreprocessSteps(rescale=True))
+    assert {r.cropped for r in report.rows} == {''}
+    assert {r['cropped'] for r in report_rows(tmp_path / 'out')} == {''}
+    for folder in ('plan_1', 'study_1'):
+        assert set(series_cells(tmp_path / 'out', folder).values()) == {''}
+
+
+def test_the_cropped_column_is_an_int_on_preprocessed_plan_rows_only(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted, dose=DOSE_SPLIT)  # a cut dose
+    write_plan(converted, plan='plan_2', masks={'ptv': HALF_OUT, 'bladder': HALF_OUT})  # two cut masks
+    write_plan(converted, plan='plan_3')  # nothing cut
+    write_plan(converted, plan='plan_4', masks={'ptv': box((0, 0, 0), (2, 2, 2))})  # refused
+    write_study_tree(converted)
+    report = pre.preprocess(converted, out, CUT)
+    assert [(r.folder, r.outcome, r.cropped) for r in report.rows] == [
+        ('plan_1', 'preprocessed', 1), ('plan_2', 'preprocessed', 2), ('plan_3', 'preprocessed', 0), ('plan_4', 'refused', ''),
+        ('study_1/series_CT_1', 'preprocessed', ''), ('study_1/series_MR_1', 'preprocessed', '')]
+    assert [r['cropped'] for r in report_rows(out)] == ['1', '2', '0', '', '', '']
+    again = pre.preprocess(converted, out, CUT)  # the patient's output exists: a patient-level row
+    assert [(r.folder, r.outcome, r.cropped) for r in again.rows] == [('', 'skipped', '')]
+    assert [r['cropped'] for r in report_rows(out)] == ['']

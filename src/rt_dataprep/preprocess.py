@@ -12,6 +12,7 @@ preprocess() reads each plan's series.csv (kinds ct, dose, mask, applicator, lin
 and writes a separate tree plus preprocess_report.csv in the output root. Log lines and exceptions carry fixed REASON_ constants only; the report
 is the one place the patient folder names appear.
 """
+import bisect
 import csv
 import logging
 import os
@@ -37,11 +38,13 @@ KINDS = ('ct', 'dose', 'mask', 'applicator', 'line')
 
 REASON_OUTSIDE_INPUT = 'output root is the converted root or inside it'
 REASON_NO_STEPS = 'no preprocessing step is on'
+REASON_ALLOW_CROP_STEPS = 'allow_crop needs a geometric step: resample, harmonize_spacing or reshape'
 REASON_NO_SERIES_STEPS = 'no preprocessing step that is on applies to an MR or PT series'
 REASON_EXISTS = 'output folder already exists'
 REASON_NAME_CLAIMED = 'another folder of this run already maps to this output name (case-insensitive)'
 REASON_NO_CASES = 'patient folder holds no plan or study folder with a series.csv'
 STUDY_FOLDER = r'study_[0-9]+'
+PREPROCESSED_SERIES_COLUMNS = [*conv.SERIES_COLUMNS, 'retained']  # preprocess's series.csv; blank until a step sets it
 REASON_NO_CT = 'series.csv does not list exactly one ct file'
 REASON_DOSE_COUNT = 'series.csv lists more than one dose file'
 REASON_KIND = 'series.csv has a row of an unknown kind'
@@ -74,6 +77,7 @@ class PreprocessSteps:
     ahe_clip_limit: float = 0.05
     min_mask_retention: float | None = None  # optional minimum output/input physical foreground volume; no clinical default
     legacy_linear_masks: bool = False
+    allow_crop: bool = False  # crop a dose or mask that extends past the final grid instead of refusing the plan; `retained` records how much is kept
     series_fov_mask: bool = False  # not a step: uint8 support masks for planning CT, study and aligned plan images
     new_spacing: tuple = (1, 1, 1)  # mm, (x, y, z)
     final_spacing: tuple = (1.25, 1.25, 1.25)
@@ -365,6 +369,7 @@ class PreprocessRow:
     reason: str = ''
     files: list = field(default_factory=list)
     skipped_series: int = 0  # registered series left out of a plan (unusable matrix, no overlap, unreadable file)
+    cropped: int | str = ''  # preprocessed plan row of a geometric run: its dose and mask files that extend past the final grid; blank otherwise
 
 
 @dataclass
@@ -387,6 +392,8 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
         raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
     if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape or steps.ahe):
         raise ValueError(REASON_NO_STEPS)
+    if steps.allow_crop and not (steps.resample or steps.harmonize_spacing or steps.reshape):
+        raise ValueError(REASON_ALLOW_CROP_STEPS)
     if steps.ahe:
         check_ahe_options(*ahe_options(steps))
     if steps.min_mask_retention is not None:
@@ -424,8 +431,8 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
         pool.run(workers, tasks, handle)
     finally:  # Ctrl-C too: the report lists what was done
         rows = conv.rows_in_order(len(folders), refused, {i: r[0] for i, r in results.items()})
-        write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'],
-                     ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows))
+        write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series', 'cropped'],
+                     ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series, r.cropped] for r in rows))
     replaced, kept = (sum(r[1] == status for r in results.values()) for status in ('replaced', 'kept'))
     imaging_rows = [r for r in rows if r.folder.startswith('study_')]
     plan_rows = [r for r in rows if r.folder and not r.folder.startswith('study_')]
@@ -489,7 +496,7 @@ def preprocess_one(plan_dir, out_dir, steps):
     """The PreprocessRow of one plan. A refusal leaves no `out_dir`; an OSError or REASON_INTERNAL is the patient's and propagates."""
     reason = None
     try:
-        files, skipped = preprocess_plan(plan_dir, out_dir, steps)
+        files, skipped, cropped = preprocess_plan(plan_dir, out_dir, steps)
     except CaseRefused as exc:
         if str(exc) == REASON_INTERNAL:
             raise
@@ -499,7 +506,7 @@ def preprocess_one(plan_dir, out_dir, steps):
             shutil.rmtree(out_dir)
         log.warning('preprocess: plan refused: %s', reason)
         return PreprocessRow(plan_dir.parent.name, plan_dir.name, conv.OUTCOME_REFUSED, reason)
-    return PreprocessRow(plan_dir.parent.name, plan_dir.name, OUTCOME_PREPROCESSED, files=files, skipped_series=skipped)
+    return PreprocessRow(plan_dir.parent.name, plan_dir.name, OUTCOME_PREPROCESSED, files=files, skipped_series=skipped, cropped=cropped)
 
 
 def preprocess_study(study_dir, out_dir, steps):
@@ -527,11 +534,11 @@ def preprocess_study(study_dir, out_dir, steps):
             log.warning('preprocess: series refused: %s', refusal)
             rows.append(PreprocessRow(patient, folder, conv.OUTCOME_REFUSED, str(refusal)))
             continue
-        written.append(row | {'file': name})
+        written.append(row | {'file': name, 'retained': ''})
         rows.append(PreprocessRow(patient, folder, OUTCOME_PREPROCESSED,
                                   files=[name, *([f'fovmask_{name}'] if steps.series_fov_mask else [])]))
     if written:
-        conv.write_series_csv(written, out_dir / conv.SERIES_NAME)
+        conv.write_series_csv(written, out_dir / conv.SERIES_NAME, PREPROCESSED_SERIES_COLUMNS)
         next(r for r in rows if r.outcome == OUTCOME_PREPROCESSED).files.append(conv.SERIES_NAME)
     return rows
 
@@ -613,13 +620,13 @@ def check_series_rows(series):
 
 
 def read_series_csv(folder):
-    """(rows, malformed) of a plan's or study's series.csv: malformed when unparseable, other columns, or a cell is missing or extra."""
+    """(rows, malformed) of a plan's or study's series.csv: malformed when unparseable, other columns than SERIES_COLUMNS with or without the trailing `retained`, or a cell is missing or extra."""
     malformed = False
     with open(folder / conv.SERIES_NAME, newline='', encoding='utf-8') as handle:
         try:
             reader = csv.DictReader(handle)
             rows = list(reader)
-            malformed = reader.fieldnames != conv.SERIES_COLUMNS or any(None in row or None in row.values() for row in rows)
+            malformed = reader.fieldnames not in (conv.SERIES_COLUMNS, PREPROCESSED_SERIES_COLUMNS) or any(None in row or None in row.values() for row in rows)
         except (ValueError, csv.Error):  # UnicodeDecodeError is a ValueError
             rows, malformed = [], True
     return rows, malformed
@@ -650,32 +657,59 @@ def has_voxels(image):
     return bool(values.any())
 
 
-def check_crop(native, final):
-    """Refuse (REASON_CROP) when a nonzero voxel centre of `native` falls outside final's buffer, continuous index outside [-0.5, n-0.5)."""
+def crosses_final(native, final):
+    """True when a nonzero voxel centre of `native` falls outside final's buffer, continuous index outside [-0.5, n-0.5)."""
     values = sitk.GetArrayViewFromImage(native)
     nonzero = values != 0
     if not nonzero.any():
-        return
+        return False
     # Same direction as the CT, so each final axis follows one native axis: the extreme voxels sit at the nonzero bounding box.
     hits = [np.flatnonzero(nonzero.any(axis=tuple(a for a in range(3) if a != axis))) for axis in range(3)]  # array axes z, y, x
     low = [int(hit[0]) for hit in hits][::-1]
     high = [int(hit[-1]) for hit in hits][::-1]
     first = final.TransformPhysicalPointToContinuousIndex(native.TransformIndexToPhysicalPoint(low))
     last = final.TransformPhysicalPointToContinuousIndex(native.TransformIndexToPhysicalPoint(high))
-    if min(first) < -0.5 or any(v >= n - 0.5 for v, n in zip(last, final.GetSize(), strict=True)):
+    return bool(min(first) < -0.5 or any(v >= n - 0.5 for v, n in zip(last, final.GetSize(), strict=True)))
+
+
+def check_crop(native, final):
+    """Refuse (REASON_CROP) when a nonzero voxel centre of `native` falls outside final's buffer (crosses_final)."""
+    if crosses_final(native, final):
         raise CaseRefused(REASON_CROP)
 
 
+def native_retained(native, final):
+    """The part of `native` (summed values, float64) whose voxel centres fall inside final's buffer, over the whole; 1.0 for an empty image.
+    Same direction as the CT, so each native axis maps increasingly onto one final axis: bisect the first and last in-grid index per axis."""
+    def run():
+        total = sitk.GetArrayViewFromImage(native).sum(dtype=np.float64)
+        if not total:
+            return 1.0
+        def centre(axis, k):  # continuous final index along `axis` of native index k (the other axes at 0)
+            index = [0, 0, 0]
+            index[axis] = k
+            return final.TransformPhysicalPointToContinuousIndex(native.TransformIndexToPhysicalPoint(index))[axis]
+        bounds = []
+        for axis, (n, length) in enumerate(zip(final.GetSize(), native.GetSize(), strict=True)):
+            start = bisect.bisect_left(range(length), True, key=lambda k: centre(axis, k) >= -0.5)
+            stop = bisect.bisect_left(range(length), True, key=lambda k: centre(axis, k) >= n - 0.5)
+            bounds.append(slice(start, stop))
+        inside = sitk.GetArrayViewFromImage(native)[bounds[2], bounds[1], bounds[0]]  # array axes z, y, x
+        return float(inside.sum(dtype=np.float64) / total)
+    return quiet_call(run, REASON_INTERNAL)
+
+
 def preprocess_plan(plan_dir, out_dir, steps):
-    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.csv last; the number of series left out). CaseRefused on a refusal."""
+    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.csv last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run). CaseRefused on a refusal."""
     kept, ct, series = check_rows(plan_dir)
     if too_small(ct, steps):
         raise CaseRefused(REASON_TOO_SMALL)
     geometric = steps.resample or steps.harmonize_spacing or steps.reshape
     out_dir.mkdir()
-    files, series_rows = [], []
+    files, series_rows, cropped = [], [], 0
     for row in kept:  # the CT first: its final grid is the reference of the rest
         kind, source = row['kind'], plan_dir / row['file']
+        cell = ''  # series.csv `retained`: only a dose or mask of a geometric run
         name = row['file'] if kind in ('applicator', 'line') else output_name(row['file'], steps, ct=kind == 'ct', image=kind == 'ct')
         if kind == 'ct':
             final = process_ct(read_image(source), steps)
@@ -684,13 +718,19 @@ def preprocess_plan(plan_dir, out_dir, steps):
             shutil.copyfile(source, out_dir / name)
         else:  # one image at a time: read, resampled, written, released
             native = read_image(source)
-            check_crop(native, final)
+            if steps.allow_crop:
+                crossed = crosses_final(native, final)
+            else:
+                check_crop(native, final)
+                crossed = False
+            cropped += crossed
+            cell = repr(native_retained(native, final) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
             image = process_dose(native, final) if kind == 'dose' else process_mask(native, final, steps)
-            if kind == 'mask' and has_voxels(native) and not has_voxels(image):
+            if has_voxels(native) and not has_voxels(image):
                 raise CaseRefused(REASON_CROP)
             if kind == 'mask' and steps.min_mask_retention is not None:
-                retained = mask_retention(native, image, steps.legacy_linear_masks)
-                if retained < steps.min_mask_retention and not np.isclose(retained, steps.min_mask_retention, rtol=1e-6, atol=0):
+                ratio = mask_retention(native, image, steps.legacy_linear_masks)
+                if ratio < steps.min_mask_retention and not np.isclose(ratio, steps.min_mask_retention, rtol=1e-6, atol=0):
                     raise CaseRefused(REASON_MASK_RETENTION)
             conv.write_atomic(image, out_dir / name)
             del native, image
@@ -699,7 +739,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
             mask_name = f'fovmask_{name}'
             conv.write_atomic(image_fov_mask(ct, steps), out_dir / mask_name)
             files.append(mask_name)
-        series_rows.append(row | {'file': name})
+        series_rows.append(row | {'file': name, 'retained': cell})
     skipped = 0
     for row in series:  # one series at a time, after the CT: read, resampled, written, released
         matrix = reg_matrix_array(row['reg_matrix'])
@@ -721,8 +761,8 @@ def preprocess_plan(plan_dir, out_dir, steps):
             if fov is not None:  # the mask is listed after its series, not in series.csv
                 conv.write_atomic(fov, out_dir / f'fovmask_{name}')
                 files.append(f'fovmask_{name}')
-            series_rows.append(row | {'file': name, 'reg_matrix': IDENTITY, 'frame_of_reference_uid': kept[0]['frame_of_reference_uid']})
+            series_rows.append(row | {'file': name, 'retained': '', 'reg_matrix': IDENTITY, 'frame_of_reference_uid': kept[0]['frame_of_reference_uid']})
             del image
         del native, fov
-    conv.write_series_csv(series_rows, out_dir / conv.SERIES_NAME)
-    return [*files, conv.SERIES_NAME], skipped
+    conv.write_series_csv(series_rows, out_dir / conv.SERIES_NAME, PREPROCESSED_SERIES_COLUMNS)
+    return [*files, conv.SERIES_NAME], skipped, cropped if geometric else ''

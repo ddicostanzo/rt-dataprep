@@ -729,11 +729,11 @@ def _series_rows(plan, struct, ct_head, dose_heads, rois, files):
     return rows
 
 
-def write_series_csv(rows, path):
-    """`rows` (dicts of SERIES_COLUMNS) at `path`, written atomically; a failure raises OSError(REASON_WRITE)."""
+def write_series_csv(rows, path, columns=SERIES_COLUMNS):
+    """`rows` (dicts of `columns`) at `path`, written atomically; a failure raises OSError(REASON_WRITE)."""
     def write(temp):
         with open(temp, 'w', newline='', encoding='utf-8') as handle:  # a description the locale cannot encode
-            writer = csv.DictWriter(handle, SERIES_COLUMNS)
+            writer = csv.DictWriter(handle, columns)
             writer.writeheader()
             writer.writerows(rows)
     _atomic(write, path)
