@@ -38,3 +38,15 @@ Files: src/rt_dataprep/preprocess.py, tests/test_preprocess.py (tests/test_serie
 - Test geometry gotcha: FOUR_STEPS' final grid (1.25 mm voxels) puts the native centres exactly on the +-0.5 index ties; the new
   cropping tests use reshape-only `CUT` (12^3 -> 6^3, native indices 3..8 kept, no ties). A dose that survives with retained 0.0
   needs native 2 mm voxels, final 1 mm (linear leak into the grid); a dose that resampling empties: final_spacing 5 mm with one native voxel.
+
+## task-03
+
+Files: src/rt_dataprep/__main__.py, tests/test_cli.py, README.md.
+
+- Grid options use argparse `type=` functions (`positive_ints`, `positive_float`, nargs=3), so bad values and wrong counts are argparse
+  usage errors (exit 2). Absent options are `None` and only the given ones are passed to PreprocessSteps (`**grids`), so the dataclass
+  defaults stay the single source. Grid-without-step and `--allow-crop` without a geometric step are `parser.error` before `preprocess`.
+- The existing help test cut each flag's entry at the next ` --`, which the new "(set it with --new-spacing)" text breaks. It now splits
+  `--help` output per option (`re.split(r'\n  (?=-)')`), flattens, and also asserts the size option is named (argparse can wrap at the hyphen).
+- End-to-end test calls `cli.main` in-process (no subprocess seam needed: `--new-shape` sets the small grid); imports DOSE_SPLIT, HALF_OUT,
+  box, series_cells from test_preprocess.

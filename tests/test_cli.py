@@ -10,7 +10,7 @@ import sys
 import pytest
 import SimpleITK as sitk
 from test_convert import PID, hide_entries, make_plan
-from test_preprocess import FOUR_STEPS, SMALL, report_rows, write_plan
+from test_preprocess import DOSE_SPLIT, FOUR_STEPS, HALF_OUT, SMALL, box, report_rows, series_cells, write_plan
 
 from rt_dataprep import convert as conv
 from rt_dataprep import dicom_io
@@ -174,11 +174,12 @@ def test_preprocess_help_lists_the_five_step_flags_with_their_values_and_prefixe
     assert result.returncode == 0
     text = ' '.join(result.stdout.split())
     assert 'at least one step flag' in text and '--legacy-rnt' not in text
-    for flag, value, prefix in [('--initial-resample', '1 mm', 'initialresample_'), ('--rescale', '(HU + 1024) / 4096', 'rescale_'),
-                                ('--ahe', 'CLAHE', 'ahe_'), ('--resample', '1.25 mm', 'resample_'), ('--reshape', '701 x 701 x 433', 'reshape_')]:
-        entry = text[text.index(f'{flag} ') + len(flag):]
-        entry = entry[:entry.index(' --')] if ' --' in entry else entry  # this flag's help, up to the next option
-        assert value in entry and prefix in entry, flag
+    entries = re.split(r'\n  (?=-)', result.stdout)  # one help entry per option, whatever options its text names
+    for flag, value, prefix, size in [('--initial-resample', '1 mm', 'initialresample_', '--new-spacing'), ('--rescale', '(HU + 1024) / 4096', 'rescale_', ''),
+                                      ('--ahe', 'CLAHE', 'ahe_', ''), ('--resample', '1.25 mm', 'resample_', '--final-spacing'),
+                                      ('--reshape', '701 x 701 x 433', 'reshape_', '--new-shape')]:
+        entry = ' '.join(next(e for e in entries if e.startswith(flag + ' ')).split())
+        assert value in entry and prefix in entry and size in entry.replace('- ', '-'), flag  # argparse may wrap at the hyphen
 
 
 def test_preprocess_ahe_alone_equalizes_the_ct_and_copies_dose_and_masks(tmp_path, converted):
@@ -225,6 +226,65 @@ def test_each_step_flag_sets_exactly_its_field(flags, monkeypatch):
     monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: seen.append(args))
     cli.main(['preprocess', 'a', 'b', *flags])
     assert seen == [('a', 'b', pre.PreprocessSteps(**{STEP_FIELDS[flag]: True for flag in flags}))]
+
+
+GRID_OPTIONS = {'--new-shape': ('--reshape', 'new_shape', (4, 5, 6)), '--new-spacing': ('--initial-resample', 'new_spacing', (0.5, 0.75, 2.0)),
+                '--final-spacing': ('--resample', 'final_spacing', (1.5, 2.5, 3.5))}
+
+
+def steps_from(argv, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: seen.append(args))
+    cli.main(['preprocess', 'a', 'b', *argv])
+    return seen[0][2]
+
+
+def test_allow_crop_flag_sets_the_field_and_is_off_without_it(monkeypatch):
+    assert steps_from(['--reshape'], monkeypatch).allow_crop is False
+    assert steps_from(['--reshape', '--allow-crop'], monkeypatch) == pre.PreprocessSteps(reshape=True, allow_crop=True)
+
+
+@pytest.mark.parametrize('option', GRID_OPTIONS)
+def test_each_grid_option_sets_its_field_in_x_y_z_order(option, monkeypatch):
+    step, field, value = GRID_OPTIONS[option]
+    got = steps_from([step, option, *map(str, value)], monkeypatch)
+    assert getattr(got, field) == value and all(type(v) is type(w) for v, w in zip(getattr(got, field), value, strict=True))
+    assert got == dataclasses.replace(steps_from([step], monkeypatch), **{field: value})
+
+
+def test_the_grid_defaults_are_unchanged_without_the_options(monkeypatch):
+    got = steps_from(list(FOUR_FLAGS), monkeypatch)
+    assert (got.new_shape, got.new_spacing, got.final_spacing) == ((701, 701, 433), (1, 1, 1), (1.25, 1.25, 1.25))
+
+
+@pytest.mark.parametrize('argv', [
+    ['--reshape', '--new-spacing', '1', '1', '1'], ['--initial-resample', '--new-shape', '1', '1', '1'], ['--reshape', '--final-spacing', '1', '1', '1'],
+    ['--resample', '--new-shape', '1', '1', '1'], ['--rescale', '--new-spacing', '1', '1', '1'], ['--final-spacing', '1', '1', '1'],
+    ['--rescale', '--allow-crop'], ['--ahe', '--allow-crop'], ['--allow-crop'],
+    ['--reshape', '--new-shape', '0', '1', '1'], ['--reshape', '--new-shape', '1', '-2', '1'], ['--reshape', '--new-shape', '1.5', '1', '1'],
+    ['--reshape', '--new-shape', 'a', '1', '1'], ['--reshape', '--new-shape', '1', '1'], ['--reshape', '--new-shape', '1', '1', '1', '1'],
+    ['--initial-resample', '--new-spacing', '0', '1', '1'], ['--initial-resample', '--new-spacing', '1', '-1', '1'],
+    ['--initial-resample', '--new-spacing', '1', '1', 'nan'], ['--initial-resample', '--new-spacing', 'inf', '1', '1'],
+    ['--initial-resample', '--new-spacing', '1', '1'], ['--resample', '--final-spacing', '1', '1', '0'], ['--resample', '--final-spacing', '1', 'inf', '1'],
+    ['--resample', '--final-spacing', 'nan', '1', '1'], ['--resample', '--final-spacing', '1', '1', '-0.5'],
+])
+def test_grid_option_and_allow_crop_usage_errors_exit_2_before_any_work(argv, monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: seen.append(args))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(['preprocess', 'a', 'b', *argv])
+    assert exc.value.code == 2 and seen == []
+    assert 'usage:' in capsys.readouterr().err
+
+
+def test_allow_crop_with_new_shape_writes_a_cut_dose_end_to_end(tmp_path):
+    write_plan(tmp_path / 'converted', dose=DOSE_SPLIT, masks={'ptv': HALF_OUT, 'bladder': box((5, 5, 5), (8, 8, 8))})
+    out = tmp_path / 'out'
+    cli.main(['preprocess', str(tmp_path / 'converted'), str(out), '--reshape', '--new-shape', '6', '6', '6', '--allow-crop'])
+    (row,) = report_rows(out)
+    assert (row['outcome'], row['reason']) == (pre.OUTCOME_PREPROCESSED, '') and int(row['cropped']) >= 1
+    steps = pre.PreprocessSteps(reshape=True)
+    assert float(series_cells(out)[pre.output_name('dose.nii.gz', steps)]) < 1
 
 
 def test_legacy_rnt_is_an_argparse_usage_error(capsys):

@@ -1,5 +1,6 @@
 import argparse
 import logging
+import math
 import sys
 from pathlib import Path
 
@@ -34,6 +35,20 @@ def positive_int(text):
     return value
 
 
+def positive_ints(text):
+    value = int(text) if text.isascii() and text.isdigit() else 0
+    if value < 1:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return value
+
+
+def positive_float(text):
+    value = float(text)  # a ValueError is argparse's "invalid value"
+    if not 0 < value < math.inf:  # also rejects nan
+        raise argparse.ArgumentTypeError('must be a positive finite number')
+    return value
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='rt_dataprep', description='Turn radiotherapy DICOM exports into ML-ready cases.')
     commands = parser.add_subparsers(dest='command', required=True)
@@ -52,11 +67,16 @@ def main(argv=None):
     sub.add_argument('out', help='output root, outside the converted root')
     sub.add_argument('--workers', type=positive_int, default=1, help=WORKERS_HELP)
     sub.add_argument('--overwrite', action='store_true', help=OVERWRITE_HELP)
-    sub.add_argument('--initial-resample', action='store_true', help='step: resample to 1 mm spacing; writes the initialresample_ prefix')
+    sub.add_argument('--initial-resample', action='store_true', help='step: resample to 1 mm spacing (set it with --new-spacing); writes the initialresample_ prefix')
     sub.add_argument('--rescale', action='store_true', help='step: rescale a CT to (HU + 1024) / 4096; writes the rescale_ prefix; as the only step, MR/PT study series are refused')
     sub.add_argument('--ahe', action='store_true', help='step: CLAHE adaptive histogram equalization of every image volume; writes the ahe_ prefix')
-    sub.add_argument('--resample', action='store_true', help='step: resample to 1.25 mm spacing; writes the resample_ prefix')
-    sub.add_argument('--reshape', action='store_true', help='step: centred crop/pad to 701 x 701 x 433 voxels; writes the reshape_ prefix')
+    sub.add_argument('--resample', action='store_true', help='step: resample to 1.25 mm spacing (set it with --final-spacing); writes the resample_ prefix')
+    sub.add_argument('--reshape', action='store_true', help='step: centred crop/pad to 701 x 701 x 433 voxels (set it with --new-shape); writes the reshape_ prefix')
+    sub.add_argument('--new-shape', type=positive_ints, nargs=3, metavar=('X', 'Y', 'Z'), help='--reshape size in voxels (default 701 701 433); requires --reshape')
+    sub.add_argument('--new-spacing', type=positive_float, nargs=3, metavar=('X', 'Y', 'Z'), help='--initial-resample spacing in mm (default 1 1 1); requires --initial-resample')
+    sub.add_argument('--final-spacing', type=positive_float, nargs=3, metavar=('X', 'Y', 'Z'), help='--resample spacing in mm (default 1.25 1.25 1.25); requires --resample')
+    sub.add_argument('--allow-crop', action='store_true',
+                     help='crop a dose or mask that extends past the final grid, not refuse the plan; needs --initial-resample, --resample or --reshape')
     sub.add_argument('--ahe-kernel-mm', type=float, nargs=3, metavar=('X', 'Y', 'Z'), help='AHE window in physical mm; requires --ahe')
     sub.add_argument('--ahe-bins', type=int, default=None, help='AHE histogram bins (default 128, at least 2); requires --ahe')
     sub.add_argument('--ahe-clip-limit', type=float, default=None, help='AHE clip limit (default 0.05, from 0 to 1); requires --ahe')
@@ -80,11 +100,19 @@ def main(argv=None):
         elif args.command == 'preprocess':
             if not args.ahe and any(v is not None for v in (args.ahe_kernel_mm, args.ahe_bins, args.ahe_clip_limit)):
                 parser.error('AHE options require --ahe')
+            for option, value, step in (('--new-shape', args.new_shape, args.reshape), ('--new-spacing', args.new_spacing, args.initial_resample),
+                                        ('--final-spacing', args.final_spacing, args.resample)):
+                if value is not None and not step:
+                    parser.error(f'{option} requires its step flag')
+            if args.allow_crop and not (args.initial_resample or args.resample or args.reshape):
+                parser.error('--allow-crop requires --initial-resample, --resample or --reshape')
+            grids = {name: tuple(value) for name, value in (('new_shape', args.new_shape), ('new_spacing', args.new_spacing),
+                                                           ('final_spacing', args.final_spacing)) if value is not None}
             # flags are named after the output prefix: --initial-resample is the resample field, --resample is harmonize_spacing
             preprocess(args.converted, args.out, PreprocessSteps(
                 resample=args.initial_resample, rescale=args.rescale, ahe=args.ahe, harmonize_spacing=args.resample, reshape=args.reshape,
                 legacy_linear_masks=args.legacy_linear_masks, series_fov_mask=args.series_fov_mask,
-                min_mask_retention=args.min_mask_retention,
+                min_mask_retention=args.min_mask_retention, allow_crop=args.allow_crop, **grids,
                 ahe_kernel_mm=None if args.ahe_kernel_mm is None else tuple(args.ahe_kernel_mm),
                 ahe_bins=128 if args.ahe_bins is None else args.ahe_bins,
                 ahe_clip_limit=0.05 if args.ahe_clip_limit is None else args.ahe_clip_limit), workers=args.workers, overwrite=args.overwrite)
