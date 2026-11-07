@@ -267,6 +267,7 @@ def test_the_grid_defaults_are_unchanged_without_the_options(monkeypatch):
     ['--initial-resample', '--new-spacing', '1', '1', 'nan'], ['--initial-resample', '--new-spacing', 'inf', '1', '1'],
     ['--initial-resample', '--new-spacing', '1', '1'], ['--resample', '--final-spacing', '1', '1', '0'], ['--resample', '--final-spacing', '1', 'inf', '1'],
     ['--resample', '--final-spacing', 'nan', '1', '1'], ['--resample', '--final-spacing', '1', '1', '-0.5'],
+    ['--initial-resample', '--new-spacing', '1e-4', '1', '1'], ['--resample', '--final-spacing', '1', '0.09', '1'],
 ])
 def test_grid_option_and_allow_crop_usage_errors_exit_2_before_any_work(argv, monkeypatch, capsys):
     seen = []

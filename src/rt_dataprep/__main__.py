@@ -42,10 +42,10 @@ def positive_ints(text):
     return value
 
 
-def positive_float(text):
+def spacing_mm(text):
     value = float(text)  # a ValueError is argparse's "invalid value"
-    if not 0 < value < math.inf:  # also rejects nan
-        raise argparse.ArgumentTypeError('must be a positive finite number')
+    if not 0.1 <= value < math.inf:  # also rejects nan; a finer grid only runs out of memory (#229)
+        raise argparse.ArgumentTypeError('must be a finite spacing of at least 0.1 mm')
     return value
 
 
@@ -73,8 +73,8 @@ def main(argv=None):
     sub.add_argument('--resample', action='store_true', help='step: resample to 1.25 mm spacing (set it with --final-spacing); writes the resample_ prefix')
     sub.add_argument('--reshape', action='store_true', help='step: centred crop/pad to 701 x 701 x 433 voxels (set it with --new-shape); writes the reshape_ prefix')
     sub.add_argument('--new-shape', type=positive_ints, nargs=3, metavar=('X', 'Y', 'Z'), help='--reshape size in voxels (default 701 701 433); requires --reshape')
-    sub.add_argument('--new-spacing', type=positive_float, nargs=3, metavar=('X', 'Y', 'Z'), help='--initial-resample spacing in mm (default 1 1 1); requires --initial-resample')
-    sub.add_argument('--final-spacing', type=positive_float, nargs=3, metavar=('X', 'Y', 'Z'), help='--resample spacing in mm (default 1.25 1.25 1.25); requires --resample')
+    sub.add_argument('--new-spacing', type=spacing_mm, nargs=3, metavar=('X', 'Y', 'Z'), help='--initial-resample spacing in mm (default 1 1 1); requires --initial-resample')
+    sub.add_argument('--final-spacing', type=spacing_mm, nargs=3, metavar=('X', 'Y', 'Z'), help='--resample spacing in mm (default 1.25 1.25 1.25); requires --resample')
     sub.add_argument('--allow-crop', action='store_true',
                      help='crop a dose or mask that extends past the final grid, not refuse the plan; needs --initial-resample, --resample or --reshape')
     sub.add_argument('--ahe-kernel-mm', type=float, nargs=3, metavar=('X', 'Y', 'Z'), help='AHE window in physical mm; requires --ahe')
