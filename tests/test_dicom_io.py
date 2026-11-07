@@ -665,8 +665,8 @@ def test_read_failure_swallows_a_missing_file(tmp_path):
 def test_read_failure_swallows_a_file_that_vanishes_before_the_reread(tmp_path, monkeypatch, code):
     bad = tmp_path / 'gone.bin'
     bad.write_bytes(b'x')
-    fail_python_open(monkeypatch, bad, OSError(code, 'gone', str(bad)))
-    assert dicom_io.read_failure(bad) is None
+    modes = fail_python_open(monkeypatch, bad, OSError(code, 'gone', str(bad)))
+    assert dicom_io.read_failure(bad) is None and modes == ['rb']
 
 
 @pytest.mark.parametrize('error', [PermissionError(errno.EACCES, 'forced'), OSError(errno.EIO, 'forced')])
@@ -722,6 +722,21 @@ def test_entry_is_ignores_ebadf_and_raises_every_other_error(tmp_path, monkeypat
         with pytest.raises(OSError) as raised:
             dicom_io.entry_is(tmp_path / 'target', 'dir')
         assert raised.value.errno == code
+
+
+@pytest.mark.parametrize('winerror', [21, 123, 1921])
+def test_entry_is_answers_false_for_the_windows_errors_python_reads_as_not_there(tmp_path, monkeypatch, winerror):
+    """Windows' not-ready, bad-name and unresolvable-link errors carry an errno Python ignores elsewhere (#215)."""
+    real = Path.stat
+
+    def stat(self, *, follow_symlinks=True):
+        if self.name != 'target':
+            return real(self, follow_symlinks=follow_symlinks)
+        error = OSError(errno.EINVAL, 'forced')
+        error.winerror = winerror  # set by hand: only Windows builds the attribute
+        raise error
+    monkeypatch.setattr(Path, 'stat', stat)
+    assert dicom_io.entry_is(tmp_path / 'target', 'file') is False
 
 
 def test_entry_is_raises_permission_error_for_a_parent_without_search_permission_twin(tmp_path, monkeypatch):
