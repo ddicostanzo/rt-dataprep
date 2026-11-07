@@ -192,7 +192,7 @@ uv run python -m rt_dataprep split /secure/preprocessed --test-size 0.2 --val-si
 | `--resample` | Resample to 1.25 mm spacing (`--final-spacing X Y Z`) | `resample_` |
 | `--reshape` | Centred crop/pad to **701 × 701 × 433 voxels (x, y, z)** (`--new-shape X Y Z`) | `reshape_` |
 
-`--new-spacing` and `--final-spacing` take positive finite millimetre values, `--new-shape` positive integers, all in x y z
+`--new-spacing` and `--final-spacing` take finite millimetre values of at least 0.1, `--new-shape` positive integers, all in x y z
 order. Each is refused unless its step flag (`--initial-resample`, `--resample`, `--reshape`) is also given; without them the
 defaults above apply.
 

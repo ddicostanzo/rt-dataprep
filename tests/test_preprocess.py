@@ -425,7 +425,7 @@ def test_a_line_file_is_copied_unchanged_under_its_own_name(tmp_path):
     done = out / 'SYNTHETICPTA' / 'plan_1'
     assert (done / 'refline.nii.gz').read_bytes() == APPLICATOR_BYTES
     with open(done / 'series.csv', newline='') as f:
-        assert [r['kind'] for r in csv.DictReader(f) if r['file'] == 'refline.nii.gz'] == ['line']
+        assert [(r['kind'], r['retained']) for r in csv.DictReader(f) if r['file'] == 'refline.nii.gz'] == [('line', '')]  # a geometric run leaves a line's retained blank
 
 
 def test_four_steps_write_the_prefixed_files_and_leave_the_input_alone(tmp_path):
