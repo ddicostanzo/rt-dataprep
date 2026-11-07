@@ -334,7 +334,8 @@ def is_volume(image):
 
 
 def read_series(path):
-    """The image at `path`, or None when it is unreadable (that series is left out); any other refusal propagates."""
+    """The image at `path`, or None when it is unreadable (that series is left out); any other refusal propagates, and so does a
+    file-system error (OSError, ENOMEM as MemoryError), which fails the patient."""
     refusal = None
     try:
         return read_image(path)

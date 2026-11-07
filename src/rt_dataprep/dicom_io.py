@@ -42,7 +42,7 @@ def read_failure(path):
                 pass
     except OSError as exc:
         failure = exc
-    if failure is None or failure.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):  # gone, or no longer a file, since the listing
+    if failure is None or failure.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR):  # gone, or no longer a file, since the listing
         return
     if allocation_failure(failure):  # raised here, after the except block: nothing chained
         raise MemoryError()
