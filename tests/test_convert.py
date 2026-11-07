@@ -1794,3 +1794,20 @@ def test_a6_a_plan_folder_with_mode_0o444_is_the_patients_io_error(tree, monkeyp
     finally:
         plan['folder'].chmod(0o755)
     only_io_error_row(out, rows)
+
+
+def test_an_unstatable_entry_the_name_filters_drop_is_never_statted(tree, monkeypatch):
+    """#214: a hidden root entry (.snapshot on NFS) or a non-plan patient entry whose stat fails is filtered by name, unread."""
+    org, out = tree
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')], rois=[BOX])
+    (org / '.snapshot').mkdir()
+    (org / PID / 'notes').mkdir()
+    real = Path.stat
+
+    def stat(self, *, follow_symlinks=True):
+        if self.name in ('.snapshot', 'notes'):
+            raise PermissionError(errno.EACCES, 'denied')
+        return real(self, follow_symlinks=follow_symlinks)
+    monkeypatch.setattr(Path, 'stat', stat)
+    rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome) for r in rows] == [('plan_1', conv.OUTCOME_CONVERTED)]
