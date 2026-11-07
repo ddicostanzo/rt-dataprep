@@ -661,7 +661,7 @@ def test_read_failure_swallows_a_missing_file(tmp_path):
     assert dicom_io.read_failure(tmp_path / 'absent.nii.gz') is None
 
 
-@pytest.mark.parametrize('code', [errno.ENOENT, errno.ENOTDIR, errno.ELOOP])  # gone, under a file now, or a symlink loop now
+@pytest.mark.parametrize('code', [errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR])  # gone, under a file, a loop or a folder now
 def test_read_failure_swallows_a_file_that_vanishes_before_the_reread(tmp_path, monkeypatch, code):
     bad = tmp_path / 'gone.bin'
     bad.write_bytes(b'x')

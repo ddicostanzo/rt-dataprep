@@ -292,14 +292,6 @@ def test_a_file_system_error_from_the_python_reread_propagates_as_oserror(tmp_pa
 
 
 @pytest.mark.parametrize('read', READERS)
-def test_a_forced_permission_error_from_the_python_reread_propagates(tmp_path, monkeypatch, read):
-    bad = garbage_file(tmp_path)
-    fail_python_open(monkeypatch, bad, PermissionError(errno.EACCES, 'forced', str(bad)))
-    with pytest.raises(PermissionError):
-        read(bad)
-
-
-@pytest.mark.parametrize('read', READERS)
 def test_enomem_from_the_python_reread_is_a_bare_memory_error(tmp_path, monkeypatch, read):
     bad = garbage_file(tmp_path)
     fail_python_open(monkeypatch, bad, OSError(errno.ENOMEM, 'forced', str(bad)))
@@ -902,7 +894,8 @@ def test_an_oserror_while_writing_refuses_the_patient_and_removes_the_partial(tm
     assert listing(out) == ['SYNTHETICPTB', 'preprocess_report.csv']
 
 
-UNREADABLE = ['forced', pytest.param('chmod', marks=pytest.mark.skipif(os.geteuid() == 0, reason='root ignores file permissions'))]
+NOT_ROOT = pytest.mark.skipif(os.geteuid() == 0, reason='root ignores file permissions')
+UNREADABLE = ['forced', pytest.param('chmod', marks=NOT_ROOT)]
 
 
 def make_unreadable(monkeypatch, path, how):
@@ -914,16 +907,17 @@ def make_unreadable(monkeypatch, path, how):
     fail_python_open(monkeypatch, path, PermissionError(errno.EACCES, 'forced', str(path)))
 
 
-def run_two_patients(tmp_path, monkeypatch, how, unreadable, add=None):
-    """Patient A's `unreadable` file (relative to its plan_1) is made unreadable; patient B is untouched. Returns (report, out, the file)."""
+def run_two_patients(tmp_path, monkeypatch, how, unreadable, add=None, workers=1):
+    """Patient A's `unreadable` file (relative to its patient folder) is made unreadable; patient B is untouched. Returns (report, out, the file).
+    'forced' needs workers=1: a worker process would not see the patch."""
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     folder, rows = write_plan(converted)
     if add:
         add(folder, rows)
     write_plan(converted, patient='SYNTHETICPTB')
-    bad = folder / unreadable
+    bad = folder.parent / unreadable
     make_unreadable(monkeypatch, bad, how)
-    return pre.preprocess(converted, out, SMALL, workers=1), out, bad
+    return pre.preprocess(converted, out, SMALL, workers=workers), out, bad
 
 
 def assert_patient_io_error(report, out):
@@ -935,19 +929,34 @@ def assert_patient_io_error(report, out):
 
 @pytest.mark.parametrize('how', UNREADABLE)
 def test_an_unreadable_plan_file_fails_the_patient_with_the_io_error_and_the_next_patient_runs(tmp_path, monkeypatch, how):
-    report, out, _ = run_two_patients(tmp_path, monkeypatch, how, 'ptv.nii.gz')
+    report, out, _ = run_two_patients(tmp_path, monkeypatch, how, 'plan_1/ptv.nii.gz')
     assert_patient_io_error(report, out)
 
 
 @pytest.mark.parametrize('how', UNREADABLE)
 def test_an_unreadable_registered_series_fails_the_patient_with_the_io_error(tmp_path, monkeypatch, how):
-    report, out, _ = run_two_patients(tmp_path, monkeypatch, how, 'series_MR_1.nii.gz', add=lambda folder, rows: add_series(folder, rows))
+    report, out, _ = run_two_patients(tmp_path, monkeypatch, how, 'plan_1/series_MR_1.nii.gz', add=lambda folder, rows: add_series(folder, rows))
+    assert_patient_io_error(report, out)
+
+
+@pytest.mark.parametrize('how', UNREADABLE)
+def test_an_unreadable_file_of_a_second_plan_drops_the_good_first_plan_too(tmp_path, monkeypatch, how):
+    """plan_1 of the failing patient preprocesses cleanly first; the patient's I/O error still leaves no plan row or folder (#212)."""
+    add = lambda folder, rows: write_plan(folder.parent.parent, plan='plan_2')  # noqa: E731
+    report, out, _ = run_two_patients(tmp_path, monkeypatch, how, 'plan_2/ptv.nii.gz', add=add)
+    assert_patient_io_error(report, out)
+
+
+@NOT_ROOT
+def test_an_unreadable_plan_file_fails_the_patient_with_the_io_error_under_two_workers(tmp_path, monkeypatch):
+    """The real chmod end to end with workers=2: the patient's row crosses the process boundary (#212)."""
+    report, out, _ = run_two_patients(tmp_path, monkeypatch, 'chmod', 'plan_1/ptv.nii.gz', workers=2)
     assert_patient_io_error(report, out)
 
 
 def test_a_forced_read_error_puts_no_path_and_no_patient_name_in_a_log_or_the_report_text(tmp_path, monkeypatch, caplog):
     with caplog.at_level('DEBUG'):
-        report, out, bad = run_two_patients(tmp_path, monkeypatch, 'forced', 'ptv.nii.gz')
+        report, out, bad = run_two_patients(tmp_path, monkeypatch, 'forced', 'plan_1/ptv.nii.gz')
     assert_patient_io_error(report, out)
     text = (out / 'preprocess_report.csv').read_text()
     assert caplog.records and not any(s in caplog.text or s in text for s in (str(bad), str(tmp_path), 'forced'))
