@@ -456,7 +456,7 @@ def test_workers_2_worker_info_line_reaches_stderr(tmp_path, org):
     result = subprocess.run([sys.executable, '-m', 'rt_dataprep', 'convert', str(org), str(tmp_path / 'out'), '--workers', '2'],
                             capture_output=True, text=True)
     assert result.returncode == 0
-    assert 'convert: 1 unreadable files in misc_files' in result.stderr.splitlines()
+    assert 'convert: 1 malformed or vanished files in misc_files' in result.stderr.splitlines()
     assert 'workers 2' in result.stderr and PID not in result.stderr and str(tmp_path) not in result.stderr
 
 

@@ -234,7 +234,7 @@ def _convert_patient(folder, out_root, exclude_models, overwrite):
     if misc_unreadable:
         read = {p for p, _ in misc_headers}
         studies = [_salvage_study(p) for p in sorted(misc_dir.iterdir()) if dicom_io.entry_is(p, 'file') and p not in read]
-        log.info('convert: %d unreadable files in misc_files', len(studies))
+        log.info('convert: %d malformed or vanished files in misc_files', len(studies))
         misc_taint = {s for s in studies if s}, None in studies
     blank = [ds for _, ds in misc_headers if not str(ds.get('PatientID', '')).strip()]
     misc_headers = [(p, ds) for p, ds in misc_headers if str(ds.get('PatientID', '')).strip()]  # blank id: kept, never placed (#12)
@@ -267,7 +267,9 @@ def _convert_patient(folder, out_root, exclude_models, overwrite):
         # Organize copies a study whole into every folder that holds it, so a converted folder's copy is complete: the
         # SOP dedup keeps it over a short folder's copy (#35). Only a SOP found nowhere else stays in a short folder.
         ordered = sorted(headers, key=lambda item: item[0].parent in short)
-        rows += _place_series(folder.name, ordered, exclude_models, outcomes, partial, short, lost, misc_taint, misc_dir)
+        # A planning CT that ITK already failed to read is skipped, not read again as another series (#216).
+        unread = {_assemble(found)[3] for (found, _), (row, _) in zip(plan_headers, outcomes, strict=True) if row.reason == REASON_CT_UNREADABLE}
+        rows += _place_series(folder.name, ordered, exclude_models, outcomes, partial, short, lost | unread, misc_taint, misc_dir)
         for row, result in outcomes:  # series.csv of each converted plan folder goes in last
             if result is not None:
                 write_series_csv(result.series_rows, partial / row.folder / SERIES_NAME)
