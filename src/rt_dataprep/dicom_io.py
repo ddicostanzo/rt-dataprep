@@ -40,11 +40,9 @@ def read_failure(path):
         with open(path, 'rb') as handle:
             while handle.read(READ_CHUNK):
                 pass
-    except FileNotFoundError:
-        return
     except OSError as exc:
         failure = exc
-    if failure is None:
+    if failure is None or failure.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):  # gone, or no longer a file, since the listing
         return
     if allocation_failure(failure):  # raised here, after the except block: nothing chained
         raise MemoryError()

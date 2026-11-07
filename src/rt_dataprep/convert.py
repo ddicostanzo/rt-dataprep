@@ -112,7 +112,7 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwr
         raise ValueError(REASON_OUTSIDE_ORG)
     if overwrite and org_root.resolve().is_relative_to(out_root.resolve()):  # a replaced patient folder could hold the input
         raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
-    folders = sorted(p for p in org_root.iterdir() if dicom_io.entry_is(p, 'dir') and not p.name.startswith('.'))  # a missing root fails before the mkdir
+    folders = sorted(p for p in org_root.iterdir() if not p.name.startswith('.') and dicom_io.entry_is(p, 'dir'))  # a missing root fails before the mkdir
     out_root.mkdir(parents=True, exist_ok=True)
     patient_fn = _patient_fn or _convert_patient
     # The parent owns the claims. Under overwrite a repeat of a casefolded name (a case-insensitive root would merge them) is refused here,
@@ -218,7 +218,7 @@ def _convert_patient(folder, out_root, exclude_models, overwrite):
     exists = os.path.lexists(target)  # lexists, as publish: a dangling link is an existing target
     if exists and not overwrite:
         return [ConvertRow(folder.name, '', OUTCOME_SKIPPED, REASON_EXISTS)], 0.0, 0, None
-    plans = sorted((p for p in folder.iterdir() if dicom_io.entry_is(p, 'dir') and re.fullmatch(PLAN_FOLDER, p.name)),
+    plans = sorted((p for p in folder.iterdir() if re.fullmatch(PLAN_FOLDER, p.name) and dicom_io.entry_is(p, 'dir')),  # name first: a filtered-out entry is never stat'ed
                    key=lambda p: (int(p.name.split('_')[1]), p.name))  # plan_1 and fx_1: a fixed order
     # Headers are read once per patient. A malformed file in misc_files/ is not a series and is ignored: only its count
     # reaches the log. A file-system error on any file raises instead: the patient's I/O error.
