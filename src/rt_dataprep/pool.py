@@ -196,6 +196,7 @@ def run(workers, tasks, handle):
             signal.pthread_sigmask(signal.SIG_SETMASK, saved)
 
 
+log = logging.getLogger(__name__)
 MAX_WORKERS = 64
 _V1_UNLIMITED = 2**60  # v1 reports "no limit" as a number near 2**63
 
@@ -255,3 +256,42 @@ def size_workers(peak, available, cpus, remaining):
     if available is None or peak <= 0:
         return 1
     return max(1, min(4 * available // (5 * peak), cpus, MAX_WORKERS, remaining))
+
+
+def run_auto(workers, tasks, handle, processed):
+    """pool.run for an int `workers`. For 'auto': run patients one pool.run(1, ...) at a time in this process until
+    processed(k) is true after patient k (its follow-ups included), size N from that run's peak RSS, then run the
+    rest in one pool.run(N, ...) whose handle still sees the original indexes. Returns the worker count used.
+    An ABORT, a Failed result or an exception from handle during the probe ends it with no further pool.run."""
+    if workers != 'auto':
+        run(workers, tasks, handle)
+        return workers
+    current, ended = [0], []  # the probe patient's index; set once a probe result ends the stage
+
+    def probe_handle(index, result):
+        follow = handle(current[0], result)
+        if follow is ABORT or isinstance(result, Failed):
+            ended.append(True)
+        return follow
+
+    for k, task in enumerate(tasks):
+        current[0] = k
+        run(1, [task], probe_handle)
+        if ended:
+            return 1
+        if processed(k):
+            break
+    else:
+        return 1
+    try:
+        import resource  # POSIX only: imported here so the package still imports on Windows
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024  # KiB on Linux
+    except ImportError:
+        peak = 0  # unknown: size_workers gives 1
+    available, cpus, remaining = available_ram('/'), usable_cpus(), len(tasks) - k - 1
+    n = size_workers(peak, available, cpus, remaining)
+    log.info('auto workers: %d probe patient(s), peak %.1f GB, available %s GB, %d CPUs, workers %d', k + 1, peak / 1e9,
+             'unknown' if available is None else f'{available / 1e9:.1f}', cpus, n)
+    if remaining:
+        run(n, tasks[k + 1:], lambda index, result: handle(index + k + 1, result))
+    return n

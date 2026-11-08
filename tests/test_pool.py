@@ -519,3 +519,130 @@ def test_size_workers_table(peak, available, cpus, remaining, expected):
 def test_max_workers_is_64_and_resource_is_not_imported_at_module_level():
     assert pool.MAX_WORKERS == 64
     assert not hasattr(pool, 'resource')
+
+
+# --- run_auto (#175): probe in-process, then one sized pool.run ---
+
+class Probe:
+    """Patches the sizer's inputs and spies on pool.run; `chosen` is what the sizer returns."""
+
+    def __init__(self, monkeypatch, peak_kib=2_000_000, available=40 * GB, cpus=8, chosen=1):
+        self.calls, self.sized = [], []
+        real_run = pool.run
+
+        def spy(workers, tasks, handle):
+            self.calls.append((workers, list(tasks), handle))
+            return real_run(workers, tasks, handle)
+
+        def sizer(*args):
+            self.sized.append(args)
+            return chosen
+
+        class Usage:
+            ru_maxrss = peak_kib
+
+        import resource
+        monkeypatch.setattr(pool, 'run', spy)
+        monkeypatch.setattr(pool, 'size_workers', sizer)
+        monkeypatch.setattr(pool, 'available_ram', lambda root: available)
+        monkeypatch.setattr(pool, 'usable_cpus', lambda: cpus)
+        monkeypatch.setattr(resource, 'getrusage', lambda who: Usage)
+
+
+def echo_tasks(n):
+    return [Task(w.echo, (i,)) for i in range(n)]
+
+
+def test_run_auto_with_an_int_is_one_unchanged_pool_run(monkeypatch):
+    probe = Probe(monkeypatch)
+    tasks, seen = echo_tasks(3), []
+
+    def handle(index, result):
+        seen.append((index, result))
+
+    assert pool.run_auto(1, tasks, handle, lambda k: pytest.fail('processed is for auto only')) == 1
+    assert [(n, t) for n, t, _ in probe.calls] == [(1, tasks)] and probe.calls[0][2] is handle
+    assert seen == [(0, 0), (1, 1), (2, 2)] and probe.sized == []
+
+
+def test_auto_probes_until_a_processed_patient_then_sizes_one_pool_for_the_rest(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    probe = Probe(monkeypatch, peak_kib=3_000_000, available=40 * GB, cpus=8, chosen=2)
+    tasks, seen, done = echo_tasks(5), [], set()
+
+    def handle(index, result):
+        seen.append((index, result))
+        if index == 1 and result == 1:  # patient 1 is read first, its follow-up is what processes it
+            return Task(w.echo, ('copy',))
+        if result == 'copy' or index >= 2:
+            done.add(index)
+
+    assert pool.run_auto('auto', tasks, handle, lambda k: k in done) == 2
+    assert [(n, [t.args for t in ts]) for n, ts, _ in probe.calls] == [
+        (1, [(0,)]), (1, [(1,)]), (2, [(2,), (3,), (4,)])]  # the follow-up ran inside the probe call for patient 1
+    assert probe.sized == [(3_000_000 * 1024, 40 * GB, 8, 3)]
+    assert sorted(seen, key=str) == sorted([(0, 0), (1, 1), (1, 'copy'), (2, 2), (3, 3), (4, 4)], key=str)  # original indexes
+    assert any(r.levelno == logging.INFO and '2' in r.getMessage() for r in caplog.records)
+
+
+def test_the_pool_call_after_the_probe_hands_the_handle_original_indexes(monkeypatch):
+    Probe(monkeypatch, chosen=2)
+    seen = []
+    tasks = echo_tasks(4)
+    pool.run_auto('auto', tasks, lambda i, r: seen.append((i, r)), lambda k: True)  # a real N=2 pool for tasks 1..3
+    assert sorted(seen) == [(0, 0), (1, 1), (2, 2), (3, 3)]
+
+
+def test_no_second_pool_run_when_the_probe_patient_was_the_last(monkeypatch):
+    probe = Probe(monkeypatch)
+    assert pool.run_auto('auto', echo_tasks(1), lambda i, r: None, lambda k: True) == 1
+    assert [n for n, _, _ in probe.calls] == [1]
+
+
+def test_all_unprocessed_means_every_patient_in_its_own_single_pool_run(monkeypatch):
+    probe = Probe(monkeypatch, chosen=4)
+    assert pool.run_auto('auto', echo_tasks(3), lambda i, r: None, lambda k: False) == 1
+    assert [(n, len(ts)) for n, ts, _ in probe.calls] == [(1, 1)] * 3 and probe.sized == []
+
+
+def test_no_tasks_means_no_pool_run(monkeypatch):
+    probe = Probe(monkeypatch)
+    assert pool.run_auto('auto', [], lambda i, r: None, lambda k: True) == 1
+    assert probe.calls == []
+
+
+def test_probe_ends_on_abort_failed_or_a_raising_handle(monkeypatch):
+    probe = Probe(monkeypatch, chosen=2)
+    assert pool.run_auto('auto', echo_tasks(3), lambda i, r: ABORT, lambda k: False) == 1
+    assert len(probe.calls) == 1
+
+    probe.calls.clear()
+    seen = []
+    tasks = [Task(w.fail, (0,)), *echo_tasks(2)]
+    pool.run_auto('auto', tasks, lambda i, r: seen.append(r), lambda k: False)
+    assert len(probe.calls) == 1 and seen == [Failed('RuntimeError')]
+
+    probe.calls.clear()
+
+    def raising(index, result):
+        raise ValueError('SYNTHETIC')
+
+    with pytest.raises(ValueError):
+        pool.run_auto('auto', echo_tasks(3), raising, lambda k: True)
+    assert len(probe.calls) == 1 and probe.sized == []
+
+
+def test_keyboard_interrupt_in_the_probe_propagates(monkeypatch):
+    probe = Probe(monkeypatch)
+    with pytest.raises(KeyboardInterrupt):
+        pool.run_auto('auto', [Task(w.interrupt, (0,)), *echo_tasks(2)], lambda i, r: None, lambda k: False)
+    assert len(probe.calls) == 1
+
+
+def test_without_the_resource_module_the_remaining_patients_run_one_at_a_time(monkeypatch):
+    probe = Probe(monkeypatch, chosen=9)
+    monkeypatch.setitem(sys.modules, 'resource', None)  # import resource -> ImportError, as on Windows
+    sizes = []
+    monkeypatch.setattr(pool, 'size_workers', lambda *args: sizes.append(args) or 1)
+    assert pool.run_auto('auto', echo_tasks(3), lambda i, r: None, lambda k: True) == 1
+    assert [n for n, _, _ in probe.calls] == [1, 1] and sizes[0][0] <= 0
