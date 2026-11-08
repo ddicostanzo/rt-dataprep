@@ -43,6 +43,9 @@ Repository access is required while the repository is private. For an existing c
 its root. Every command below assumes that working directory. Use `uv run` to select the project environment; the CLI is
 invoked as `python -m rt_dataprep`.
 
+To use rt-dataprep from your own project without a checkout, install a tagged release; see
+[Add rt-dataprep to another project](#add-rt-dataprep-to-another-project).
+
 ## Quick start
 
 ### Run a small synthetic example
@@ -466,13 +469,30 @@ The API is under active development. Pin a reviewed commit and `uv.lock` when re
 
 ### Add rt-dataprep to another project
 
-Install it from Git into the training or analysis project, pinned to a reviewed commit:
+Ask the repository owner for read access while the repository is private; Git must be able to authenticate to
+GitHub (an SSH key or `gh auth login`). Then install a tagged release into the training or analysis project's environment,
+using Python 3.12 or newer:
 
 ```bash
-uv add "rt-dataprep @ git+https://github.com/ddicostanzo/rt-dataprep@<commit>"
+# uv project
+uv add "rt-dataprep @ git+https://github.com/ddicostanzo/rt-dataprep@v0.1.0"
+# or plain pip in an activated virtual environment
+pip install "git+https://github.com/ddicostanzo/rt-dataprep@v0.1.0"
 ```
 
-The CLI is then available as `uv run python -m rt_dataprep`, and the API as described above.
+Pin a release tag (or a reviewed commit) rather than `main`, and change the tag to upgrade. Releases are listed on the
+repository's Tags page.
+
+The install adds an `rt-dataprep` command, which is the same CLI as `python -m rt_dataprep`:
+
+```bash
+rt-dataprep --help
+rt-dataprep organize /secure/export /secure/organized
+```
+
+Inside a uv project, prefix it with `uv run`. The Python API imports as described above
+(`from rt_dataprep.convert import convert`, and so on). Every example in this README that starts with
+`uv run python -m rt_dataprep` works the same with `rt-dataprep`.
 
 ### Gate each stage on its report, not on the exit status
 

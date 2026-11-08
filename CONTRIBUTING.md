@@ -90,6 +90,20 @@ Describe the problem, resulting behavior, relevant issue, compatibility implicat
 Explain any skipped checks. Use synthetic examples in the PR description. Keep implementation and documentation changes
 separate when that makes review easier. Repository merges normally use squash commits.
 
+## Cut a release
+
+Users install from a Git tag, so a release is a version bump plus a tag on `main`:
+
+1. Merge the release's changes, then bump `version` in `pyproject.toml` in its own PR (semantic versioning: a
+   breaking CLI, API, or output-layout change bumps the minor version while the major version is 0).
+2. On the updated `main`, run `uv build` and install the wheel into a fresh Python 3.12 environment. Check that
+   `rt-dataprep --help` runs and that `examples/synthetic_workflow.py` finishes with no refusals.
+3. Tag and push: `git tag -a vX.Y.Z -m "rt-dataprep X.Y.Z" && git push origin vX.Y.Z`.
+4. Update the install tag in the README if it names an older release.
+
+Share the wheel, not the source archive, if someone cannot use Git. The source archive is built from the working tree, so
+check it with `tar tzf dist/*.tar.gz` before it leaves the machine. `docs/handoffs/` is excluded from it.
+
 ## License
 
 By submitting a contribution, you agree to license your contribution under this project's GNU Affero General Public
