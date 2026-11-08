@@ -19,3 +19,6 @@ Append under `## <task-id>`; never rewrite earlier sections.
 - Probe handle is one closure with a mutable current index (ruff B023 rejects a closure defined per loop pass); the probe pool.run(1, [task]) always passes index 0, so the wrapper ignores it and passes k.
 - Unknown peak (no `resource`) is passed to size_workers as 0, which it maps to 1; None would raise on `peak <= 0`.
 - Tests spy on pool.run by patching the module attribute, so run_auto must keep calling the module-global `run`/`size_workers`/`available_ram`/`usable_cpus`. The N=2 cases start a real spawned pool (about 0.1 s each).
+
+## review-group-1-2
+- Inline wave review by the orchestrator (pool.py diff 7f10c19, 25f79af): matches task-01/02 criteria; no BLOCKING. The fresh-context Opus pass is the final /code-review round.
