@@ -400,3 +400,122 @@ def test_when_handle_raises_twice_the_first_exception_is_raised():
 
     delivered, error = run_guarded(2, [Task(w.sleep_then, ('a', 0.5)), Task(w.echo, ('b',))], handle)
     assert delivered == [(0, 'a'), (1, 'b')] and isinstance(error, SystemExit) and error.code == 3
+
+
+# --- sizing (#175): fixture /proc and /sys/fs/cgroup trees under tmp_path, never the real ones ---
+
+GB = 10**9
+
+
+def put(root, rel, text):
+    path = Path(root, rel)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def fake_host(root, cgroup_lines, available_kb=8_000_000):
+    put(root, 'proc/meminfo', f'MemTotal: 16000000 kB\nMemAvailable: {available_kb} kB\n')
+    put(root, 'proc/self/cgroup', cgroup_lines)
+
+
+def v2_level(root, path, limit, current=0, inactive=0):
+    base = f'sys/fs/cgroup{path}'
+    put(root, f'{base}/memory.max', f'{limit}\n')
+    put(root, f'{base}/memory.current', f'{current}\n')
+    put(root, f'{base}/memory.stat', f'anon 1\ninactive_file {inactive}\nactive_file 5\n')
+
+
+def v1_level(root, path, limit, usage=0, inactive=0):
+    base = f'sys/fs/cgroup/memory{path}'
+    put(root, f'{base}/memory.limit_in_bytes', f'{limit}\n')
+    put(root, f'{base}/memory.usage_in_bytes', f'{usage}\n')
+    put(root, f'{base}/memory.stat', f'cache 1\ntotal_inactive_file {inactive}\n')
+
+
+def test_available_ram_is_memavailable_without_any_cgroup_limit(tmp_path):
+    fake_host(tmp_path, '0::/job_1/step_2/user/task_0\n')
+    v2_level(tmp_path, '', 'max')
+    v2_level(tmp_path, '/job_1', 'max')
+    assert pool.available_ram(tmp_path) == 8_000_000 * 1024
+
+
+def test_cgroup_v2_ancestor_limit_caps_the_result_minus_non_reclaimable_use(tmp_path):
+    fake_host(tmp_path, '0::/job_1/step_2/user/task_0\n')
+    v2_level(tmp_path, '/job_1', 4 * GB, current=3 * GB, inactive=GB)  # free = 4 - (3 - 1) = 2 GB
+    v2_level(tmp_path, '/job_1/step_2/user/task_0', 'max', current=GB)  # 'max' on the leaf is no limit
+    assert pool.available_ram(tmp_path) == 2 * GB
+
+
+def test_cgroup_v2_tightest_level_wins(tmp_path):
+    fake_host(tmp_path, '0::/job_1/step_2\n')
+    v2_level(tmp_path, '/job_1', 4 * GB)
+    v2_level(tmp_path, '/job_1/step_2', 3 * GB)
+    assert pool.available_ram(tmp_path) == 3 * GB
+    v2_level(tmp_path, '/job_1/step_2', 6 * GB)
+    assert pool.available_ram(tmp_path) == 4 * GB
+
+
+def test_a_cgroup_limit_above_memavailable_does_not_raise_the_result(tmp_path):
+    fake_host(tmp_path, '0::/job_1\n')
+    v2_level(tmp_path, '/job_1', 100 * GB)
+    assert pool.available_ram(tmp_path) == 8_000_000 * 1024
+
+
+def test_cgroup_v1_uses_the_memory_controller_line_and_ignores_the_unlimited_sentinel(tmp_path):
+    fake_host(tmp_path, '12:cpu,cpuacct:/other\n4:memory:/job_1/step_2\n1:name=systemd:/x\n')
+    v1_level(tmp_path, '/job_1', 5 * GB, usage=3 * GB, inactive=GB)  # free = 5 - (3 - 1) = 3 GB
+    v1_level(tmp_path, '/job_1/step_2', 2**63 - 4096, usage=GB)  # unlimited sentinel
+    v1_level(tmp_path, '', 2**63 - 4096)
+    assert pool.available_ram(tmp_path) == 3 * GB
+
+
+def test_unreadable_meminfo_is_none(tmp_path):
+    put(tmp_path, 'proc/self/cgroup', '0::/job_1\n')
+    assert pool.available_ram(tmp_path) is None
+
+
+def test_an_unreadable_cgroup_file_is_no_limit_at_that_level(tmp_path):
+    fake_host(tmp_path, '0::/job_1/step_2\n')
+    v2_level(tmp_path, '/job_1', 3 * GB)
+    put(tmp_path, 'sys/fs/cgroup/job_1/step_2/memory.max', '2000000000\n')  # no memory.current or memory.stat beside it
+    assert pool.available_ram(tmp_path) == 3 * GB
+    put(tmp_path, 'proc/self/cgroup', '')  # no cgroup line at all
+    assert pool.available_ram(tmp_path) == 8_000_000 * 1024
+
+
+def test_a_negative_free_value_clamps_to_zero(tmp_path):
+    fake_host(tmp_path, '0::/job_1\n')
+    v2_level(tmp_path, '/job_1', GB, current=3 * GB)
+    assert pool.available_ram(tmp_path) == 0
+
+
+def test_usable_cpus_follows_the_affinity_mask_else_cpu_count(monkeypatch):
+    monkeypatch.setattr(os, 'sched_getaffinity', lambda pid: {0, 3, 5}, raising=False)
+    assert pool.usable_cpus() == 3
+    monkeypatch.delattr(os, 'sched_getaffinity')
+    monkeypatch.setattr(os, 'cpu_count', lambda: 6)
+    assert pool.usable_cpus() == 6
+    monkeypatch.setattr(os, 'cpu_count', lambda: None)
+    assert pool.usable_cpus() == 1
+
+
+@pytest.mark.parametrize('peak, available, cpus, remaining, expected', [
+    (GB, 10 * GB, 32, 100, 8),  # RAM binds: floor(0.8 * 10)
+    (3 * GB, 10 * GB, 32, 100, 2),  # floor(2.67)
+    (GB, 100 * GB, 4, 100, 4),  # CPUs bind
+    (GB, 1000 * GB, 128, 500, 64),  # MAX_WORKERS binds
+    (GB, 100 * GB, 32, 3, 3),  # patients left bind
+    (10 * GB, GB, 32, 100, 1),  # RAM for less than one worker: still 1
+    (GB, 0, 32, 100, 1),
+    (GB, 10 * GB, 32, 0, 1),
+    (GB, None, 32, 100, 1),  # RAM unknown
+    (0, 10 * GB, 32, 100, 1),  # peak unknown
+    (-1, 10 * GB, 32, 100, 1),
+])
+def test_size_workers_table(peak, available, cpus, remaining, expected):
+    assert pool.size_workers(peak, available, cpus, remaining) == expected
+
+
+def test_max_workers_is_64_and_resource_is_not_imported_at_module_level():
+    assert pool.MAX_WORKERS == 64
+    assert not hasattr(pool, 'resource')
