@@ -43,6 +43,17 @@ Repository access is required while the repository is private. For an existing c
 its root. Every command below assumes that working directory. Use `uv run` to select the project environment; the CLI is
 invoked as `python -m rt_dataprep`.
 
+To use rt-dataprep from another project instead of a checkout, install a tagged release into that project's
+environment (repository access is still required):
+
+```bash
+pip install "git+https://github.com/ddicostanzo/rt-dataprep@v0.1.0"
+rt-dataprep --help
+```
+
+The installed `rt-dataprep` command is the same CLI as `python -m rt_dataprep`, and the Python API below imports
+the same way.
+
 ## Quick start
 
 ### Run a small synthetic example
