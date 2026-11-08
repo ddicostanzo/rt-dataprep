@@ -382,6 +382,7 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
     Preprocess every <patient>/plan_<n>/ and <patient>/study_<n>/ under converted_root into out_root and write preprocess_report.csv.
 
     workers: patient processes, one patient per process (about 7 GB RAM each at 701x701x433); the output is the same for any N.
+        'auto' runs patients in this process until one is preprocessed, then sizes the pool from that patient's peak RSS.
     overwrite: replace a patient's existing output folder once the new output holds a preprocessed row; otherwise the old one is kept.
     _patient_fn: internal test seam, replaces the per-patient call only (module-level and picklable for workers > 1).
     """
@@ -428,7 +429,7 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
             return pool.ABORT
 
     try:
-        pool.run(workers, tasks, handle)
+        pool.run_auto(workers, tasks, handle, lambda k: any(r.outcome == OUTCOME_PREPROCESSED for r in results[dispatched[k]][0]))
     finally:  # Ctrl-C too: the report lists what was done
         rows = conv.rows_in_order(len(folders), refused, {i: r[0] for i, r in results.items()})
         write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series', 'cropped'],
