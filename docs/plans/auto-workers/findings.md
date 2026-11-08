@@ -22,3 +22,8 @@ Append under `## <task-id>`; never rewrite earlier sections.
 
 ## review-group-1-2
 - Inline wave review by the orchestrator (pool.py diff 7f10c19, 25f79af): matches task-01/02 criteria; no BLOCKING. The fresh-context Opus pass is the final /code-review round.
+
+## task-05
+- `positive_int` became `workers_arg` (accepts the exact string 'auto', otherwise the same digit-only 1..MAX_WORKERS rule); the usage error now reads "must be 'auto' or an integer from 1 to 64". MAX_WORKERS is imported from pool; `Auto` and `auto ` are rejected (tests added).
+- WORKERS_HELP is now a parenthesised multi-line string (it contains an apostrophe); it keeps the old phrases the help test pins and avoids '%' (argparse formats help) and the word 'thread'.
+- README command table uses "`auto` or `1..64`" because a pipe inside a table cell breaks the row.
