@@ -58,7 +58,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
     """
     Sort every patient folder under src_root into out_root and write organize_report.csv.
 
-    workers: patient processes, one patient per process; the output is the same for any N.
+    workers: patient processes, one patient per process, or 'auto' to size N from the first organized patient's peak memory; the output is the same for any N.
     _read_fn, _copy_fn: internal test seams, replace the per-patient read (task A) and copy (task B) only (module-level, picklable).
     """
     src_root, out_root = Path(src_root), Path(out_root)
@@ -137,7 +137,8 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
     started = time.monotonic()
     try:
         folders = sorted(p for p in src_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # .X.partial too
-        pool.run(workers, [pool.Task(_worker, (read_fn, folder, exclude_models, None if overwrite else out_root)) for folder in folders], handle)
+        tasks = [pool.Task(_worker, (read_fn, folder, exclude_models, None if overwrite else out_root)) for folder in folders]
+        workers = pool.run_auto(workers, tasks, handle, lambda k: k in done and done[k].outcome == OUTCOME_ORGANIZED)  # an int from here on
     finally:  # Ctrl-C too: the report lists what was done
         rows = [done[i] for i in sorted(done)]
         write_report(out_root, REPORT_NAME, ['patient', 'plan_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'],

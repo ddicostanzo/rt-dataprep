@@ -103,7 +103,7 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwr
     Convert every <patient>/plan_<n>/ under org_root into out_root/<patient>/plan_<n>/ and write convert_report.csv.
 
     exclude_models: a study that holds a file whose ManufacturerModelName contains one of these is left out of the other series.
-    workers: patient processes, one patient per process (about 7 GB RAM each at 701x701x433); the output is the same for any N.
+    workers: patient processes, one patient per process (about 7 GB RAM each at 701x701x433); or 'auto' to size N from the first converted patient's peak memory; the output is the same for any N.
     overwrite: replace a patient's existing output folder once the new output holds a converted row; otherwise the old one is kept.
     _patient_fn: internal test seam, replaces the per-patient call only (module-level and picklable for workers > 1).
     """
@@ -143,7 +143,7 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwr
 
     started = time.monotonic()
     try:
-        pool.run(workers, tasks, handle)
+        workers = pool.run_auto(workers, tasks, handle, lambda k: any(r.outcome == OUTCOME_CONVERTED for r in results[dispatched[k]][0]))  # an int from here on
     finally:  # Ctrl-C too: the report lists what was done
         rows = rows_in_order(len(folders), refused, {i: r[0] for i, r in results.items()})
         write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'],
