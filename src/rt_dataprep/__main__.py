@@ -9,6 +9,7 @@ from rt_dataprep.convert import REASON_INTERNAL, REASON_OUTSIDE_ORG, ConvertAbor
 from rt_dataprep.manifest import MANIFEST_NAME, manifest
 from rt_dataprep.organize import REASON_INTERNAL as ORGANIZE_REASON_INTERNAL
 from rt_dataprep.organize import REASON_OUTSIDE_SRC, OrganizeAborted, organize
+from rt_dataprep.pool import MAX_WORKERS
 from rt_dataprep.preprocess import (
     REASON_AHE_OPTIONS,
     REASON_MASK_RETENTION_LIMIT,
@@ -23,15 +24,18 @@ from rt_dataprep.split import REASON_COLUMNS, REASON_EXISTS, REASON_NO_TRAIN, RE
 
 
 PREPROCESS_HELP = 'resample, rescale and crop/pad a converted tree into a separate output tree; give at least one step flag to write anything'
-WORKERS_HELP = 'number of patients processed in parallel, each in its own process (about 7 GB RAM each at 701x701x433); output is the same for any value'
+WORKERS_HELP = ("number of patients processed in parallel, each in its own process (about 7 GB RAM each at 701x701x433); "
+                "default 'auto' sizes it from the first processed patient's peak RAM (0.8 of available memory, capped by CPUs), "
+                "an integer sets it; output is the same for any value")
 OVERWRITE_HELP = "replace a patient's existing output folder once its new output holds at least one successful case"
-MAX_WORKERS = 64
 
 
-def positive_int(text):
+def workers_arg(text):
+    if text == 'auto':
+        return text
     value = int(text) if text.isascii() and text.isdigit() else 0  # no sign, space, underscore or non-ASCII digit
     if not 1 <= value <= MAX_WORKERS:
-        raise argparse.ArgumentTypeError(f'must be an integer from 1 to {MAX_WORKERS}')
+        raise argparse.ArgumentTypeError(f"must be 'auto' or an integer from 1 to {MAX_WORKERS}")
     return value
 
 
@@ -55,17 +59,17 @@ def main(argv=None):
     sub = commands.add_parser('organize', help='sort an export tree into <patient>/plan_<n>/ folders, one per RTPLAN')
     sub.add_argument('src', help='export root, one folder per patient')
     sub.add_argument('out', help='output root')
-    sub.add_argument('--workers', type=positive_int, default=1, help=WORKERS_HELP)
+    sub.add_argument('--workers', type=workers_arg, default='auto', help=WORKERS_HELP)
     sub.add_argument('--overwrite', action='store_true', help=OVERWRITE_HELP)
     sub = commands.add_parser('convert', help='turn an organized tree into NIfTI files on the native CT grid, one folder per plan and one per study')
     sub.add_argument('org', help='organized root, from the organize command')
     sub.add_argument('out', help='output root, outside the organized root')
-    sub.add_argument('--workers', type=positive_int, default=1, help=WORKERS_HELP)
+    sub.add_argument('--workers', type=workers_arg, default='auto', help=WORKERS_HELP)
     sub.add_argument('--overwrite', action='store_true', help=OVERWRITE_HELP)
     sub = commands.add_parser('preprocess', help=PREPROCESS_HELP, description=PREPROCESS_HELP)
     sub.add_argument('converted', help='converted root, from the convert command')
     sub.add_argument('out', help='output root, outside the converted root')
-    sub.add_argument('--workers', type=positive_int, default=1, help=WORKERS_HELP)
+    sub.add_argument('--workers', type=workers_arg, default='auto', help=WORKERS_HELP)
     sub.add_argument('--overwrite', action='store_true', help=OVERWRITE_HELP)
     sub.add_argument('--initial-resample', action='store_true', help='step: resample to 1 mm spacing (set it with --new-spacing); writes the initialresample_ prefix')
     sub.add_argument('--rescale', action='store_true', help='step: rescale a CT to (HU + 1024) / 4096; writes the rescale_ prefix; as the only step, MR/PT study series are refused')

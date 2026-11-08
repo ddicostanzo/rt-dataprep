@@ -14,6 +14,7 @@ from test_preprocess import DOSE_SPLIT, FOUR_STEPS, HALF_OUT, SMALL, box, report
 
 from rt_dataprep import convert as conv
 from rt_dataprep import dicom_io
+from rt_dataprep import pool
 from rt_dataprep import preprocess as pre
 from rt_dataprep import __main__ as cli
 from rt_dataprep import split as sp
@@ -457,8 +458,8 @@ def test_series_fov_mask_flag_reaches_preprocess_steps(flags, want, monkeypatch)
 
 
 @pytest.mark.parametrize('command', ['organize', 'convert', 'preprocess'])
-@pytest.mark.parametrize('flag, workers', [([], 1), (['--workers', '3'], 3)])
-def test_workers_reaches_each_stage_and_defaults_to_one(command, flag, workers, calls):
+@pytest.mark.parametrize('flag, workers', [([], 'auto'), (['--workers', 'auto'], 'auto'), (['--workers', '1'], 1), (['--workers', '3'], 3)])
+def test_workers_reaches_each_stage_and_defaults_to_auto(command, flag, workers, calls):
     cli.main([command, 'a', 'b', *flag])
     assert calls == [(command, ('a', 'b'), {'workers': workers, 'overwrite': False})]
 
@@ -470,7 +471,7 @@ def test_workers_accepts_the_cap(command, calls):
 
 
 @pytest.mark.parametrize('command', ['organize', 'convert', 'preprocess'])
-@pytest.mark.parametrize('value', ['0', '-1', 'x', '1.5', '1_0', '+3', '٣', ' 3', '65', '1000000'])
+@pytest.mark.parametrize('value', ['0', '-1', 'x', 'abc', 'Auto', 'auto ', '1.5', '1_0', '+3', '٣', ' 3', '65', '1000000'])
 def test_workers_below_one_or_not_an_integer_is_a_usage_error(command, value, calls, capfd):
     with pytest.raises(SystemExit) as exc:
         cli.main([command, 'a', 'b', '--workers', value])
@@ -494,6 +495,7 @@ def test_workers_help_says_patient_processes_memory_and_same_output(command, cap
     assert ' '.join(cli.WORKERS_HELP.split()) in text
     assert 'each in its own process' in text and 'about 7 GB RAM each at 701x701x433' in text and 'output is the same for any value' in text
     assert 'thread' not in text
+    assert "default 'auto'" in text and 'first processed patient' in text and '0.8 of available memory' in text and 'an integer sets it' in text
 
 
 @pytest.mark.parametrize('command, aborted, reason', [('organize', cli.OrganizeAborted, cli.ORGANIZE_REASON_INTERNAL),
@@ -584,3 +586,7 @@ def test_a8_a_source_root_with_mode_0o444_exits_1_without_an_output_root(tmp_pat
         assert_root_refused(tmp_path, org, capsys)
     finally:
         org.chmod(0o755)
+
+
+def test_cli_cap_is_the_pools():
+    assert cli.MAX_WORKERS is pool.MAX_WORKERS

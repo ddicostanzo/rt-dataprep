@@ -400,3 +400,249 @@ def test_when_handle_raises_twice_the_first_exception_is_raised():
 
     delivered, error = run_guarded(2, [Task(w.sleep_then, ('a', 0.5)), Task(w.echo, ('b',))], handle)
     assert delivered == [(0, 'a'), (1, 'b')] and isinstance(error, SystemExit) and error.code == 3
+
+
+# --- sizing (#175): fixture /proc and /sys/fs/cgroup trees under tmp_path, never the real ones ---
+
+GB = 10**9
+
+
+def put(root, rel, text):
+    path = Path(root, rel)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def fake_host(root, cgroup_lines, available_kb=8_000_000):
+    put(root, 'proc/meminfo', f'MemTotal: 16000000 kB\nMemAvailable: {available_kb} kB\n')
+    put(root, 'proc/self/cgroup', cgroup_lines)
+
+
+def v2_level(root, path, limit, current=0, inactive=0):
+    base = f'sys/fs/cgroup{path}'
+    put(root, f'{base}/memory.max', f'{limit}\n')
+    put(root, f'{base}/memory.current', f'{current}\n')
+    put(root, f'{base}/memory.stat', f'anon 1\ninactive_file {inactive}\nactive_file 5\n')
+
+
+def v1_level(root, path, limit, usage=0, inactive=0):
+    base = f'sys/fs/cgroup/memory{path}'
+    put(root, f'{base}/memory.limit_in_bytes', f'{limit}\n')
+    put(root, f'{base}/memory.usage_in_bytes', f'{usage}\n')
+    put(root, f'{base}/memory.stat', f'cache 1\ntotal_inactive_file {inactive}\n')
+
+
+def test_available_ram_is_memavailable_without_any_cgroup_limit(tmp_path):
+    fake_host(tmp_path, '0::/job_1/step_2/user/task_0\n')
+    v2_level(tmp_path, '', 'max')
+    v2_level(tmp_path, '/job_1', 'max')
+    assert pool.available_ram(tmp_path) == 8_000_000 * 1024
+
+
+def test_cgroup_v2_ancestor_limit_caps_the_result_minus_non_reclaimable_use(tmp_path):
+    fake_host(tmp_path, '0::/job_1/step_2/user/task_0\n')
+    v2_level(tmp_path, '/job_1', 4 * GB, current=3 * GB, inactive=GB)  # free = 4 - (3 - 1) = 2 GB
+    v2_level(tmp_path, '/job_1/step_2/user/task_0', 'max', current=GB)  # 'max' on the leaf is no limit
+    assert pool.available_ram(tmp_path) == 2 * GB
+
+
+def test_cgroup_v2_tightest_level_wins(tmp_path):
+    fake_host(tmp_path, '0::/job_1/step_2\n')
+    v2_level(tmp_path, '/job_1', 4 * GB)
+    v2_level(tmp_path, '/job_1/step_2', 3 * GB)
+    assert pool.available_ram(tmp_path) == 3 * GB
+    v2_level(tmp_path, '/job_1/step_2', 6 * GB)
+    assert pool.available_ram(tmp_path) == 4 * GB
+
+
+def test_a_cgroup_limit_above_memavailable_does_not_raise_the_result(tmp_path):
+    fake_host(tmp_path, '0::/job_1\n')
+    v2_level(tmp_path, '/job_1', 100 * GB)
+    assert pool.available_ram(tmp_path) == 8_000_000 * 1024
+
+
+def test_cgroup_v1_uses_the_memory_controller_line_and_ignores_the_unlimited_sentinel(tmp_path):
+    fake_host(tmp_path, '12:cpu,cpuacct:/other\n4:memory:/job_1/step_2\n1:name=systemd:/x\n')
+    v1_level(tmp_path, '/job_1', 5 * GB, usage=3 * GB, inactive=GB)  # free = 5 - (3 - 1) = 3 GB
+    v1_level(tmp_path, '/job_1/step_2', 2**63 - 4096, usage=GB)  # unlimited sentinel
+    v1_level(tmp_path, '', 2**63 - 4096)
+    assert pool.available_ram(tmp_path) == 3 * GB
+
+
+def test_unreadable_meminfo_is_none(tmp_path):
+    put(tmp_path, 'proc/self/cgroup', '0::/job_1\n')
+    assert pool.available_ram(tmp_path) is None
+
+
+def test_an_unreadable_cgroup_file_is_no_limit_at_that_level(tmp_path):
+    fake_host(tmp_path, '0::/job_1/step_2\n')
+    v2_level(tmp_path, '/job_1', 3 * GB)
+    put(tmp_path, 'sys/fs/cgroup/job_1/step_2/memory.max', '2000000000\n')  # no memory.current or memory.stat beside it
+    assert pool.available_ram(tmp_path) == 3 * GB
+    put(tmp_path, 'proc/self/cgroup', '')  # no cgroup line at all
+    assert pool.available_ram(tmp_path) == 8_000_000 * 1024
+
+
+def test_a_negative_free_value_clamps_to_zero(tmp_path):
+    fake_host(tmp_path, '0::/job_1\n')
+    v2_level(tmp_path, '/job_1', GB, current=3 * GB)
+    assert pool.available_ram(tmp_path) == 0
+
+
+def test_usable_cpus_follows_the_affinity_mask_else_cpu_count(monkeypatch):
+    monkeypatch.setattr(os, 'sched_getaffinity', lambda pid: {0, 3, 5}, raising=False)
+    assert pool.usable_cpus() == 3
+    monkeypatch.delattr(os, 'sched_getaffinity')
+    monkeypatch.setattr(os, 'cpu_count', lambda: 6)
+    assert pool.usable_cpus() == 6
+    monkeypatch.setattr(os, 'cpu_count', lambda: None)
+    assert pool.usable_cpus() == 1
+
+
+@pytest.mark.parametrize('peak, available, cpus, remaining, expected', [
+    (GB, 10 * GB, 32, 100, 8),  # RAM binds: floor(0.8 * 10)
+    (3 * GB, 10 * GB, 32, 100, 2),  # floor(2.67)
+    (GB, 100 * GB, 4, 100, 4),  # CPUs bind
+    (GB, 1000 * GB, 128, 500, 64),  # MAX_WORKERS binds
+    (GB, 100 * GB, 32, 3, 3),  # patients left bind
+    (10 * GB, GB, 32, 100, 1),  # RAM for less than one worker: still 1
+    (GB, 0, 32, 100, 1),
+    (GB, 10 * GB, 32, 0, 1),
+    (GB, None, 32, 100, 1),  # RAM unknown
+    (0, 10 * GB, 32, 100, 1),  # peak unknown
+    (-1, 10 * GB, 32, 100, 1),
+])
+def test_size_workers_table(peak, available, cpus, remaining, expected):
+    assert pool.size_workers(peak, available, cpus, remaining) == expected
+
+
+def test_max_workers_is_64_and_resource_is_not_imported_at_module_level():
+    assert pool.MAX_WORKERS == 64
+    assert not hasattr(pool, 'resource')
+
+
+# --- run_auto (#175): probe in-process, then one sized pool.run ---
+
+class Probe:
+    """Patches the sizer's inputs and spies on pool.run; `chosen` is what the sizer returns."""
+
+    def __init__(self, monkeypatch, peak_kib=2_000_000, available=40 * GB, cpus=8, chosen=1):
+        self.calls, self.sized = [], []
+        real_run = pool.run
+
+        def spy(workers, tasks, handle):
+            self.calls.append((workers, list(tasks), handle))
+            return real_run(workers, tasks, handle)
+
+        def sizer(*args):
+            self.sized.append(args)
+            return chosen
+
+        class Usage:
+            ru_maxrss = peak_kib
+
+        import resource
+        monkeypatch.setattr(pool, 'run', spy)
+        monkeypatch.setattr(pool, 'size_workers', sizer)
+        monkeypatch.setattr(pool, 'available_ram', lambda root: available)
+        monkeypatch.setattr(pool, 'usable_cpus', lambda: cpus)
+        monkeypatch.setattr(resource, 'getrusage', lambda who: Usage)
+
+
+def echo_tasks(n):
+    return [Task(w.echo, (i,)) for i in range(n)]
+
+
+def test_run_auto_with_an_int_is_one_unchanged_pool_run(monkeypatch):
+    probe = Probe(monkeypatch)
+    tasks, seen = echo_tasks(3), []
+
+    def handle(index, result):
+        seen.append((index, result))
+
+    assert pool.run_auto(1, tasks, handle, lambda k: pytest.fail('processed is for auto only')) == 1
+    assert [(n, t) for n, t, _ in probe.calls] == [(1, tasks)] and probe.calls[0][2] is handle
+    assert seen == [(0, 0), (1, 1), (2, 2)] and probe.sized == []
+
+
+def test_auto_probes_until_a_processed_patient_then_sizes_one_pool_for_the_rest(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    probe = Probe(monkeypatch, peak_kib=3_000_000, available=40 * GB, cpus=8, chosen=2)
+    tasks, seen, done = echo_tasks(5), [], set()
+
+    def handle(index, result):
+        seen.append((index, result))
+        if index == 1 and result == 1:  # patient 1 is read first, its follow-up is what processes it
+            return Task(w.echo, ('copy',))
+        if result == 'copy' or index >= 2:
+            done.add(index)
+
+    assert pool.run_auto('auto', tasks, handle, lambda k: k in done) == 2
+    assert [(n, [t.args for t in ts]) for n, ts, _ in probe.calls] == [
+        (1, [(0,)]), (1, [(1,)]), (2, [(2,), (3,), (4,)])]  # the follow-up ran inside the probe call for patient 1
+    assert probe.sized == [(3_000_000 * 1024, 40 * GB, 8, 3)]
+    assert sorted(seen, key=str) == sorted([(0, 0), (1, 1), (1, 'copy'), (2, 2), (3, 3), (4, 4)], key=str)  # original indexes
+    assert any(r.levelno == logging.INFO and '2' in r.getMessage() for r in caplog.records)
+
+
+def test_the_pool_call_after_the_probe_hands_the_handle_original_indexes(monkeypatch):
+    Probe(monkeypatch, chosen=2)
+    seen = []
+    tasks = echo_tasks(4)
+    pool.run_auto('auto', tasks, lambda i, r: seen.append((i, r)), lambda k: True)  # a real N=2 pool for tasks 1..3
+    assert sorted(seen) == [(0, 0), (1, 1), (2, 2), (3, 3)]
+
+
+def test_no_second_pool_run_when_the_probe_patient_was_the_last(monkeypatch):
+    probe = Probe(monkeypatch)
+    assert pool.run_auto('auto', echo_tasks(1), lambda i, r: None, lambda k: True) == 1
+    assert [n for n, _, _ in probe.calls] == [1]
+
+
+def test_all_unprocessed_means_every_patient_in_its_own_single_pool_run(monkeypatch):
+    probe = Probe(monkeypatch, chosen=4)
+    assert pool.run_auto('auto', echo_tasks(3), lambda i, r: None, lambda k: False) == 1
+    assert [(n, len(ts)) for n, ts, _ in probe.calls] == [(1, 1)] * 3 and probe.sized == []
+
+
+def test_no_tasks_means_no_pool_run(monkeypatch):
+    probe = Probe(monkeypatch)
+    assert pool.run_auto('auto', [], lambda i, r: None, lambda k: True) == 1
+    assert probe.calls == []
+
+
+def test_probe_ends_on_abort_failed_or_a_raising_handle(monkeypatch):
+    probe = Probe(monkeypatch, chosen=2)
+    assert pool.run_auto('auto', echo_tasks(3), lambda i, r: ABORT, lambda k: False) == 1
+    assert len(probe.calls) == 1
+
+    probe.calls.clear()
+    seen = []
+    tasks = [Task(w.fail, (0,)), *echo_tasks(2)]
+    pool.run_auto('auto', tasks, lambda i, r: seen.append(r), lambda k: False)
+    assert len(probe.calls) == 1 and seen == [Failed('RuntimeError')]
+
+    probe.calls.clear()
+
+    def raising(index, result):
+        raise ValueError('SYNTHETIC')
+
+    with pytest.raises(ValueError):
+        pool.run_auto('auto', echo_tasks(3), raising, lambda k: True)
+    assert len(probe.calls) == 1 and probe.sized == []
+
+
+def test_keyboard_interrupt_in_the_probe_propagates(monkeypatch):
+    probe = Probe(monkeypatch)
+    with pytest.raises(KeyboardInterrupt):
+        pool.run_auto('auto', [Task(w.interrupt, (0,)), *echo_tasks(2)], lambda i, r: None, lambda k: False)
+    assert len(probe.calls) == 1
+
+
+def test_without_the_resource_module_the_remaining_patients_run_one_at_a_time(monkeypatch):
+    probe = Probe(monkeypatch, chosen=9)
+    monkeypatch.setitem(sys.modules, 'resource', None)  # import resource -> ImportError, as on Windows
+    sizes = []
+    monkeypatch.setattr(pool, 'size_workers', lambda *args: sizes.append(args) or 1)
+    assert pool.run_auto('auto', echo_tasks(3), lambda i, r: None, lambda k: True) == 1
+    assert [n for n, _, _ in probe.calls] == [1, 1] and sizes[0][0] <= 0

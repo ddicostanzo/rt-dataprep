@@ -1827,3 +1827,40 @@ def test_an_unstatable_entry_the_name_filters_drop_is_never_statted(tree, monkey
     monkeypatch.setattr(Path, 'stat', stat)
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome) for r in rows] == [('plan_1', conv.OUTCOME_CONVERTED)]
+
+
+# ---------------------------------------------------------------- workers='auto' (#175)
+
+def auto_pool_sizes(monkeypatch, n=2):
+    """Size every auto run as n and record the worker count of each pool.run call."""
+    from rt_dataprep import pool
+    sizes, real = [], pool.run
+    monkeypatch.setattr(pool, 'size_workers', lambda *args: n)
+    monkeypatch.setattr(pool, 'run', lambda workers, tasks, handle: (sizes.append(workers), real(workers, tasks, handle))[1])
+    return sizes
+
+
+def test_workers_auto_gives_the_same_rows_and_files_as_one_worker(tree, tmp_path, monkeypatch, caplog):
+    org, _ = tree
+    three_patients(org)
+    sizes = auto_pool_sizes(monkeypatch)
+    caplog.set_level(logging.INFO)
+    one = conv.convert(org, tmp_path / 'out1')
+    sizes.clear()  # the workers=1 run's pool.run call
+    auto = conv.convert(org, tmp_path / 'out_auto', workers='auto')
+    assert sizes == [1, 2]  # the probe patient in-process, then a real pool of 2 for the other two
+    assert rows_of(auto) == rows_of(one) and len(one.rows) >= 3
+    assert all(r.outcome == conv.OUTCOME_CONVERTED for r in one.rows if r.folder.startswith('plan_'))
+    assert written_bytes(tmp_path / 'out_auto') == written_bytes(tmp_path / 'out1') and written_bytes(tmp_path / 'out1')
+    lines = [r.getMessage() for r in caplog.records if TIMING.fullmatch(r.getMessage())]
+    assert [TIMING.fullmatch(line).groups()[-1] for line in lines] == ['1', '2']  # the count run_auto returned, never 'auto'
+
+
+def test_workers_auto_on_a_rerun_without_overwrite_starts_no_pool(tree, monkeypatch):
+    org, out = tree
+    three_patients(org)
+    conv.convert(org, out)
+    sizes = auto_pool_sizes(monkeypatch)
+    rows = conv.convert(org, out, workers='auto').rows
+    assert {r.outcome for r in rows} == {conv.OUTCOME_SKIPPED} and len(rows) >= 3
+    assert sizes == [1, 1, 1]  # every patient was skipped in the probe: no converted patient, no sized pool

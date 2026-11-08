@@ -1,0 +1,156 @@
+{
+ "metadata": {
+  "title": "--workers auto: size the patient pool from a measured probe (#175)",
+  "spec": "docs/specs/2026-11-08-auto-workers.md",
+  "issue": 175,
+  "branch": "feat/auto-workers",
+  "created": "2026-11-08"
+ },
+ "tasks": [
+  {
+   "id": "task-01",
+   "title": "Sizing: RAM and CPU readers and the pure sizer in pool.py",
+   "depends_on": [],
+   "files": [
+    "src/rt_dataprep/pool.py",
+    "tests/test_pool.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/pool.py": "modify",
+    "tests/test_pool.py": "modify"
+   },
+   "test_approach": "TDD in tests/test_pool.py with fixture /proc and /sys/fs/cgroup trees under tmp_path (the readers take a root path). No real cgroup or /proc reads in tests.",
+   "criteria": [
+    "AC1: available_ram(root) returns MemAvailable from <root>/proc/meminfo when no cgroup limit is set anywhere on the path from /proc/self/cgroup up to the root.",
+    "AC2: cgroup v2: a memory.max set on an ancestor (job_X) and 'max' on the leaf (job_X/step_Y/user/task_0) caps the result at that ancestor's limit \u2212 (memory.current \u2212 inactive_file from memory.stat); the tightest level wins; 'max' is no limit.",
+    "AC3: cgroup v1: the memory controller line of /proc/self/cgroup is used; memory.limit_in_bytes \u2212 (memory.usage_in_bytes \u2212 total_inactive_file) per level; the v1 'unlimited' sentinel (>= 2**60) is no limit.",
+    "AC4: available_ram returns None when <root>/proc/meminfo is unreadable; an unreadable cgroup file is treated as no limit at that level; a negative free value clamps to 0.",
+    "AC5: usable_cpus() returns len(os.sched_getaffinity(0)) where available, else os.cpu_count() or 1.",
+    "AC6: size_workers(peak, available, cpus, remaining) = max(1, min(floor(0.8*available/peak), cpus, MAX_WORKERS=64, remaining)); available None or peak <= 0 -> 1. Pure, no I/O; covered by a table test including each limit binding. `MAX_WORKERS = 64` is defined in pool.py.",
+    "AC7: pool.run is unchanged (git diff shows no edit inside run()).",
+    "Guardrail [[measure-a-phase-peak-rss-by-resetting-vmhwm]]: the probe peak is documented in a comment as the calling process's lifetime high-water mark (ru_maxrss, KiB on Linux), an overestimate by design.",
+    "AC8: pool.py does not import `resource` at module level (the package must still import on Windows); the import lives in run_auto's auto branch (task-02)."
+   ]
+  },
+  {
+   "id": "task-02",
+   "title": "pool.run_auto: probe patients in-process, then one sized pool.run",
+   "depends_on": [
+    "task-01"
+   ],
+   "files": [
+    "src/rt_dataprep/pool.py",
+    "tests/test_pool.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/pool.py": "modify",
+    "tests/test_pool.py": "modify"
+   },
+   "test_approach": "TDD in tests/test_pool.py with inline module-level task functions (tests/pool_workers.py pattern) and a patched sizer/peak reader; assert the sequence of pool.run calls via a spy.",
+   "criteria": [
+    "AC1: run_auto(workers, tasks, handle, processed) with an int workers calls pool.run(workers, tasks, handle) once, unchanged; it returns the worker count used.",
+    "AC2: with workers='auto' it calls pool.run(1, [tasks[k]], h) for k = 0.. until processed(k) is true after task k's delivery (follow-ups included), then sizes N from peak = resource.getrusage(RUSAGE_SELF).ru_maxrss \u00d7 1024 bytes (Linux KiB; a spy asserts the sizer receives exactly that byte value), available_ram('/'), usable_cpus() and len(tasks)-k-1, and calls pool.run(N, tasks[k+1:], handle offset by k+1) \u2014 handle always sees original indexes.",
+    "AC3: remaining 0 -> no second pool.run call; all tasks unprocessed -> every task ran in its own pool.run(1, ...) call and no pool with N>1 ever started. Empty `tasks` -> no pool.run call, returns 1.",
+    "AC4: during the probe, a handle returning ABORT, a Failed result, or handle raising ends run_auto with no further pool.run call (the exception propagates); KeyboardInterrupt propagates.",
+    "AC5: one INFO log line after sizing with counts only: probe patients, peak GB, available GB (or 'unknown'), CPUs, chosen N.",
+    "AC6: when `resource` cannot be imported (Windows), the peak is unknown and N = 1 for the remaining patients."
+   ]
+  },
+  {
+   "id": "task-03",
+   "title": "organize and convert accept workers='auto'",
+   "depends_on": [
+    "task-02"
+   ],
+   "files": [
+    "src/rt_dataprep/organize.py",
+    "src/rt_dataprep/convert.py",
+    "tests/test_organize.py",
+    "tests/test_convert.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/organize.py": "modify",
+    "src/rt_dataprep/convert.py": "modify",
+    "tests/test_organize.py": "modify",
+    "tests/test_convert.py": "modify"
+   },
+   "test_approach": "TDD: parity tests on a >=3-patient synthetic fixture with pool.size_workers patched to return 2 (so a spawned pool really starts), comparing report rows and output files to workers=1; a rerun-without-overwrite case where the first patients are skipped.",
+   "criteria": [
+    "AC1: organize(..., workers='auto') and convert(..., workers='auto') call pool.run_auto with a processed(k) predicate over their own state: organize `done[k].outcome == organized`; convert any row in `results[dispatched[k]][0]` with outcome converted (task index -> folder index via `dispatched`, which differs when a repeated name was refused).",
+    "AC2: with the sizer patched to 2 on a >=3-patient fixture, report rows (order and content) and output files equal those of workers=1.",
+    "AC3: the 'workers %d' timing log line logs the count run_auto returned (an int), never 'auto'.",
+    "AC4: a rerun without --overwrite (all outputs exist) runs with no process pool (every patient skipped in the probe).",
+    "AC5: default workers=1 for both functions is unchanged; docstrings mention 'auto'."
+   ]
+  },
+  {
+   "id": "task-04",
+   "title": "preprocess accepts workers='auto'",
+   "depends_on": [
+    "task-02"
+   ],
+   "files": [
+    "src/rt_dataprep/preprocess.py",
+    "tests/test_preprocess.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/preprocess.py": "modify",
+    "tests/test_preprocess.py": "modify"
+   },
+   "test_approach": "TDD as task-03 for preprocess, on a >=3-patient converted fixture with the sizer patched to 2.",
+   "criteria": [
+    "AC1: preprocess(..., workers='auto') calls pool.run_auto with a processed predicate: any row in `results[dispatched[k]][0]` with outcome preprocessed (preprocess has no timing log line; none is added).",
+    "AC2: with the sizer patched to 2 on a >=3-patient fixture, preprocess_report rows and output files equal those of workers=1.",
+    "AC4: default workers=1 unchanged; docstring mentions 'auto'."
+   ]
+  },
+  {
+   "id": "task-05",
+   "title": "CLI --workers defaults to auto; help and README",
+   "depends_on": [
+    "task-03",
+    "task-04"
+   ],
+   "files": [
+    "src/rt_dataprep/__main__.py",
+    "tests/test_cli.py",
+    "README.md"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/__main__.py": "modify",
+    "tests/test_cli.py": "modify",
+    "README.md": "modify"
+   },
+   "test_approach": "TDD in tests/test_cli.py with monkeypatched stage functions as the existing --workers cases do; README checked by reading.",
+   "criteria": [
+    "AC1: the --workers type accepts 'auto' and 1..64, rejects 0, 'abc', '65', '-1' with the existing usage error; default is 'auto' for organize, convert and preprocess; the parsed value reaches the stage function unchanged. `__main__.py` imports MAX_WORKERS from pool and its own definition is removed.",
+    "AC2: WORKERS_HELP says the default 'auto' sizes from the first processed patient's peak RAM (0.8 of available memory, capped by CPUs) and that an integer sets it.",
+    "AC3: README 'Parallel patients' section and the command table describe auto as the CLI default, the probe, the 0.8 headroom, the cgroup/Slurm --mem limit, that an OOM-killed worker aborts the run (report kept; rerun skips finished patients; a fixed --workers N overrides), and that the Python API default stays 1 and accepts 'auto'.",
+    "AC4: the 'about 7 GB RAM each' figure stays as guidance for a fixed N.",
+    "AC5: existing tests updated, not loosened: test_workers_reaches_each_stage_and_defaults_to_one (tests/test_cli.py:460-463) expects 'auto'; WORKERS_HELP keeps 'about 7 GB RAM each at 701x701x433' and 'output is the same for any value' (tests/test_cli.py:494)."
+   ]
+  }
+ ],
+ "groups": [
+  [
+   "task-01"
+  ],
+  [
+   "task-02"
+  ],
+  [
+   "task-03",
+   "task-04"
+  ],
+  [
+   "task-05"
+  ]
+ ],
+ "Deferred": [
+  "ITK threads per worker oversubscription",
+  "a later patient much larger than the probe can OOM-abort the run",
+  "SLURM_MEM_PER_NODE without cgroup enforcement (OSC enforces memory.max, checked 2026-11-08 job 8403365); cgroup v2 cpu.max quota",
+  "per-patient wall time",
+  "macOS/Windows: auto -> 1"
+ ]
+}

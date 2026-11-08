@@ -1165,3 +1165,41 @@ def test_a_leftover_partial_is_never_published_with_the_new_copy(tmp_path):
     with pytest.raises(FileExistsError):
         org._copy_patient(misc.parent, out, 'SYNTHETIC_A', [], [misc], overwrite=False)
     assert not os.path.lexists(out / 'SYNTHETIC_A')
+
+
+# ---------------------------------------------------------------- workers='auto' (#175)
+
+def auto_pool_sizes(monkeypatch, n=2):
+    """Size every auto run as n and record the worker count of each pool.run call."""
+    from rt_dataprep import pool
+    sizes, real = [], pool.run
+    monkeypatch.setattr(pool, 'size_workers', lambda *args: n)
+    monkeypatch.setattr(pool, 'run', lambda workers, tasks, handle: (sizes.append(workers), real(workers, tasks, handle))[1])
+    return sizes
+
+
+def test_workers_auto_gives_the_same_rows_and_copied_trees_as_one_worker(tree, tmp_path, monkeypatch, caplog):
+    src, _ = tree
+    for name in ('SYNTHETIC_A', 'SYNTHETIC_B', 'SYNTHETIC_C'):
+        planning_study(src / name / 'p', pid=name)
+    sizes = auto_pool_sizes(monkeypatch)
+    caplog.set_level(logging.INFO)
+    one = organize(src, tmp_path / 'out1')
+    sizes.clear()  # the workers=1 run's pool.run call
+    auto = organize(src, tmp_path / 'out_auto', workers='auto')
+    assert sizes == [1, 2]  # the probe patient in-process, then a real pool of 2 for the other two
+    assert auto.rows == one.rows and [r.outcome for r in auto.rows] == [org.OUTCOME_ORGANIZED] * 3
+    assert written(tmp_path / 'out_auto') == written(tmp_path / 'out1') and written(tmp_path / 'out1')
+    lines = [r.getMessage() for r in caplog.records if TIMING.search(r.getMessage())]
+    assert [TIMING.search(line).group(5) for line in lines] == ['1', '2']  # the count run_auto returned, never 'auto'
+
+
+def test_workers_auto_on_a_rerun_without_overwrite_starts_no_pool(tree, monkeypatch):
+    src, out = tree
+    for name in ('SYNTHETIC_A', 'SYNTHETIC_B', 'SYNTHETIC_C'):
+        planning_study(src / name / 'p', pid=name)
+    organize(src, out)
+    sizes = auto_pool_sizes(monkeypatch)
+    report = organize(src, out, workers='auto')
+    assert [r.outcome for r in report.rows] == [org.OUTCOME_SKIPPED] * 3
+    assert sizes == [1, 1, 1]  # every patient was skipped in the probe: no processed patient, no sized pool

@@ -80,9 +80,9 @@ count before accepting the cohort. Successful process completion can include ref
 
 | Command | Inputs and output | Main options |
 | --- | --- | --- |
-| `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers 1..64` (default 1); `--overwrite` |
-| `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers 1..64` (default 1); `--overwrite` |
-| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers 1..64` (default 1); at least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--new-spacing`, `--final-spacing`, `--new-shape`, `--allow-crop`, `--min-mask-retention`, `--ahe-kernel-mm`, `--ahe-bins`, `--ahe-clip-limit`, `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
+| `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers auto` or `1..64` (default `auto`); `--overwrite` |
+| `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers auto` or `1..64` (default `auto`); `--overwrite` |
+| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers auto` or `1..64` (default `auto`); at least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--new-spacing`, `--final-spacing`, `--new-shape`, `--allow-crop`, `--min-mask-retention`, `--ahe-kernel-mm`, `--ahe-bins`, `--ahe-clip-limit`, `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
 | `manifest ROOT` | Write `ROOT/manifest.csv` and a dated copy. | Works on converted or preprocessed trees. |
 | `split ROOT` | Read `ROOT/manifest.csv`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
 
@@ -91,8 +91,16 @@ Use `uv run python -m rt_dataprep COMMAND --help` for exact arguments. Study exc
 
 ### Parallel patients (`--workers`)
 
-`--workers N` (1 to 64, default 1; organize, convert and preprocess) processes N patients at a time, each in its own
-process. The output and row order are the same for any value. Budget about 7 GB of RAM per worker at the full
+`--workers auto|N` (organize, convert and preprocess; default `auto`) processes several patients at a time, each in its
+own process. The output and row order are the same for any value.
+
+`auto` runs patients one at a time until the first one is processed, reads that patient's peak RAM, and starts as many
+workers as fit in 0.8 of the available memory, capped by the usable CPUs, 64 and the patients left. Available memory
+honours a cgroup limit, so under Slurm it is the `--mem` the job was given rather than the node's RAM. If a later patient
+needs much more than the first (a small first scan, then full 701 x 701 x 433 grids), a worker can be OOM-killed; that
+aborts the run with the report kept, a rerun skips the finished patients, and a fixed `--workers N` overrides the sizing.
+
+`--workers N` (1 to 64) runs exactly N patients at a time. Budget about 7 GB of RAM per worker at the full
 701 x 701 x 433 grid. SimpleITK and BLAS threads are not capped per process, so N workers can use more than N cores.
 Ctrl-C in a terminal reaches the workers too. With N > 1, `kill -INT` sent to the parent process alone makes it wait for
 the patients already running, then stop with the report written; with N = 1 the patient runs in the parent and stops at
@@ -386,8 +394,11 @@ if __name__ == '__main__':  # required with workers > 1
     main()
 ```
 
-With `workers` above 1, each worker is a new `spawn`ed process that imports the calling script. Keep the calls under an
-`if __name__ == '__main__':` guard, as above; without it every worker re-runs the script and the stage aborts. With
+The Python API default stays `workers=1`; pass `workers='auto'` for the sizing described under
+[Parallel patients](#parallel-patients---workers), or an integer from 1 to 64.
+
+With `workers` above 1 (or `'auto'`), each worker is a new `spawn`ed process that imports the calling script. Keep the
+calls under an `if __name__ == '__main__':` guard, as above; without it every worker re-runs the script and the stage aborts. With
 `workers=1` the patients run in the calling process and no guard is needed.
 
 | Function | Returns | Report written |

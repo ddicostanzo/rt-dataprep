@@ -8,9 +8,11 @@ message and remote traceback can quote a patient). Nothing here formats, logs or
 import contextlib
 import logging
 import multiprocessing
+import os
 import signal
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from pathlib import Path, PurePosixPath
 from typing import Callable, NamedTuple
 
 
@@ -192,3 +194,104 @@ def run(workers, tasks, handle):
     finally:
         if masked:
             signal.pthread_sigmask(signal.SIG_SETMASK, saved)
+
+
+log = logging.getLogger(__name__)
+MAX_WORKERS = 64
+_V1_UNLIMITED = 2**60  # v1 reports "no limit" as a number near 2**63
+
+
+def _read(path):
+    return Path(path).read_text()
+
+
+def _cgroup_free(base, limit_name, usage_name, inactive_name):
+    """Free bytes under one cgroup level (limit minus use that cannot be reclaimed), or None for no limit or unreadable."""
+    try:
+        limit = _read(base / limit_name).strip()
+        if limit == 'max' or int(limit) >= _V1_UNLIMITED:
+            return None
+        stat = dict(line.split() for line in _read(base / 'memory.stat').splitlines())
+        return int(limit) - (int(_read(base / usage_name)) - int(stat.get(inactive_name, 0)))
+    except (OSError, ValueError):
+        return None
+
+
+def available_ram(root='/'):
+    """Bytes of RAM this process may still use: MemAvailable, capped by the tightest cgroup limit on its cgroup path and
+    every ancestor (Slurm sets --mem on job_X, the process runs in job_X/step_Y/user/task_0). None when /proc/meminfo is unreadable."""
+    try:
+        meminfo = dict(line.split(':', 1) for line in _read(Path(root, 'proc/meminfo')).splitlines())
+        free = int(meminfo['MemAvailable'].split()[0]) * 1024
+    except (OSError, ValueError, KeyError):
+        return None
+    try:
+        lines = [line.split(':', 2) for line in _read(Path(root, 'proc/self/cgroup')).splitlines()]
+    except OSError:
+        lines = []
+    v1 = next((path for _, controllers, path in lines if 'memory' in controllers.split(',')), None)
+    v2 = next((path for hierarchy, _, path in lines if hierarchy == '0'), None)
+    if v1 is not None:
+        top, names = Path(root, 'sys/fs/cgroup/memory'), ('memory.limit_in_bytes', 'memory.usage_in_bytes', 'total_inactive_file')
+    elif v2 is not None:
+        top, names = Path(root, 'sys/fs/cgroup'), ('memory.max', 'memory.current', 'inactive_file')
+    else:
+        return max(0, free)
+    path = PurePosixPath(v1 or v2)
+    for level in (path, *path.parents):
+        left = _cgroup_free(top / level.relative_to('/'), *names)
+        if left is not None:
+            free = min(free, left)
+    return max(0, free)
+
+
+def usable_cpus():
+    return len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else os.cpu_count() or 1
+
+
+def size_workers(peak, available, cpus, remaining):
+    """Patient processes to run: 0.8 of the available RAM over the probe's peak, within CPUs, MAX_WORKERS and patients left.
+    The peak is the probing process's lifetime high-water mark (ru_maxrss, KiB on Linux): an overestimate by design,
+    it also counts the caller's own memory, so it errs toward fewer workers."""
+    if available is None or peak <= 0:
+        return 1
+    return max(1, min(4 * available // (5 * peak), cpus, MAX_WORKERS, remaining))
+
+
+def run_auto(workers, tasks, handle, processed):
+    """pool.run for an int `workers`. For 'auto': run patients one pool.run(1, ...) at a time in this process until
+    processed(k) is true after patient k (its follow-ups included), size N from that run's peak RSS, then run the
+    rest in one pool.run(N, ...) whose handle still sees the original indexes. Returns the worker count used.
+    An ABORT, a Failed result or an exception from handle during the probe ends it with no further pool.run."""
+    if workers != 'auto':
+        run(workers, tasks, handle)
+        return workers
+    current, ended = [0], []  # the probe patient's index; set once a probe result ends the stage
+
+    def probe_handle(index, result):
+        follow = handle(current[0], result)
+        if follow is ABORT or isinstance(result, Failed):
+            ended.append(True)
+        return follow
+
+    for k, task in enumerate(tasks):
+        current[0] = k
+        run(1, [task], probe_handle)
+        if ended:
+            return 1
+        if processed(k):
+            break
+    else:
+        return 1
+    try:
+        import resource  # POSIX only: imported here so the package still imports on Windows
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024  # KiB on Linux
+    except ImportError:
+        peak = 0  # unknown: size_workers gives 1
+    available, cpus, remaining = available_ram('/'), usable_cpus(), len(tasks) - k - 1
+    n = size_workers(peak, available, cpus, remaining)
+    log.info('auto workers: %d probe patient(s), peak %.1f GB, available %s GB, %d CPUs, workers %d', k + 1, peak / 1e9,
+             'unknown' if available is None else f'{available / 1e9:.1f}', cpus, n)
+    if remaining:
+        run(n, tasks[k + 1:], lambda index, result: handle(index + k + 1, result))
+    return n

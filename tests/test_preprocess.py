@@ -2374,6 +2374,32 @@ def test_two_patient_processes_write_the_same_files_and_rows_as_one(tmp_path):
     assert written_bytes(tmp_path / 'out2') == written_bytes(tmp_path / 'out1') and written_bytes(tmp_path / 'out1')
 
 
+def test_auto_workers_probe_then_a_real_pool_write_the_same_files_and_rows_as_one(tmp_path, monkeypatch):
+    from rt_dataprep import pool
+    converted = tmp_path / 'converted'
+    three_patients(converted)
+    one = pre.preprocess(converted, tmp_path / 'out1', SMALL)
+    sized = []
+    monkeypatch.setattr(pool, 'size_workers', lambda *args: sized.append(args) or 2)  # a small fixture would size to 1: force a spawned pool
+    auto = pre.preprocess(converted, tmp_path / 'out2', SMALL, workers='auto')
+    assert len(sized) == 1 and sized[0][3] == 2  # sized once, for the two patients after the probe
+    assert rows_of(auto) == rows_of(one) and len(one.rows) >= 3
+    assert all(r.outcome == 'preprocessed' for r in one.rows)
+    assert written_bytes(tmp_path / 'out2') == written_bytes(tmp_path / 'out1') and written_bytes(tmp_path / 'out1')
+
+
+def test_auto_workers_never_size_when_every_patient_is_skipped(tmp_path, monkeypatch):
+    from rt_dataprep import pool
+    converted = tmp_path / 'converted'
+    three_patients(converted)
+    out = tmp_path / 'out'
+    pre.preprocess(converted, out, SMALL)  # all three done; the rerun skips them
+    sizes = []
+    monkeypatch.setattr(pool, 'size_workers', lambda *args: sizes.append(args) or 2)
+    report = pre.preprocess(converted, out, SMALL, workers='auto')
+    assert report.rows and not any(r.outcome == 'preprocessed' for r in report.rows) and not sizes
+
+
 @pytest.mark.parametrize('workers', [1, 2])
 def test_under_overwrite_a_case_repeat_is_refused_by_the_parent_and_the_first_in_sorted_order_wins(tmp_path, workers):
     converted = tmp_path / 'converted'
