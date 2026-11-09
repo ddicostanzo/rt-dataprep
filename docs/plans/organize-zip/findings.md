@@ -48,3 +48,6 @@ Gotchas:
 - A local named `partial` in `_copy_patient` shadows `functools.partial`; hence `import functools`.
 - `listing()` is also used for assertions where the lock file would otherwise appear; the three helpers are the only edits in test_organize.py.
 - KeyboardInterrupt test uses workers=1 (spawned workers do not see monkeypatches); the workers=2 test patches nothing.
+
+## review-2
+PASS, no BLOCKING. Deferred NOTEs: sweep glob .unzip-* also matches a dead .unzip-X.partial (harmless under lock); staging of a dropped task B waits for the run-level finally; AC11 test asserts >=3 images instead of the 4 outputs (MR not pinned); WARN count rglob on an unreadable leftover.
