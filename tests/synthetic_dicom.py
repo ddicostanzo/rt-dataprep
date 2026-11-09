@@ -7,6 +7,7 @@ is set only when asked for. Files carry file meta and the explicit-VR little-end
 
 Every writer takes the shared metadata keywords patient_id=, study_uid=, series_date=, series_time=,
 study_date=, study_time= and manufacturer_model_name= (all default to "not set" / a fresh study UID / SYNTHETIC_ID), forwarded to `_dataset`.
+They also take tags=, a dict of any other DICOM keyword -> value set just before the file is written (see `_apply_tags`).
 """
 import contextlib
 from pathlib import Path
@@ -25,7 +26,7 @@ INVALID_DA = 'SYNTHETIC_notadate'
 
 def _dataset(path, sop_class_uid, modality, sop_uid=None, frame_uid=None, series_uid=None, invalid_values=False,
              patient_id=None, study_uid=None, series_date=None, series_time=None, study_date=None, study_time=None,
-             manufacturer_model_name=None):
+             manufacturer_model_name=None, tags=None):
     ds = Dataset()
     ds.SOPClassUID = sop_class_uid
     ds.SOPInstanceUID = sop_uid or generate_uid()
@@ -54,11 +55,33 @@ def _dataset(path, sop_class_uid, modality, sop_uid=None, frame_uid=None, series
     ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
     ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
     ds.path = Path(path)  # not a DICOM element: a plain attribute for _save
+    ds.extra_tags = dict(tags or {})  # likewise: applied by _save, after the writer's own tags
     return ds
+
+
+def _apply_tags(ds, tags):
+    """
+    Set each keyword of `tags` on `ds`. A list of dicts is a sequence (one item per dict, nested the same way); None
+    deletes the tag; anything else is the value as given ('' writes an empty element, a list a multi-valued one).
+    """
+    for keyword, value in tags.items():
+        if value is None:
+            if keyword in ds:
+                delattr(ds, keyword)
+        elif isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            items = []
+            for spec in value:
+                item = Dataset()
+                _apply_tags(item, spec)
+                items.append(item)
+            setattr(ds, keyword, items)
+        else:
+            setattr(ds, keyword, value)
 
 
 def _save(ds):
     with _writing_unvalidated():
+        _apply_tags(ds, ds.extra_tags)
         pydicom.dcmwrite(ds.path, ds, enforce_file_format=True)
     return ds.path
 
@@ -77,7 +100,7 @@ def _writing_unvalidated():
 
 def write_ct_series(folder, values, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), series_uid=None, frame_uid=None,
                     prefix='ct', image_type=None, modality='CT', orientation=None, positions=None, rescales=None,
-                    number_of_frames=None, pixel_spacing=True, **meta):
+                    number_of_frames=None, pixel_spacing=True, per_slice=None, **meta):
     """
     One CT slice file per z of `values` (a (z, y, x) int array; HU as stored, slope 1, intercept 0), axial, slice k at
     origin z + k * spacing z, in files named <prefix>_<k>.dcm (a second series in the folder needs its own prefix).
@@ -86,7 +109,8 @@ def write_ct_series(folder, values, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0
     All optional, defaults as above: orientation: the 6 ImageOrientationPatient values (slices then step spacing z along
     row x column cosines; spacing is (between columns, between rows, between slices)). positions: one ImagePositionPatient
     (x, y, z) per slice, replacing the computed ones (jitter, a gap, duplicates). rescales: one (slope, intercept) per
-    slice. number_of_frames sets the NumberOfFrames tag only. pixel_spacing=False omits PixelSpacing.
+    slice. number_of_frames sets the NumberOfFrames tag only. pixel_spacing=False omits PixelSpacing. per_slice: one dict
+    (or None) of extra tags per slice, merged over tags= (see _apply_tags; None as a value deletes a tag on that slice).
     """
     series_uid, frame_uid = series_uid or generate_uid(), frame_uid or generate_uid()
     values = np.asarray(values, dtype=np.int16)
@@ -103,6 +127,8 @@ def write_ct_series(folder, values, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0
     for k, (plane, position, (slope, intercept)) in enumerate(zip(values, positions, rescales, strict=True)):
         ds = _dataset(Path(folder) / f'{prefix}_{k:03d}.dcm', sop_class, modality, frame_uid=frame_uid,
                       series_uid=series_uid, **meta)
+        if per_slice:
+            ds.extra_tags.update(per_slice[k] or {})
         if image_type:
             ds.ImageType = list(image_type)
         ds.InstanceNumber = k + 1
@@ -285,7 +311,7 @@ def write_rtstruct_rois(path, ct, rois, contour_images=True, sop_uid=None, **met
     """
     One RTSTRUCT on the frame of reference of the CT series dict `ct` (from write_ct_series), referencing that series, with
     any mix of ROIs. `rois` is a list of dicts with number, name, interpreted (the RTROIInterpretedType, default 'ORGAN';
-    None writes no observation) and kind:
+    None writes no observation), algorithm (the ROIGenerationAlgorithm, default 'AUTOMATIC') and kind:
       'box': box=((z0, z1), (y0, y1), (x0, x1)), INCLUSIVE voxel indices; one CLOSED_PLANAR rectangle per slice z0..z1 with
              its corners at the CENTRES of the extreme voxels, in patient mm (DicomRTTool 6.2 rounds vertices to the nearest
              voxel and fills the vertex voxels, so half-step corners would grow the box by a voxel on the high side and
@@ -307,7 +333,7 @@ def write_rtstruct_rois(path, ct, rois, contour_images=True, sop_uid=None, **met
         entry = Dataset()
         entry.ROINumber, entry.ROIName = number, roi['name']
         entry.ReferencedFrameOfReferenceUID = ct['frame_uid']
-        entry.ROIGenerationAlgorithm = 'AUTOMATIC'
+        entry.ROIGenerationAlgorithm = roi.get('algorithm', 'AUTOMATIC')
         rows_out.append(entry)
         contour = Dataset()
         contour.ReferencedROINumber = number
