@@ -51,3 +51,6 @@ Gotchas:
 
 ## review-2
 PASS, no BLOCKING. Deferred NOTEs: sweep glob .unzip-* also matches a dead .unzip-X.partial (harmless under lock); staging of a dropped task B waits for the run-level finally; AC11 test asserts >=3 images instead of the 4 outputs (MR not pinned); WARN count rglob on an unreadable leftover.
+
+## review-loop-pass-1
+Code review: 1 BLOCKING (CR-1 sweep matched a patient .old/.partial) fixed in 73db848, verified. Spec axis: all criteria met. Deferred filed: #242 #243 #244 #245.
