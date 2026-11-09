@@ -31,3 +31,11 @@ Gotchas:
 - pydicom 3: `'Typo' in ds` only WARNS ("Invalid value ... used with the 'in' operator") and returns False, so a misspelled keyword is silent apart from that warning. The key-set tests per group plus the warnings-as-errors test catch it.
 - A DS/IS that does not parse cannot be built (assignment raises) and would make read_header refuse the file, so the "falls back to distinct" branch is tested on `metadata._aggregate` directly (this repo's own private name).
 - An empty element reads back with VM 0 and value '' (not None) for AS/DA/CS.
+
+## review-group-1
+PASS (no BLOCKING). Deferred, to file as `hardening` at 2.9:
+- W1: one slice with an empty RadiopharmaceuticalInformationSequence drops PT keys for the whole row (a missing tag is ignored); skip the bad slice like _age does.
+- W2: mixed scalar/list values are tuple()d for comparison, so 'ab' equals ['a','b'] (metadata.py ~:211).
+- W3: _roi_lookup: one item with an empty/non-integer ROI number drops the key even when another item matches.
+- N1: DS 'NaN'/'inf' order unpredictably in min/max (spec Deferred already notes NaN).
+- N2: TM string order is wrong across mixed precision ('0900' vs '090000.5'); spec rule.
