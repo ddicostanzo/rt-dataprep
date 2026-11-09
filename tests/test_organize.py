@@ -28,7 +28,7 @@ TRUNCATED = (bytes(128) + b'DICM' + b'\x08\x11\x40\x11SQ\x00\x00\xff\xff\xff\xff
 
 def listing(root):
     """Sorted names under root, without the dated per-run copies of the report."""
-    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv', p.name))
+    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv', p.name) and p.name != org.LOCK_NAME)
 
 
 
@@ -62,7 +62,7 @@ def ct_series_uids(folder):
 
 
 def snapshot(root):
-    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file()}
+    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name != org.LOCK_NAME}
 
 
 def rows(out):
@@ -720,7 +720,7 @@ SUMMARY = re.compile(r'organize: \d+ patient folders, .*; (\d+) replaced, (\d+) 
 
 
 def hidden(root):
-    return sorted(p.name for p in root.iterdir() if p.name.startswith('.'))
+    return sorted(p.name for p in root.iterdir() if p.name.startswith('.') and p.name != org.LOCK_NAME)
 
 
 def counts(caplog):

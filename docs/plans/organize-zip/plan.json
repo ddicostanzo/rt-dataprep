@@ -1,0 +1,104 @@
+{
+ "version": 1,
+ "metadata": {
+  "title": "organize: read DICOM inside zip archives",
+  "spec": "docs/specs/2026-11-09-organize-zip.md",
+  "branch": "feat/organize-zip",
+  "profile": "project-profile.yml",
+  "created": "2026-11-09",
+  "notes": "Release v0.1.1 and the 20-folder OSC subset rerun are manual, after merge (spec: Release check)."
+ },
+ "tasks": [
+  {
+   "id": "task-01",
+   "title": "Zip staging: classify, cap, allow-list and extract one folder's zips (pure function, no wiring)",
+   "depends_on": [],
+   "files": [
+    "src/rt_dataprep/organize.py",
+    "tests/test_organize_zip.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/organize.py": "modify",
+    "tests/test_organize_zip.py": "create"
+   },
+   "test_approach": "TDD in a new tests/test_organize_zip.py. Zips are built at test time with zipfile from synthetic DICOM (tests/synthetic_dicom.py) and raw bytes; corrupt variants are made by byte edits (CRC flip, truncation, compress_type patched to 9 in both headers, encrypted flag bit set, invalid-UTF-8 name with the UTF-8 flag). Caps are monkeypatched low. No real data.",
+   "criteria": [
+    "AC1: _has_preamble itself does the one 132-byte read and returns 'dicom' (DICM at offset 128), 'zip' (first 4 bytes PK\\x03\\x04) or None (anything else, an empty zip PK\\x05\\x06 included); the zip pre-pass and _read_one both branch on its result, so tests that monkeypatch org._has_preamble keep working. A staged file that classifies as 'zip' is not DICOM and is never opened. _read_one returns None unless the result is 'dicom' (a loose or staged zip is never passed to read_header_core).",
+    "AC2: A folder's zips (sorted walk order, numbered from 1) are extracted into a given staging sub-folder as <zip #>/<member #> (infolist order, from 1), each member streamed through ZipFile.open(); directory members are skipped; a member that is itself a zip is staged as a plain file and never opened; a symlink entry is staged as a regular file of its bytes.",
+    "AC3: Members named ../x.dcm, /abs/x.dcm and two members with one name all land inside the staging sub-folder, and both same-name members are staged.",
+    "AC4: Caps are checked from the central directory over all zips of the folder before any member is written: declared file_size sum > MAX_UNZIP_BYTES (16 GiB) or non-directory member count > MAX_ZIP_MEMBERS (200,000) is a cap failure; nothing is staged.",
+    "AC5: A member with flag_bits & 0x61 != 0 or compress_type outside {0, 8, 12, 14} makes its zip unreadable before extraction.",
+    "AC6: BadZipFile, EOFError, zlib.error, lzma.LZMAError, UnicodeDecodeError, NotImplementedError and RuntimeError while opening or reading a zip mark it unreadable (CRC flip, truncated archive, method 9, encrypted, invalid-UTF-8 name each tested); OSError propagates unchanged.",
+    "AC7: A bad zip in a folder with at least one loose file carrying the DICM preamble is skipped (its staged members removed, counted as skipped); in a folder with no such loose file it is a refusal with the fixed REASON_ZIP_TOO_LARGE (a cap) or REASON_ZIP_UNREADABLE (anything else), and nothing staged remains; an over-cap total in a folder with loose DICOM skips every zip of the folder.",
+    "AC8: The extraction function returns the staged paths plus counts (zips, zip members, zips skipped), or raises a private ZipRefused(reason) with `from None` carrying REASON_ZIP_TOO_LARGE or REASON_ZIP_UNREADABLE; caplog for the traversal, CRC and encrypted cases (member names starting SYNTHETIC_PATIENT_NAME) holds no member name or path. Reason texts (exact): REASON_ZIP_TOO_LARGE = 'zip archives in the source folder exceed the size or member cap; nothing kept'; REASON_ZIP_UNREADABLE = 'a zip archive in the source folder cannot be read safely; nothing kept'; REASON_LOCKED = 'another organize run holds the output root lock'.",
+    "Guardrail: refusal reasons are fixed module-level string constants (profile review rule); no zipfile exception text reaches any log line or message."
+   ]
+  },
+  {
+   "id": "task-02",
+   "title": "Wire zips into organize: staging parent, task A/B contract, link-or-copy, lifetime, lock, summary line",
+   "depends_on": [
+    "task-01"
+   ],
+   "files": [
+    "src/rt_dataprep/organize.py",
+    "tests/test_organize.py",
+    "tests/test_organize_zip.py",
+    "src/rt_dataprep/__main__.py",
+    "tests/test_cli.py",
+    "tests/pool_workers.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/organize.py": "modify",
+    "tests/test_organize.py": "modify",
+    "tests/test_organize_zip.py": "modify",
+    "src/rt_dataprep/__main__.py": "modify",
+    "tests/test_cli.py": "modify",
+    "tests/pool_workers.py": "modify"
+   },
+   "test_approach": "TDD through organize() on synthetic exports written to tmp_path, zipped at test time. Lifecycle tests patch zipfile or dicom_io.read_header_core (not _read_fn) so real extraction runs; KeyboardInterrupt is raised from a patched member read. workers=2 runs the real process pool. Existing _read_fn/_copy_fn fakes in tests/test_organize.py are updated to the new tuple only. The KeyboardInterrupt-during-extraction test runs with workers=1 (in-process; pool workers are spawned, so monkeypatches do not reach them). The workers=2 cleanup test uses no patches, or a module-level helper in tests/pool_workers.py.",
+   "criteria": [
+    "AC9: organize() creates one staging parent out_root/.unzip-<random>/ (tempfile.mkdtemp) in the parent process and passes it to task A in the task args; task A extracts the folder's zips into a fresh sub-folder before any header read, and staged files go through the existing read and grouping unchanged; staged members count in files walked. Staged paths are appended after the sorted loose paths. The staging parent is a new task A argument after skip_root; the result tuple becomes (name, refusal, cases, misc, unreadable, walked, reading, staging, zips, zip_members, zips_skipped).",
+    "AC10: Task A's result gains staging (Path | None), zips, zip_members, zips_skipped; _copy_patient gains the staging path; task B hard-links each staged file into every destination folder (os.link, falling back to a copy, as masks._link_or_copy), copies loose files as today, and removes the staging sub-folder in a finally.",
+    "AC11: A synthetic patient (CT + RTSTRUCT + RTPLAN chain plus one MR series) exported as one zip organizes and then converts to the same plan and study outputs (same series, same voxels) as the same files loose.",
+    "AC12: Loose files plus a zip holding the rest organize as one patient; one instance present both loose and zipped is deduplicated by SOP: the loose copy is used (staged paths come after loose ones) and the zipped copy goes to misc_files.",
+    "AC13: A zipped patient with two RTPLANs on one planning CT: both plan folders hold the full CT series.",
+    "AC14: _read_patient catches ZipRefused and returns the refusal tuple (sanitized folder name, reads_kept=False) like its len(ids) != 1 branch, so _worker never sees it and the run is not aborted. Zip-only folders over a cap give a REASON_ZIP_TOO_LARGE row and with an unreadable zip a REASON_ZIP_UNREADABLE row, with the sanitized folder name and reads_kept=False (with --overwrite an existing output folder is untouched); the next patient of the same run still organizes. Loose DICOM plus a bad zip organizes from the loose files and the log says 1 zips skipped.",
+    "AC15: No .unzip-* remains under out_root after: success, refusal, skip of an existing output (reachable only after full extraction, as the name comes from the headers; task A's cases=None return removes its own staging), an OSError from the classification read (patch org._has_preamble as test_organize.py does; task A's own except BaseException removes staging, since _worker's failure row names none), a REASON_INTERNAL abort, KeyboardInterrupt during extraction, and a workers=2 run; if the staging parent cannot be removed, one fixed warning with a count is logged.",
+    "AC15b: Per-branch cleanup: task A wraps its work in try/except BaseException: remove sub-folder; raise, and removes its sub-folder itself on a refusal and on the cases=None skip; handle() removes the sub-folder a task-A result names in every branch that does not submit task B (aborted, name claimed, recover OSError, existing-target skip). Tests assert the staging parent is empty right after _read_patient returns for the refusal, skip and OSError cases, and after a name-claimed refusal in a two-folder run, not only at run end.",
+    "AC16: Lock order in organize(): (1) the two existing ValueError checks, then mkdir of out_root; (2) open out_root/.organize.lock and fcntl.flock(LOCK_EX | LOCK_NB) (fcntl imported inside a platform guard, not at module top level; on Windows no lock); only BlockingIOError becomes ValueError(REASON_LOCKED), any other OSError from opening or flocking the lock file (e.g. a cluster file system without flock) logs one fixed warning and the run continues with no lock and no leftover sweep, as on Windows (sweeping unlocked could delete a live run's staging); (3) remove leftover .unzip-* folders, then mkdtemp the staging parent; (4) enter the existing try, whose finally removes the staging parent and releases the lock. A refused second run writes no report (the live run's organize_report.csv is untouched). The lock file stays on disk. REASON_LOCKED is added to the __main__.py fixed refusal list; a CLI test shows a second run on a held lock exits 1 with 'rt_dataprep: <REASON_LOCKED>' and empty stdout. Reason texts (exact): REASON_ZIP_TOO_LARGE = 'zip archives in the source folder exceed the size or member cap; nothing kept'; REASON_ZIP_UNREADABLE = 'a zip archive in the source folder cannot be read safely; nothing kept'; REASON_LOCKED = 'another organize run holds the output root lock'.",
+    "AC17: The organize summary line format becomes '..., %d unreadable files, %d zips, %d zip members, %d zips skipped; %d replaced, %d kept' (zip counts before the semicolon); organize_report.csv columns are unchanged; convert run on an output root holding .organize.lock reads no patient from it.",
+    "AC18: The full existing suite passes; the only existing-test changes are the fake return tuples (and new task A argument) in tests/pool_workers.py, the updated summary-line pattern if needed, and the tests/test_organize.py helpers listing()/hidden()/snapshot() ignoring the persistent .organize.lock (no assertion is otherwise edited).",
+    "Guardrail: pydicom reads of staged files stay inside dicom_io._pydicom_quiet() for the whole folder read (vault: pydicom-validates-lazily-on-first-tag-access); source trees are only read (zips opened read-only, never moved or deleted)."
+   ]
+  },
+  {
+   "id": "task-03",
+   "title": "Docs: zip support in README",
+   "depends_on": [
+    "task-02"
+   ],
+   "files": [
+    "README.md"
+   ],
+   "file_ops": {
+    "README.md": "modify"
+   },
+   "test_approach": "Docs only; the full suite and ruff stay green.",
+   "criteria": [
+    "AC19: README's organize section states that zip archives in a source folder are read (stored, deflate, bzip2, lzma; no encryption, no nesting, no tar/7z), the 16 GiB / 200,000-member per-folder caps, the bad-zip skip-or-refuse rule with both reason texts, the hidden .unzip-* staging and the POSIX-only .organize.lock, and the new summary-line counts. It also says a killed run's leftover .unzip-* is removed by the next run, and that staged files appear in plan folders under index names (1, 1_1, ...)."
+   ]
+  }
+ ],
+ "groups": [
+  [
+   "task-01"
+  ],
+  [
+   "task-02"
+  ],
+  [
+   "task-03"
+  ]
+ ]
+}
