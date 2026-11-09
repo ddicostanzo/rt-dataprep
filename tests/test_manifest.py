@@ -1,5 +1,4 @@
 """manifest: one row per plan folder or study series of a converted or preprocessed tree (task-01, task-04); patient folder names are SYNTHETIC-prefixed."""
-import csv
 import dataclasses
 import json
 import logging
@@ -18,6 +17,7 @@ from test_series import STUDY_D1, STUDY_D2, STUDY_T1, STUDY_T2, put
 from rt_dataprep import convert as conv
 from rt_dataprep import manifest as man
 from rt_dataprep import preprocess as pre
+from rt_dataprep import split as sp
 
 COLUMNS = ['case_dir', 'patient', 'fx', 'ct_size', 'ct_spacing', 'dose', 'masks', 'rtplan_uid', 'ct_series_uid', 'study_uid',
            'case_type', 'modality', 'image', 'series']
@@ -42,10 +42,9 @@ def tree(root):
 
 
 def read(root):
-    with open(root / 'manifest.csv', newline='') as handle:
-        reader = csv.DictReader(handle)
-        assert reader.fieldnames in (COLUMNS, [*COLUMNS, 'fov_mask'])
-        return list(reader)
+    rows = [json.loads(line) for line in (root / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]
+    assert all(list(row) in (COLUMNS, [*COLUMNS, 'fov_mask']) for row in rows)
+    return rows
 
 
 def test_rows_columns_and_values_on_a_converted_tree(tmp_path):
@@ -54,10 +53,10 @@ def test_rows_columns_and_values_on_a_converted_tree(tmp_path):
     rows = read(root)
     assert [r['case_dir'] for r in rows] == [f'{PATIENT_B}/fx_1', f'{PATIENT_A}/plan_1', f'{PATIENT_A}/plan_2']  # '_' sorts after 'P'
     assert rows[1] == dict(case_dir=f'{PATIENT_A}/plan_1', patient=PATIENT_A, fx='plan_1', ct_size='12;12;12', ct_spacing='1.0;1.0;1.0',
-                           dose='1', masks='["bladder", "ptv"]', rtplan_uid='SYNTHETICRTPLANA1', ct_series_uid='SYNTHETICCTA1',
-                           study_uid='SYNTHETICSTUDYA1', case_type='plan', modality='CT', image='', series='[]')
-    assert (rows[2]['dose'], rows[2]['masks'], rows[2]['rtplan_uid']) == ('0', '["ptv"]', 'SYNTHETICRTPLANA2')
-    assert (rows[0]['patient'], rows[0]['fx'], rows[0]['ct_size'], rows[0]['masks']) == (PATIENT_B, 'fx_1', '14;14;14', '[]')
+                           dose='1', masks=['bladder', 'ptv'], rtplan_uid='SYNTHETICRTPLANA1', ct_series_uid='SYNTHETICCTA1',
+                           study_uid='SYNTHETICSTUDYA1', case_type='plan', modality='CT', image='', series=[])
+    assert (rows[2]['dose'], rows[2]['masks'], rows[2]['rtplan_uid']) == ('0', ['ptv'], 'SYNTHETICRTPLANA2')
+    assert (rows[0]['patient'], rows[0]['fx'], rows[0]['ct_size'], rows[0]['masks']) == (PATIENT_B, 'fx_1', '14;14;14', [])
     assert {r['case_type'] for r in rows} == {'plan'} and {r['modality'] for r in rows} == {'CT'} and {r['image'] for r in rows} == {''}
 
 
@@ -107,13 +106,13 @@ def test_a_malformed_series_json_is_left_out_and_counted_without_a_name_in_the_l
     assert [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.manifest'] == ['manifest: 3 written, 1 refused']
 
 
-def test_only_manifest_csv_and_its_dated_copy_are_written(tmp_path):
+def test_only_manifest_jsonl_and_its_dated_copy_are_written(tmp_path):
     root = tree(tmp_path / 'converted')
     before = state(root)
     man.manifest(root)
     after = state(root)
     new = {p for p in after if p not in before}
-    assert {p.name for p in new} >= {'manifest.csv'} and all(re.fullmatch(r'manifest(_\d{8}T\d{6}Z)?\.csv', p.name) for p in new)
+    assert {p.name for p in new} >= {'manifest.jsonl'} and all(re.fullmatch(r'manifest(_\d{8}T\d{6}Z)?\.jsonl', p.name) for p in new)
     assert len(new) == 2
     assert all(after[p] == data for p, data in before.items())
 
@@ -124,7 +123,7 @@ def test_a_semicolon_roi_name_and_float32_spacing_read_back_exactly(tmp_path):
     plan(root, PATIENT_A, 'plan_1', 'A1', spacing=0.8, masks={'ptv;boost': box((4, 4, 4), (8, 8, 8))})
     man.manifest(root)
     row = read(root)[0]
-    assert (json.loads(row['masks']), row['ct_spacing']) == (['ptv;boost'], '0.8;0.8;0.8')
+    assert (row['masks'], row['ct_spacing']) == (['ptv;boost'], '0.8;0.8;0.8')
 
 
 def test_a_plan_whose_series_row_names_a_missing_file_is_counted_refused(tmp_path):
@@ -151,7 +150,7 @@ def test_an_unreadable_series_json_is_one_refused_plan_not_the_end_of_the_run(tm
 
 # ---------------------------------------------------------------- task-04: imaging rows of the study folders
 
-BLANK_IMAGING = dict(fx='', dose='0', masks='[]', rtplan_uid='', series='[]')
+BLANK_IMAGING = dict(fx='', dose='0', masks=[], rtplan_uid='', series=[])
 
 
 @pytest.fixture(scope='module')
@@ -320,7 +319,7 @@ def test_the_log_and_exceptions_of_the_imaging_path_carry_counts_only(converted,
 
 def series_column(root, case='plan_1'):
     man.manifest(root)
-    return json.loads(next(r for r in read(root) if r['case_dir'].endswith(f'/{case}'))['series'])
+    return next(r for r in read(root) if r['case_dir'].endswith(f'/{case}'))['series']
 
 
 CT_GRID_SIZE = (12, 12, 12)  # write_plan's native CT grid
@@ -373,7 +372,7 @@ def test_the_series_column_keeps_series_json_order_and_skips_an_unreadable_heade
 
 def test_imaging_rows_hold_an_empty_series_list(converted):
     man.manifest(converted)
-    assert [r['series'] for r in read(converted)[1:]] == ['[]'] * 3
+    assert [r['series'] for r in read(converted)[1:]] == [[]] * 3
 
 
 # ---- AHE task-05: the ahe_ names go through series_id, so the manifest reads them for study series and aligned plan series (spec AC5) ----
@@ -385,8 +384,8 @@ def test_ac5_an_ahe_study_series_is_listed_under_its_series_id_with_its_ahe_file
     assert man.manifest(out) == (2, 0)
     rows = read(out)
     assert [(r['case_dir'], r['case_type'], r['modality'], r['image'], r['series']) for r in rows] == [
-        ('SYNTHETICPTA/study_1/series_CT_1', 'imaging', 'CT', AHE_STUDY_CT, '[]'),
-        ('SYNTHETICPTA/study_1/series_MR_1', 'imaging', 'MR', AHE_MR_OUT, '[]')]
+        ('SYNTHETICPTA/study_1/series_CT_1', 'imaging', 'CT', AHE_STUDY_CT, []),
+        ('SYNTHETICPTA/study_1/series_MR_1', 'imaging', 'MR', AHE_MR_OUT, [])]
     assert all((out / 'SYNTHETICPTA' / 'study_1' / r['image']).is_file() for r in rows)
 
 
@@ -450,3 +449,62 @@ def test_images_and_misc_files_with_a_series_csv_are_not_counted(converted):
         (converted / PID / name).mkdir()
         (converted / PID / name / pre.LEGACY_SERIES_NAME).write_text('file,kind\n', encoding='utf-8')
     assert man.manifest(converted) == (4, 0)
+
+
+# ---------------------------------------------------------------- json-outputs task-02: manifest.jsonl
+
+def raw_lines(root, name='manifest.jsonl'):
+    """The file's bytes split on b'\\n' only, so a stray U+2028 would not be hidden by str.splitlines."""
+    data = (root / name).read_bytes()
+    assert data.endswith(b'\n') and b'\r' not in data
+    return data.decode('utf-8').split('\n')[:-1]
+
+
+def test_manifest_jsonl_has_one_ascii_json_object_per_line_in_column_order_with_native_lists(tmp_path):
+    root = tree(tmp_path / 'converted')
+    assert man.MANIFEST_NAME == 'manifest.jsonl' and man.manifest(root) == (3, 0)
+    lines = raw_lines(root)
+    assert len(lines) == 3 and all(line.isascii() for line in lines)
+    objs = [json.loads(line) for line in lines]
+    assert [list(o) for o in objs] == [COLUMNS] * 3 and lines == [json.dumps(o) for o in objs]
+    assert [o['case_dir'] for o in objs] == sorted(o['case_dir'] for o in objs)
+    assert objs[1] == dict(case_dir=f'{PATIENT_A}/plan_1', patient=PATIENT_A, fx='plan_1', ct_size='12;12;12', ct_spacing='1.0;1.0;1.0',
+                           dose='1', masks=['bladder', 'ptv'], rtplan_uid='SYNTHETICRTPLANA1', ct_series_uid='SYNTHETICCTA1',
+                           study_uid='SYNTHETICSTUDYA1', case_type='plan', modality='CT', image='', series=[])
+    assert all(isinstance(o[k], str) for o in objs for k in COLUMNS if k not in ('masks', 'series'))
+
+
+def test_fov_mask_is_on_every_line_when_any_case_has_one_and_on_none_otherwise(tmp_path):
+    root = tree(tmp_path / 'converted')
+    man.manifest(root)
+    assert all('fov_mask' not in json.loads(line) for line in raw_lines(root))
+    plan_dir = root / PATIENT_A / 'plan_1'
+    shutil.copyfile(plan_dir / conv.CT_NAME, plan_dir / f'fovmask_{conv.CT_NAME}')  # a mask on the CT grid
+    man.manifest(root)
+    objs = [json.loads(line) for line in raw_lines(root)]
+    assert [list(o) for o in objs] == [[*COLUMNS, 'fov_mask']] * 3
+    assert {o['case_dir']: o['fov_mask'] for o in objs} == {f'{PATIENT_B}/fx_1': '', f'{PATIENT_A}/plan_1': f'fovmask_{conv.CT_NAME}',
+                                                              f'{PATIENT_A}/plan_2': ''}
+
+
+def test_a_root_without_cases_gets_a_zero_byte_manifest_and_a_dated_copy(tmp_path):
+    root = tmp_path / 'empty'
+    root.mkdir()
+    assert man.manifest(root) == (0, 0)
+    names = sorted(p.name for p in root.iterdir())
+    assert len(names) == 2 and names[0] == 'manifest.jsonl' and re.fullmatch(r'manifest_\d{8}T\d{6}Z\.jsonl', names[1])
+    assert all((root / name).stat().st_size == 0 for name in names)
+
+
+def test_an_roi_name_with_u2028_stays_on_its_line_and_splits(tmp_path):
+    root = tmp_path / 'converted'
+    name = 'ptv boost'
+    plan(root, PATIENT_A, 'plan_1', 'A1', masks={name: box((4, 4, 4), (8, 8, 8))})
+    plan(root, PATIENT_B, 'plan_1', 'B1')
+    assert man.manifest(root) == (2, 0)
+    data = (root / 'manifest.jsonl').read_bytes()
+    assert ' '.encode() not in data and b'\\u2028' in data
+    assert len(data.decode('utf-8').splitlines()) == 2
+    assert [json.loads(line)['masks'] for line in raw_lines(root)] == [['bladder', 'ptv'], [name]]  # B first: 'P' sorts before '_'
+    obj = sp.split(root / 'manifest.jsonl', test_size=0.0, val_size=0.0, seed=0)
+    assert sorted(obj['train']) == [PATIENT_B, PATIENT_A]

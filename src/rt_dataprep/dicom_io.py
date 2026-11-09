@@ -2,6 +2,7 @@
 import contextlib
 import csv
 import errno
+import json
 import logging
 import os
 import re
@@ -221,16 +222,21 @@ def sanitize_path_component(value, fallback='UNKNOWN'):
 
 def write_report(out_root, name, header, rows):
     """
-    `rows` under `header` at out_root/<stem>_<UTC time>.csv, one file per run so a rerun loses nothing (#50), then copied
-    to out_root/`name`, the latest run's report.
+    `rows` under `header` at out_root/<stem>_<UTC time><suffix of name>, one file per run so a rerun loses nothing (#50), then
+    copied to out_root/`name`, the latest run's report. A '.jsonl' name gets one JSON object per row (cells may be lists), any
+    other name CSV.
     """
     out_root = Path(out_root)
     stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())  # shortcut: two runs in one second share a file; add a counter if that happens
-    dated = out_root / f'{Path(name).stem}_{stamp}.csv'
-    with open(dated, 'w', newline='', encoding='utf-8') as handle:
-        writer = csv.writer(handle)
-        writer.writerow(header)
-        writer.writerows(rows)
+    dated = out_root / f'{Path(name).stem}_{stamp}{Path(name).suffix}'
+    jsonl = dated.suffix == '.jsonl'
+    with open(dated, 'w', newline='\n' if jsonl else '', encoding='utf-8') as handle:
+        if jsonl:  # ensure_ascii keeps U+2028 and U+0085 out of the file, so no reader splits a line there
+            handle.writelines(json.dumps(dict(zip(header, row, strict=True))) + '\n' for row in rows)
+        else:
+            writer = csv.writer(handle)
+            writer.writerow(header)
+            writer.writerows(rows)
     latest = out_root / f'.{os.getpid()}.tmp.{name}'
     try:
         shutil.copyfile(dated, latest)

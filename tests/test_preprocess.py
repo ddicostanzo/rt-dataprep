@@ -1512,8 +1512,7 @@ def test_manifest_lists_the_same_cases_on_the_converted_and_the_preprocessed_tre
     assert man.manifest(converted) == (4, 0) and man.manifest(out) == (4, 0)
 
     def read(root):
-        with open(root / 'manifest.csv', newline='') as handle:
-            return list(csv.DictReader(handle))
+        return [json.loads(line) for line in (root / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]
     before, after = read(converted), read(out)
     assert [r['case_dir'] for r in after] == [r['case_dir'] for r in before]
     assert [r['case_dir'].split('/', 1)[1] for r in after] == ['plan_1', 'study_1/series_CT_1', 'study_2/series_MR_1', 'study_2/series_MR_2']

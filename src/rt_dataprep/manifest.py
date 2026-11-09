@@ -7,7 +7,6 @@ reads the header of each identity series; an entry gains `fov_mask` when fovmask
 series whose header cannot be read is left out and counted on its own. The tree is only read; manifest.csv (and its dated copy) in the root is the one place the patient folder names
 appear. The log line carries counts only.
 """
-import json
 import logging
 import re
 from pathlib import Path
@@ -20,7 +19,7 @@ from rt_dataprep.preprocess import STUDY_FOLDER, check_rows, check_study_rows, h
 
 log = logging.getLogger(__name__)
 
-MANIFEST_NAME = 'manifest.csv'
+MANIFEST_NAME = 'manifest.jsonl'
 COLUMNS = ['case_dir', 'patient', 'fx', 'ct_size', 'ct_spacing', 'dose', 'masks', 'rtplan_uid', 'ct_series_uid', 'study_uid',
            'case_type', 'modality', 'image', 'series']
 FOV_COLUMNS = [*COLUMNS, 'fov_mask']  # original schema is retained when there are no primary-image support masks
@@ -51,8 +50,8 @@ def _study_rows(patient, study):
             refused += 1
             continue
         rows.append([f'{patient.name}/{study.name}/{series_id(row["file"])}', patient.name, '', *_geometry(info[0], info[2]),
-                     '0', json.dumps([]), '', row['series_instance_uid'], row['study_instance_uid'], 'imaging', row['modality'],
-                     row['file'], json.dumps([]), image_fov_mask(study, row['file'], info)])
+                     '0', [], '', row['series_instance_uid'], row['study_instance_uid'], 'imaging', row['modality'],
+                     row['file'], [], image_fov_mask(study, row['file'], info)])
     return rows, refused
 
 
@@ -91,7 +90,7 @@ def _aligned(plan, series, ct):
 
 
 def manifest(root):
-    """Write root/manifest.csv, one row per plan and per study series, sorted by case_dir; returns (written, refused) counts."""
+    """Write root/manifest.jsonl (0 bytes when there are no cases), one row per plan and per study series, sorted by case_dir; returns (written, refused) counts."""
     root = Path(root)
     rows, refused = [], 0
     for patient in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith('.')):
@@ -102,16 +101,15 @@ def manifest(root):
                 refused += 1
                 continue
             masks = sorted(row['roi_name'] for row in kept if row['kind'] == 'mask')
-            # masks is a JSON list, as a name may hold ';'
             rows.append([f'{patient.name}/{plan.name}', patient.name, plan.name, *_geometry(ct[0], ct[2]),
-                         str(int(any(row['kind'] == 'dose' for row in kept))), json.dumps(masks),
+                         str(int(any(row['kind'] == 'dose' for row in kept))), masks,
                          kept[0]['rtplan_uid'], kept[0]['series_instance_uid'], kept[0]['study_instance_uid'],  # kept[0] is the ct row
-                         'plan', 'CT', '', json.dumps(_aligned(plan, series, ct)), image_fov_mask(plan, kept[0]['file'], ct)])
+                         'plan', 'CT', '', _aligned(plan, series, ct), image_fov_mask(plan, kept[0]['file'], ct)])
         for study in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(STUDY_FOLDER, p.name) and holds_series(p)):
             study_rows, study_refused = _study_rows(patient, study)
             rows += study_rows
             refused += study_refused
-    rows.sort()  # case_dir is the first column
+    rows.sort(key=lambda row: row[0])  # case_dir; whole rows hold lists of dicts, which do not compare
     primary_masks = any(row[-1] for row in rows)
     write_report(root, MANIFEST_NAME, FOV_COLUMNS if primary_masks else COLUMNS,
                  rows if primary_masks else [row[:-1] for row in rows])

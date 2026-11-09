@@ -3,6 +3,7 @@ import logging
 import errno
 import operator
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -760,3 +761,16 @@ def test_entry_is_raises_permission_error_for_a_parent_with_mode_0o444(tmp_path)
             dicom_io.entry_is(tmp_path / 'inside', 'file')
     finally:
         tmp_path.chmod(0o755)
+
+
+def test_write_report_picks_the_format_from_the_suffix_and_the_dated_copy_keeps_it(tmp_path):
+    dicom_io.write_report(tmp_path, 'm.jsonl', ['a', 'b'], [['x ', ['y', 1]], ['z', []]])
+    dicom_io.write_report(tmp_path, 'r.csv', ['a', 'b'], [['1', '2']])
+    names = sorted(p.name for p in tmp_path.iterdir())
+    assert [n for n in names if re.fullmatch(r'm_\d{8}T\d{6}Z\.jsonl', n)] and [n for n in names if re.fullmatch(r'r_\d{8}T\d{6}Z\.csv', n)]
+    assert len(names) == 4
+    expected = b'{"a": "x\\u2028", "b": ["y", 1]}\n{"a": "z", "b": []}\n'
+    assert (tmp_path / 'm.jsonl').read_bytes() == expected
+    assert (tmp_path / 'r.csv').read_bytes() == b'a,b\r\n1,2\r\n'
+    dicom_io.write_report(tmp_path, 'm.jsonl', ['a'], [])
+    assert (tmp_path / 'm.jsonl').read_bytes() == b''

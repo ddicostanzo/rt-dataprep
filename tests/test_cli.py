@@ -344,8 +344,8 @@ def test_manifest_then_split_run_end_to_end_and_print_counts_only(tree, capfd, c
     cli.main(split_args(tree))
     second = capfd.readouterr()
     assert second.out == 'train: 3 patients, 3 cases\nval: 1 patients, 1 cases\ntest: 1 patients, 1 cases\n'
-    with open(tree / MANIFEST_NAME, newline='') as handle:
-        assert sorted(r['patient'] for r in csv.DictReader(handle)) == NAMES
+    assert MANIFEST_NAME == 'manifest.jsonl'
+    assert sorted(json.loads(line)['patient'] for line in (tree / MANIFEST_NAME).read_text(encoding='utf-8').splitlines()) == NAMES
     splits = json.loads((tree / sp.SPLITS_NAME).read_text())
     assert sorted(p for name in sp.SPLIT_NAMES for p in splits[name]) == NAMES
     for out in (first, second):
@@ -416,8 +416,8 @@ def test_a_different_existing_splits_file_is_refused(tree, capfd):
     assert 'SYNTHETIC_' not in result.out + result.err
 
 
-def test_a_manifest_without_the_patient_column_prints_the_refusal(tree, capfd):
-    (tree / 'manifest.csv').write_text('case_dir\nSYNTHETIC_P0/plan_1\n')
+def test_a_manifest_line_without_the_patient_prints_the_refusal(tree, capfd):
+    (tree / 'manifest.jsonl').write_text('{"case_dir": "SYNTHETIC_P0/plan_1"}\n')
     with pytest.raises(SystemExit) as exc:
         cli.main(split_args(tree, seed='-1'))
     assert exc.value.code == 1
@@ -606,3 +606,11 @@ def test_a_second_organize_run_on_a_locked_root_exits_1_with_the_fixed_reason(tm
     assert result.returncode == 1
     assert result.stderr == f'rt_dataprep: {org.REASON_LOCKED}\n' and result.stdout == ''
     assert not (out / org.REPORT_NAME).exists()
+
+
+@pytest.mark.parametrize('command', ['manifest', 'split'])
+def test_manifest_and_split_help_name_manifest_jsonl(command, capfd):
+    with pytest.raises(SystemExit):
+        cli.main([command, '--help'])
+    text = capfd.readouterr().out
+    assert 'manifest.jsonl' in text and 'manifest.csv' not in text

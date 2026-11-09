@@ -23,3 +23,18 @@ Gotchas:
 
 ## review-1
 PASS, no BLOCKING. Deferred NOTE: study_refusal_count counts non-object items of a corrupt series.json (count inflation only). Docstring/README leftovers are task-03.
+
+## task-02
+
+Files: src/rt_dataprep/{manifest,split,dicom_io,__main__}.py, examples/synthetic_workflow.py, tests/test_{manifest,split,dicom_io,cli,preprocess,preprocess_hardening}.py. tests/test_organize.py needed no change (its dated-report pattern is CSV and untouched). Suite: 1466 collected (was 1441), no test deleted; the 4 skips are the existing platform skipifs.
+
+Decisions:
+- `write_report` branches on the name's suffix: `.jsonl` -> `json.dumps(dict(zip(header, row, strict=True))) + '\n'` per row, opened `newline='\n'`; anything else the unchanged csv path. Dated name is `{stem}_{stamp}{suffix}`; the copy-then-os.replace of the latest is untouched.
+- manifest rows hold native lists (masks, `_aligned` result, `[]` on study rows); `rows.sort(key=lambda r: r[0])` because whole-row comparison would reach lists of dicts on a case_dir tie. fov_mask rule unchanged (FOV_COLUMNS iff any row has one); zero rows -> 0-byte file (and 0-byte dated copy).
+- split._read iterates the `utf-8-sig` handle, skips blank lines, first failing line decides the reason (not-object / bad JSON / not UTF-8 / duplicate key / deep nesting / non-string-empty-whitespace value -> REASON_ROWS; missing key -> REASON_COLUMNS), reason assigned in/after the except and raised after it, no chaining. split.py keeps its own 4-line `_no_duplicate_keys` (importing preprocess's would pull numpy into split, which a test forbids).
+- REASON_COLUMNS = 'a manifest line has no patient or case_dir'; REASON_ROWS = 'a manifest is not UTF-8 JSON Lines of objects whose patient and case_dir are non-empty strings'.
+
+Gotchas:
+- A patient with a lone surrogate escape (`"\ud800"`) parses as JSON but fails `.encode()` in split's ordering hash (UnicodeEncodeError, not mapped). Deferred: hardening.
+- split.py's module docstring and `check_disjoint` docstring, manifest.py's module docstring still say CSV: task-03.
+- test_manifest `read(root)` now returns parsed JSONL dicts, so comparisons use native lists.

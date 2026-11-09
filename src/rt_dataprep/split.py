@@ -7,7 +7,6 @@ ceil(round(n*test_size, 9)) go to test, the next ceil(round(n*val_size, 9)) to v
 logs or raises a patient name, case id or path.
 """
 import contextlib
-import csv
 import hashlib
 import json
 import logging
@@ -27,23 +26,38 @@ REASON_SIZE = 'test_size and val_size must each be at least 0 and below 1'
 REASON_NO_TRAIN = 'the test and val sizes leave no patient for train'
 REASON_OVERLAP = 'a patient of the external manifest is in a split'
 REASON_EXISTS = 'splits.json already exists with different content; nothing written'
-REASON_COLUMNS = 'a manifest has no patient or case_dir column'
-REASON_ROWS = 'a manifest is not UTF-8 or has a row without a patient or case_dir'
+REASON_COLUMNS = 'a manifest line has no patient or case_dir'
+REASON_ROWS = 'a manifest is not UTF-8 JSON Lines of objects whose patient and case_dir are non-empty strings'
+
+
+def _no_duplicate_keys(pairs):
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError  # no content in it: _read maps it to the fixed reason
+    return dict(pairs)
 
 
 def _read(manifest_path):
-    rows, fields = None, set()
-    with open(manifest_path, newline='', encoding='utf-8-sig') as handle:  # -sig: a BOM, as Excel saves it, is not a header
+    rows, reason = [], None
+    with open(manifest_path, encoding='utf-8-sig') as handle:  # -sig: a BOM, as an editor may save it; iterating the handle splits on \n and \r only
         try:
-            reader = csv.DictReader(handle)
-            fields = set(reader.fieldnames or ())
-            rows = list(reader) if {'patient', 'case_dir'} <= fields else []
-        except UnicodeDecodeError:  # a ValueError whose text quotes bytes of the file: refused below, nothing chained (#78)
-            pass
-    if rows is None or any(not (row.get(k) or '').strip() for row in rows for k in ('patient', 'case_dir')):  # short row: None
-        raise ValueError(REASON_ROWS)
-    if not {'patient', 'case_dir'} <= fields:
-        raise ValueError(REASON_COLUMNS)
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line, object_pairs_hook=_no_duplicate_keys)
+                if not isinstance(row, dict):
+                    reason = REASON_ROWS
+                elif not {'patient', 'case_dir'} <= row.keys():
+                    reason = REASON_COLUMNS
+                elif any(not isinstance(row[k], str) or not row[k].strip() for k in ('patient', 'case_dir')):
+                    reason = REASON_ROWS
+                if reason:
+                    break
+                rows.append(row)
+        except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors that quote the file: refused below, nothing chained (#78)
+            reason = REASON_ROWS
+    if reason:
+        raise ValueError(reason)
     return rows
 
 
