@@ -1,6 +1,6 @@
 [project]
 name = "rt-dataprep"
-version = "0.1.0"
+version = "0.1.1"
 description = "Turn radiotherapy DICOM exports into ML-ready cases"
 readme = "README.md"
 license = "AGPL-3.0-only"
