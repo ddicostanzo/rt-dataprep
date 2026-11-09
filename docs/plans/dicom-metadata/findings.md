@@ -90,3 +90,9 @@ Gotchas:
 - A `{'distinct'}` list is first-seen order over the slices, so a differing slice 0 comes first.
 - Full suite: 1566 passed, 4 skipped (5 min); ruff and compileall clean.
 - Split needed no change (it only requires patient and case_dir); the split test pins it.
+
+## review-loop-pass-1
+CLEAN. code-review (Opus) and spec axis (Opus): no BLOCKING. Codex P2 (scalar vs list dedupe, = W2) fixed in dbc7566 as data loss. Deferred filed: #252 (W1, W3, N2, negative age), #253 (test gaps, wording). N1 is in the spec Deferred section.
+
+## review-loop-pass-1-verify
+PASS: dbc7566 resolves the finding, no change for all-scalar/all-list inputs, test red on old code and green now.
