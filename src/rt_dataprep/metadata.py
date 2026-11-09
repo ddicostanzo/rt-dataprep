@@ -205,7 +205,7 @@ def _aggregate(samples, minmax):
     numbers = _floats([value for value, _ in samples]) if scalar and vrs <= NUMERIC_VRS else None
     distinct = {}  # number (or text) -> first-seen value
     for i, (value, _) in enumerate(samples):
-        distinct.setdefault(numbers[i] if numbers else value if scalar else tuple(value), value)
+        distinct.setdefault(numbers[i] if numbers else value if isinstance(value, str) else tuple(value), value)  # '12' != ['1', '2']
     values = list(distinct.values())
     if len(values) == 1:
         return values[0]

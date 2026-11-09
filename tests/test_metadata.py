@@ -190,6 +190,7 @@ def test_unparseable_number_falls_back_to_distinct():
     assert metadata._aggregate([('abc', 'DS'), ('5', 'DS')], True) == {'distinct': ['abc', '5']}
     assert metadata._aggregate([('7', 'DS'), ('5', 'DS')], True) == {'min': '5', 'max': '7'}
     assert metadata._aggregate([], True) is None
+    assert metadata._aggregate([('12', 'LO'), (['1', '2'], 'LO')], True) == {'distinct': ['12', ['1', '2']]}  # PR 251 Codex
 
 
 # ---- patient_age ----------------------------------------------------------------------------------------------------
