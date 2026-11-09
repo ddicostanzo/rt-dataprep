@@ -183,8 +183,8 @@ Which keys a row carries depends on its kind: patient, study, device and acquisi
 `injected_dose`, ...) on `ct` and `series` rows; RTSTRUCT keys, including `roi_interpreted_type` and
 `roi_generation_algorithm` of that row's ROI, on `mask`, `applicator` and `line` rows; `dose_units` and `dose_type` on
 `dose` rows. Plan keys (`plan_intent`, `prescription_dose`, `treatment_machine`, `source_isotope`, ...) are on every row
-of a plan folder, and the registration keys (`reg_type`, `reg_date`, `reg_time`, `reg_manufacturer`) on the registered
-`series` rows of a plan folder; study folders carry neither. Patient name, birth date and ethnic group are never written.
+of a plan folder, and the registration keys (`reg_type`, `reg_date`, `reg_time`, `reg_manufacturer`) on the
+`series` rows of a plan folder registered through a REG (not same-frame rows); study folders carry neither. Patient name, birth date and ethnic group are never written.
 These values are patient data: they appear only in `series.json` and `manifest.jsonl`, never in a log line or a report.
 
 Trees created with the old `images/` conversion layout must be re-converted. Current manifest and preprocessing walkers

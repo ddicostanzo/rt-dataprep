@@ -72,3 +72,6 @@ Gotchas:
 - `make_plan` had no way to tag the RTSTRUCT; it gained `struct_meta=`.
 - Study folders are numbered by StudyDate then UID, and the synthetic series share a StudyDate, so tests find study rows by series_instance_uid, not by folder number.
 - Full suite: 1562 passed, 4 skipped (5 min); ruff and compileall clean.
+
+## review-group-3
+PASS (no BLOCKING). Plan/spec bug corrected: "two-file RTDOSE with different DoseType" is unreachable (REASON_DOSE_TYPE refuses non-PHYSICAL); spec and plan AC5 now name a tag that can differ; tests already cover both. N2 README wording fixed (REG keys only on non-identity registered rows). Notes: nested min/max/distinct dicts are shared across folders (never mutated after merge); the refused-plan caplog case is refused before metadata runs.
