@@ -1,0 +1,150 @@
+{
+ "version": 1,
+ "metadata": {
+  "title": "series.csv -> series.json, manifest.csv -> manifest.jsonl (PR 1 of 2)",
+  "spec": "docs/specs/2026-11-09-json-outputs.md",
+  "next": "docs/specs/2026-11-09-dicom-metadata.md (PR 2, separate /dev run)",
+  "branch": "feat/json-outputs",
+  "profile": "project-profile.yml",
+  "created": "2026-11-09",
+  "notes": "Release v0.2.0 and the OSC subset rerun happen after PR 2, not in this run."
+ },
+ "tasks": [
+  {
+   "id": "task-01",
+   "title": "series.json: convert writes it, preprocess reads and writes it, legacy folders refused",
+   "depends_on": [],
+   "files": [
+    "src/rt_dataprep/convert.py",
+    "src/rt_dataprep/preprocess.py",
+    "src/rt_dataprep/manifest.py",
+    "tests/series_files.py",
+    "tests/test_convert.py",
+    "tests/test_preprocess.py",
+    "tests/test_preprocess_hardening.py",
+    "tests/test_series.py",
+    "tests/test_masks.py",
+    "tests/test_plan_regression.py",
+    "tests/test_manifest.py",
+    "scripts/parity.py",
+    "tests/test_parity.py",
+    "tests/test_cli.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/convert.py": "modify",
+    "src/rt_dataprep/preprocess.py": "modify",
+    "src/rt_dataprep/manifest.py": "modify",
+    "tests/series_files.py": "create",
+    "tests/test_convert.py": "modify",
+    "tests/test_preprocess.py": "modify",
+    "tests/test_preprocess_hardening.py": "modify",
+    "tests/test_series.py": "modify",
+    "tests/test_masks.py": "modify",
+    "tests/test_plan_regression.py": "modify",
+    "tests/test_manifest.py": "modify",
+    "scripts/parity.py": "modify",
+    "tests/test_parity.py": "modify",
+    "tests/test_cli.py": "modify"
+   },
+   "test_approach": "TDD. Add tests for the new writer/reader first (round trip, key order, each malformed case incl. RecursionError and duplicate keys, legacy folder), confirm they fail, implement, then port existing tests that read or write series.csv to series.json through one shared helper in tests/series_files.py. Synthetic data only.",
+   "criteria": [
+    "AC1: SERIES_NAME is 'series.json'; conv.write_series_json(rows, path) replaces write_series_csv, with no columns argument: it writes atomically (REASON_WRITE on failure) a UTF-8 JSON array (indent=1, ensure_ascii=False, trailing newline) of objects whose keys are SERIES_COLUMNS first then any other keys in insertion order, values the same strings today's CSV cells hold. PREPROCESSED_SERIES_COLUMNS stays, for the reader's key-set check only.",
+    "AC2: read_series_json(folder) replaces read_series_csv with the same (rows, malformed) contract: it opens as text with encoding='utf-8', catches (ValueError, RecursionError), rejects duplicate keys via object_pairs_hook, and is malformed when the file is not a JSON array of objects, an item's key set is not exactly SERIES_COLUMNS or SERIES_COLUMNS + retained, items of one file differ in key set, or a value is not a string; the reader returns malformed=True and never raises for content; check_rows / check_study_rows raise CaseRefused(REASON_SERIES_CSV) as today, with no exception chained and no file content in any message.",
+    "AC3: preprocess reads series.json and writes its own series.json with `retained`; a malformed series.json (invalid JSON, deep nesting, duplicate key, wrong keys, non-string value, not an array, BOM) refuses that plan or study with REASON_SERIES_CSV and the run continues.",
+    "AC4: LEGACY_SERIES_NAME = 'series.csv' is defined once in preprocess.py. The plan/study folder filters in preprocess_patient and manifest() select PLAN_FOLDER/STUDY_FOLDER folders holding SERIES_NAME or LEGACY_SERIES_NAME; check_rows and check_study_rows raise CaseRefused(REASON_LEGACY_SERIES) when series.csv is a file and series.json is not, before any read; manifest._study_rows makes the same check and returns ([], 1). REASON_LEGACY_SERIES = 'converted by an older version (series.csv); reconvert with --overwrite'. The CSV is never parsed. Tests: a legacy plan next to a good plan (good one preprocessed, legacy refused with the reason, no REASON_IO_ERROR); a patient with only legacy folders gets refused rows, not REASON_NO_CASES; manifest counts 1 per legacy plan and per legacy study; images/ and misc_files/ stay ignored.",
+    "AC5: Every REASON_* text in preprocess.py that names series.csv (REASON_NO_CASES, REASON_NO_CT, REASON_DOSE_COUNT, REASON_KIND, REASON_FILE_MISSING, REASON_STUDY_MODALITY, REASON_STUDY_NAME, REASON_SERIES_CSV) names series.json and REASON_SERIES_CSV no longer mentions columns or row length; constant names are unchanged.",
+    "AC6: manifest.py reads plans and studies through read_series_json (its own output format is task-02's).",
+    "AC7b: scripts/parity.py reads series.json (REASON_NEW_MISSING text, presence check and help updated) and tests/test_parity.py passes; tests/test_cli.py's plan-folder file listing expects series.json.",
+    "AC7: A synthetic plan and study convert to series.json whose objects equal the rows today's series.csv held (same keys, order, values); the full suite passes with no test deleted, skipped or xfailed. tests/test_plan_regression.py keeps its pinned CSV text: it parses it with csv.DictReader and asserts the rows equal json.load(series.json), including key order; it is not re-pinned as JSON text.",
+    "Guardrail: no new log line; no file content in any exception or log (vault: diagnose-a-phi-safe-refusal-from-traceback-locals; read_series_csv's no-chaining pattern)."
+   ]
+  },
+  {
+   "id": "task-02",
+   "title": "manifest.jsonl, split and CLI read it, dated copy keeps its suffix",
+   "depends_on": [
+    "task-01"
+   ],
+   "files": [
+    "src/rt_dataprep/manifest.py",
+    "src/rt_dataprep/split.py",
+    "src/rt_dataprep/dicom_io.py",
+    "src/rt_dataprep/__main__.py",
+    "tests/test_manifest.py",
+    "tests/test_split.py",
+    "tests/test_cli.py",
+    "tests/test_organize.py",
+    "examples/synthetic_workflow.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/manifest.py": "modify",
+    "src/rt_dataprep/split.py": "modify",
+    "src/rt_dataprep/dicom_io.py": "modify",
+    "src/rt_dataprep/__main__.py": "modify",
+    "tests/test_manifest.py": "modify",
+    "tests/test_split.py": "modify",
+    "tests/test_cli.py": "modify",
+    "tests/test_organize.py": "modify",
+    "examples/synthetic_workflow.py": "modify"
+   },
+   "test_approach": "TDD in test_manifest/test_split/test_cli: new-format tests first (line shape, fov_mask rule, empty file, U+2028 in an ROI name, each split refusal), then port existing manifest/split tests.",
+   "criteria": [
+    "AC8: MANIFEST_NAME is 'manifest.jsonl'; manifest writes one JSON object per line (json.dumps default ensure_ascii=True, newline='\\n'), keys in today's COLUMNS order, lines sorted by case_dir; masks and series are native JSON lists; dose, ct_size, ct_spacing, fx and image stay strings as today; fov_mask is on every line ('' where none) when any case has one, else on none; zero cases writes a 0-byte file.",
+    "AC9: write_report picks the format from `name`'s suffix: '.jsonl' writes json.dumps(dict(zip(header, row))) + '\\n' per row (utf-8, newline='\\n', ensure_ascii default True); any other suffix uses the unchanged csv path; the dated name is f'{stem}_{stamp}{suffix}'; today's write-then-atomic-replace is kept. manifest passes masks and series as native lists (no json.dumps). Report CSVs are unchanged in format; tests/test_organize.py's dated-report pattern still holds.",
+    "AC10: split reads manifest.jsonl with encoding='utf-8-sig' by iterating the file handle, skipping blank lines; a line missing patient or case_dir -> REASON_COLUMNS; invalid JSON, not UTF-8, a non-object line, deep nesting, a duplicate key, or a non-string/empty/whitespace patient or case_dir -> REASON_ROWS; a 0-byte manifest -> REASON_NO_TRAIN; --external reads the same format; both reason texts reworded without 'column'; no chaining.",
+    "AC11: An ROI name containing U+2028 round-trips through manifest.jsonl and split without splitting a line.",
+    "AC12: CLI help strings and the split/manifest commands name manifest.jsonl; a CLI run writes manifest.jsonl and splits.json from it.",
+    "AC13: The full suite passes with no test deleted, skipped or xfailed.",
+    "AC13b: examples/synthetic_workflow.py splits from manifest.jsonl and finishes with its expected final line."
+   ]
+  },
+  {
+   "id": "task-03",
+   "title": "Docs, examples, parity script, .gitignore, SECURITY and profile text",
+   "depends_on": [
+    "task-02"
+   ],
+   "files": [
+    "README.md",
+    "examples/README.md",
+    "SECURITY.md",
+    "project-profile.yml",
+    ".gitignore",
+    "src/rt_dataprep/convert.py",
+    "src/rt_dataprep/preprocess.py",
+    "src/rt_dataprep/manifest.py",
+    "src/rt_dataprep/split.py",
+    "src/rt_dataprep/series.py"
+   ],
+   "file_ops": {
+    "README.md": "modify",
+    "examples/README.md": "modify",
+    "SECURITY.md": "modify",
+    "project-profile.yml": "modify",
+    ".gitignore": "modify",
+    "src/rt_dataprep/convert.py": "modify",
+    "src/rt_dataprep/preprocess.py": "modify",
+    "src/rt_dataprep/manifest.py": "modify",
+    "src/rt_dataprep/split.py": "modify",
+    "src/rt_dataprep/series.py": "modify"
+   },
+   "test_approach": "The AC17 grep; full suite green.",
+   "criteria": [
+    "AC14: .gitignore adds series.json and manifest*.jsonl and keeps every existing pattern, including series.csv and manifest*.csv (v0.1.x trees still exist); SECURITY.md and project-profile.yml name series.json and manifest.jsonl / manifest_<UTC time>.jsonl as PHI-bearing outputs.",
+    "AC15: README and examples/README describe series.json and manifest.jsonl, with reading examples json.load(...) and pd.read_json(path, lines=True, dtype=False) and a note that dtype=False keeps zero-padded patient ids. README also states v0.1.x converted trees are refused (REASON_LEGACY_SERIES) and must be reconverted with --overwrite, and 'retained column' wording becomes 'key'.",
+    "AC17: Module docstrings of convert, preprocess, manifest, split and series describe the JSON files (split no longer mentions csv.DictReader); `git grep -nE 'series\\.csv|manifest\\.csv'` returns nothing outside docs/specs, docs/plans, docs/handoffs, .gitignore, the LEGACY_SERIES_NAME and REASON_LEGACY_SERIES definition lines, and tests that build legacy folders."
+   ]
+  }
+ ],
+ "groups": [
+  [
+   "task-01"
+  ],
+  [
+   "task-02"
+  ],
+  [
+   "task-03"
+  ]
+ ]
+}
