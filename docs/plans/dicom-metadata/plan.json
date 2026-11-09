@@ -1,0 +1,165 @@
+{
+ "version": 1,
+ "metadata": {
+  "title": "DICOM metadata in series.json and manifest.jsonl (PR 2 of 2)",
+  "spec": "docs/specs/2026-11-09-dicom-metadata.md",
+  "previous": "docs/plans/json-outputs/plan.json (PR 1, merged as #248)",
+  "branch": "feat/dicom-metadata",
+  "profile": "project-profile.yml",
+  "created": "2026-11-09",
+  "notes": "Release v0.2.0 and the OSC subset rerun happen after this PR merges and the owner confirms, not in this run. Vault guardrails: [[pydicom-validates-lazily-on-first-tag-access]], [[pydicom-empty-values-read-back-as-none-or-stripped]], [[jsonl-pitfalls-pandas-dtype-and-unicode-line-separators]], [[tell-a-pydicom-missing-tag-from-our-own-bug]]."
+ },
+ "groups": [
+  [
+   "task-01"
+  ],
+  [
+   "task-02"
+  ],
+  [
+   "task-03"
+  ],
+  [
+   "task-04"
+  ]
+ ],
+ "tasks": [
+  {
+   "id": "task-01",
+   "title": "metadata module: value rules, aggregation, patient_age and the key catalog",
+   "depends_on": [],
+   "files": [
+    "src/rt_dataprep/metadata.py",
+    "tests/test_metadata.py",
+    "tests/synthetic_dicom.py",
+    "tests/test_synthetic_dicom.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/metadata.py": "create",
+    "tests/test_metadata.py": "create",
+    "tests/synthetic_dicom.py": "modify",
+    "tests/test_synthetic_dicom.py": "modify"
+   },
+   "test_approach": "TDD over pure functions. Headers are built by tests/synthetic_dicom.py, written to disk and read back through dicom_io.read_header, never hand-built Datasets inside test files (vault: pydicom-empty-values-read-back-as-none-or-stripped: blank, empty and VM>1 values must go through a real write and read). Write the failing tests for each value rule, aggregation case, patient_age case and group, then implement.",
+   "criteria": [
+    "AC1: new module src/rt_dataprep/metadata.py; no other module changes in this task. Public API: group constants ALL, IMAGES, RTPLAN, RTSTRUCT, RTDOSE; collect(heads, groups, *, roi_number=None) -> dict of the keys present for those groups aggregated over `heads` (a list of already-read pydicom headers); reg_keys(reg) -> dict of the REG group keys of one REG header; keys(group) -> tuple of that group's catalog key names in table order. The catalog keys and their DICOM sources are exactly the spec's Catalog section (All, Images incl. CT/MR/PT, RTPLAN, RTSTRUCT, RTDOSE, REG), as one table in the module.",
+    "AC2: value of one header's element: absent tag, None or empty -> absent; VM 1 -> str(value).strip(); MultiValue (VM > 1) -> list of str(v).strip(), never str() of the MultiValue. The VR is read from the element (ds[keyword].VR, or the sequence item's element), not from a keyword list.",
+    "AC3: aggregation over `heads`: absent values ignored; none -> key omitted; one distinct value -> that value (distinct by numeric value for a VM 1 numeric element that parses, so '3' and '3.0' are one value, first-seen text kept); several -> {'min': a, 'max': b} for a VM 1 element of VR DS, IS, FL, FD, US, UL, SS, SL (numeric order) or DA, TM, DT (string order), with the first-seen texts of the extremes; if any value does not parse as a number the element falls back to {'distinct': [...]} in first-seen order; any other element with several values -> {'distinct': [...]} (lists compared as lists).",
+    "AC4: patient_age per header then aggregated as a number: PatientAge must fully match \\\\d{3}[DWMY], else the dates are used; 'nnnY' -> int n; 'nnnM' -> round(n/12, 2); 'nnnW' -> round(n*7/365.25, 2); 'nnnD' -> round(n/365.25, 2); else completed years between PatientBirthDate and the first present of StudyDate, SeriesDate, AcquisitionDate; '063Y' -> 63, '006M' -> 0.5; no PatientAge, birth 19600615 and StudyDate 20230610 -> 62; malformed PatientAge ('abc') with no usable dates, an impossible date ('20230229') or no dates -> absent. PatientBirthDate is never a key of the result. Written as a JSON number (int or float), not a string.",
+    "AC5: IMAGES gives `slices` = len(heads) as an int. PT keys read RadiopharmaceuticalInformationSequence[0]; injection_time is RadiopharmaceuticalStartDateTime when any header of `heads` has it, else RadiopharmaceuticalStartTime (chosen once for all heads). The CT, MR and PT keys are tried on every header whatever its Modality.",
+    "AC6: RTPLAN keys are read from the one RTPLAN header passed (collect([plan], (RTPLAN,))). Its sequence keys (prescription_dose, radiation_type, beam_type, treatment_machine with the TreatmentMachineSequence fallback, source_isotope, source_strength, source_strength_date, source_strength_time) are the distinct values over the items: one -> the value, several -> {'distinct': [...]}; number_of_beams reads FractionGroupSequence[0].",
+    "AC7: RTSTRUCT with roi_number gives roi_interpreted_type from the RTROIObservationsSequence item whose ReferencedROINumber equals it and roi_generation_algorithm from the StructureSetROISequence item whose ROINumber equals it; no lookup by name; roi_number None -> neither key.",
+    "AC8: per-cell guard: each key is computed under a guard catching AttributeError, KeyError, IndexError, TypeError and ValueError (like series._or_none); a failure omits that key only. Tests: empty RadiopharmaceuticalInformationSequence, RTPLAN without FractionGroupSequence, malformed PatientAge -> those keys absent, the other keys present, nothing raised.",
+    "AC8b: reg_keys: reg_type = the distinct FrameOfReferenceTransformationMatrixType over all RegistrationSequence -> MatrixRegistrationSequence -> MatrixSequence items (one -> value, several -> {'distinct'}); reg_date ContentDate, reg_time ContentTime, reg_manufacturer Manufacturer; tested on a REG fixture with two types and on one with one type.",
+    "AC9: a test asserts the exact key set collect() returns for a header carrying every catalog tag, per group (catches keyword typos the guard would hide; vault: tell-a-pydicom-missing-tag-from-our-own-bug).",
+    "AC10: metadata.py logs nothing and builds no exception message from a value; reading headers produced by dicom_io.read_header emits no warning (test with warnings as errors and caplog empty; vault: pydicom-validates-lazily-on-first-tag-access).",
+    "AC11: tests/synthetic_dicom.py gains the fixtures the tests need through keyword overrides on its existing writers (PT RadiopharmaceuticalInformationSequence, REG MatrixSequence types, brachy SourceSequence with ReferenceAirKermaRate, RTROIObservationsSequence types, per-slice varying tags on write_ct_series); test_synthetic_dicom.py covers each new fixture option. All values synthetic."
+   ]
+  },
+  {
+   "id": "task-02",
+   "title": "ROI numbers on applicator and line records; registration helper that returns the chosen REG",
+   "depends_on": [
+    "task-01"
+   ],
+   "files": [
+    "src/rt_dataprep/masks.py",
+    "src/rt_dataprep/series.py",
+    "src/rt_dataprep/convert.py",
+    "tests/test_masks.py",
+    "tests/test_series.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/masks.py": "modify",
+    "src/rt_dataprep/series.py": "modify",
+    "src/rt_dataprep/convert.py": "modify",
+    "tests/test_masks.py": "modify",
+    "tests/test_series.py": "modify"
+   },
+   "test_approach": "TDD: a test that classify's applicator and line records carry the ROINumber, and tests of the new series.py helper (identity, chosen REG, qualifying REG with no usable matrix, none qualifies); existing registration() tests stay unchanged and green.",
+   "criteria": [
+    "AC1: masks.RoiPlan.applicators and .lines entries become (ROINumber, file, points, ROIName); every unpacking site (masks.py, convert.py) is updated; outputs (files, names, refusals) are unchanged.",
+    "AC2: series.py gains registration_reg(ct_frame, series_frame, regs, headers_by_sop) -> (registered, text, reg header or None): the REG that registration() chooses today (first qualifying by SOPInstanceUID), also when its text is ''; None for identity (same frame) and when none qualifies.",
+    "AC3: registration() becomes a 2-tuple wrapper over registration_reg with the same results; its existing tests and callers are unchanged.",
+    "AC4: full suite green; no behaviour change in convert output."
+   ]
+  },
+  {
+   "id": "task-03",
+   "title": "convert writes `dicom` on every series.json object; preprocess reads and carries it",
+   "depends_on": [
+    "task-02"
+   ],
+   "files": [
+    "src/rt_dataprep/convert.py",
+    "src/rt_dataprep/preprocess.py",
+    "tests/test_convert.py",
+    "tests/test_dicom_metadata_convert.py",
+    "tests/test_preprocess.py",
+    "tests/series_files.py",
+    "tests/synthetic_dicom.py",
+    "README.md",
+    "tests/test_plan_regression.py",
+    "tests/test_synthetic_dicom.py"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/convert.py": "modify",
+    "src/rt_dataprep/preprocess.py": "modify",
+    "tests/test_convert.py": "modify",
+    "tests/test_dicom_metadata_convert.py": "create",
+    "tests/test_preprocess.py": "modify",
+    "tests/series_files.py": "modify",
+    "tests/synthetic_dicom.py": "modify",
+    "README.md": "modify",
+    "tests/test_plan_regression.py": "modify",
+    "tests/test_synthetic_dicom.py": "modify"
+   },
+   "test_approach": "TDD end to end on synthetic trees: write the spec's Acceptance scenarios as convert tests first (they fail: no `dicom` key), then wire metadata.collect into the row builders. Update existing exact-key-set assertions in test helpers to allow the `dicom` key.",
+   "criteria": [
+    "AC1: every series.json object convert writes has a `dicom` object (possibly {}); key order SERIES_COLUMNS then dicom (write_series_json unchanged); keys inside `dicom`: the row's own groups in catalog-table order (ALL, IMAGES, RTSTRUCT, RTDOSE), then RTPLAN, then REG (the merge order); the existing fields are byte-for-byte unchanged.",
+    "AC2: header sources per spec. A row's own headers supply only ALL, IMAGES, RTSTRUCT or RTDOSE; the RTPLAN-group keys are collect([plan], (RTPLAN,)) from the plan's RTPLAN header, merged into the ct, dose, mask, applicator and line rows. The ct row's dicom aggregates ALL+IMAGES over every planning-CT slice (_series_rows receives ct_slices), while its SERIES_COLUMNS still come from ct_slices[0][1] only; the dose row ALL+RTDOSE over every RTDOSE file of the plan; mask, applicator and line rows ALL+RTSTRUCT over the RTSTRUCT with roi_number of that row's ROI (rois.kept number, or the task-02 number on applicator and line records).",
+    "AC3: `series` rows: ALL+IMAGES aggregated once per series over `ordered` (every slice), reused for each target folder as a fresh dict per folder (no shared-dict mutation); in a plan folder merged with the keys of that plan's ct-row dicom filtered by metadata.keys(RTPLAN); on registered plan-folder rows with a non-identity registration, plus metadata.reg_keys of the REG chosen by series.registration_reg (also when reg_matrix is ''). Identity (same-frame) plan-folder series rows get the RTPLAN keys but no REG keys; study-folder rows get neither.",
+    "AC4: acceptance, one synthetic patient: CT+RTSTRUCT+RTPLAN+RTDOSE plan with a registered MR (rigid REG) and a same-frame series, a brachy-style plan with a source, an applicator and a line ROI, and a PT study; the test asserts the full dicom key set per row kind (ct, dose, mask, applicator, line, registered series-in-plan, identity series-in-plan, series-in-study) and that keys of groups that do not apply are absent.",
+    "AC5: acceptance, variation: XRayTubeCurrent and AcquisitionTime differing over CT slices -> {'min','max'}; ImageType differing -> {'distinct': [[...],[...]]}; PixelSpacing differing -> {'distinct'}; a tag missing on some slices -> the value of the rest; SliceThickness '3' and '3.0' -> '3'; a two-file RTDOSE with different DoseType -> {'distinct'} on the dose row.",
+    "AC6: acceptance, ROI: an RTSTRUCT with two ROIs of different RTROIInterpretedType gives each mask row its own type; an applicator row and a line row each get their own ROI's type.",
+    "AC7: acceptance, REG: a registered MR's rows carry the chosen REG's reg_type/reg_date/reg_time/reg_manufacturer; the CT row has none.",
+    "AC8: guard end to end: empty RadiopharmaceuticalInformationSequence, RTPLAN without FractionGroupSequence, PatientAge 'abc' with no PatientBirthDate, and no PatientAge with birth date 20230229 each convert with the affected keys absent; no refusal, no abort, same outcome counts as without the bad value.",
+    "AC9: PHI: no new log line; caplog of the full synthetic run, the guard cases and a refused-plan case holds none of the synthetic patient/site values (age, sex, size, weight, institution, station, serial, accession, study ID, manufacturer, model), and no report CSV gains a column.",
+    "AC10: preprocess.read_series_json accepts an optional `dicom` key, present on all items of a file or none, whose value must be a dict (exempt from the string-value check); a non-dict `dicom` or `dicom` on some items only is malformed (REASON_SERIES_CSV); files without `dicom` (PR 1 outputs) still read. preprocess's series.json keeps each row's `dicom` unchanged (keys: SERIES_COLUMNS, dicom, retained); tests cover all four cases.",
+    "AC11: README's series.json section documents the `dicom` key, the min/max and distinct shapes, and that values appear only in series.json and manifest.jsonl.",
+    "AC12: tests/test_plan_regression.py compares {k: o[k] for k in SERIES_COLUMNS} of each series.json object with its pinned rows (pinned text unchanged) and asserts `dicom` is a dict."
+   ]
+  },
+  {
+   "id": "task-04",
+   "title": "manifest.jsonl gains the 8 optional flat keys from the primary image's dicom",
+   "depends_on": [
+    "task-03"
+   ],
+   "files": [
+    "src/rt_dataprep/manifest.py",
+    "src/rt_dataprep/dicom_io.py",
+    "tests/test_manifest.py",
+    "tests/test_dicom_io.py",
+    "tests/test_split.py",
+    "README.md"
+   ],
+   "file_ops": {
+    "src/rt_dataprep/manifest.py": "modify",
+    "src/rt_dataprep/dicom_io.py": "modify",
+    "tests/test_manifest.py": "modify",
+    "tests/test_dicom_io.py": "modify",
+    "tests/test_split.py": "modify",
+    "README.md": "modify"
+   },
+   "test_approach": "TDD: convert a synthetic plan and a study, run manifest, assert each line's optional keys; then a line whose primary image lacks some keys; then split on that manifest.",
+   "criteria": [
+    "AC1: each manifest line gains patient_age, patient_sex, patient_weight, study_date, manufacturer, model, institution_name from the `dicom` object of the case's primary image row (a plan's ct row; a study line's own series row) and series_date from that row's existing series_date field; a key absent from dicom (or an empty series_date) is absent from the line; a {'min','max'} or {'distinct'} value is copied as is. These 8 keys follow the fixed COLUMNS / FOV_COLUMNS keys in the order patient_age, patient_sex, patient_weight, study_date, series_date, manufacturer, model, institution_name.",
+    "AC2: dicom_io.write_report's jsonl path writes these optional keys without padding absent ones; CSV reports are unchanged and gain no column. The file stays ensure_ascii JSON with newline='\\n' (vault: jsonl-pitfalls-pandas-dtype-and-unicode-line-separators).",
+    "AC3: series.json files without `dicom` (PR 1 outputs) still give manifest lines, with none of the 8 keys except series_date.",
+    "AC4: split reads a manifest carrying the optional keys (and lines that differ in which are present) and gives the same splits.json as without them.",
+    "AC5: README's manifest.jsonl section lists the 8 optional keys; full suite, lint and build green."
+   ]
+  }
+ ]
+}
