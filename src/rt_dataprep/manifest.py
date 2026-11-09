@@ -23,6 +23,15 @@ MANIFEST_NAME = 'manifest.jsonl'
 COLUMNS = ['case_dir', 'patient', 'fx', 'ct_size', 'ct_spacing', 'dose', 'masks', 'rtplan_uid', 'ct_series_uid', 'study_uid',
            'case_type', 'modality', 'image', 'series']
 FOV_COLUMNS = [*COLUMNS, 'fov_mask']  # original schema is retained when there are no primary-image support masks
+OPTIONAL_KEYS = ['patient_age', 'patient_sex', 'patient_weight', 'study_date', 'series_date', 'manufacturer', 'model', 'institution_name']
+
+
+def _optional(row):
+    """The optional keys of a case's primary image row, in order: from its `dicom` object (absent in a PR 1 series.json), series_date from its own
+    field; a key with no value is left out of the line. A {min,max} or {distinct} value is copied as is."""
+    dicom = row.get('dicom', {})
+    values = {key: row['series_date'] if key == 'series_date' else dicom.get(key) for key in OPTIONAL_KEYS}
+    return {key: value for key, value in values.items() if value not in (None, '')}
 
 
 def _geometry(size, spacing):
@@ -49,9 +58,9 @@ def _study_rows(patient, study):
         except (CaseRefused, OSError):  # this series only: its siblings keep their rows
             refused += 1
             continue
-        rows.append([f'{patient.name}/{study.name}/{series_id(row["file"])}', patient.name, '', *_geometry(info[0], info[2]),
-                     '0', [], '', row['series_instance_uid'], row['study_instance_uid'], 'imaging', row['modality'],
-                     row['file'], [], image_fov_mask(study, row['file'], info)])
+        rows.append(([f'{patient.name}/{study.name}/{series_id(row["file"])}', patient.name, '', *_geometry(info[0], info[2]),
+                      '0', [], '', row['series_instance_uid'], row['study_instance_uid'], 'imaging', row['modality'],
+                      row['file'], [], image_fov_mask(study, row['file'], info)], _optional(row)))
     return rows, refused
 
 
@@ -101,17 +110,18 @@ def manifest(root):
                 refused += 1
                 continue
             masks = sorted(row['roi_name'] for row in kept if row['kind'] == 'mask')
-            rows.append([f'{patient.name}/{plan.name}', patient.name, plan.name, *_geometry(ct[0], ct[2]),
-                         str(int(any(row['kind'] == 'dose' for row in kept))), masks,
-                         kept[0]['rtplan_uid'], kept[0]['series_instance_uid'], kept[0]['study_instance_uid'],  # kept[0] is the ct row
-                         'plan', 'CT', '', _aligned(plan, series, ct), image_fov_mask(plan, kept[0]['file'], ct)])
+            rows.append(([f'{patient.name}/{plan.name}', patient.name, plan.name, *_geometry(ct[0], ct[2]),
+                          str(int(any(row['kind'] == 'dose' for row in kept))), masks,
+                          kept[0]['rtplan_uid'], kept[0]['series_instance_uid'], kept[0]['study_instance_uid'],  # kept[0] is the ct row
+                          'plan', 'CT', '', _aligned(plan, series, ct), image_fov_mask(plan, kept[0]['file'], ct)], _optional(kept[0])))
         for study in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(STUDY_FOLDER, p.name) and holds_series(p)):
             study_rows, study_refused = _study_rows(patient, study)
             rows += study_rows
             refused += study_refused
-    rows.sort(key=lambda row: row[0])  # case_dir; whole rows hold lists of dicts, which do not compare
-    primary_masks = any(row[-1] for row in rows)
-    write_report(root, MANIFEST_NAME, FOV_COLUMNS if primary_masks else COLUMNS,
-                 rows if primary_masks else [row[:-1] for row in rows])
+    rows.sort(key=lambda pair: pair[0][0])  # case_dir; whole rows hold lists of dicts, which do not compare
+    primary_masks = any(row[-1] for row, _ in rows)
+    header = FOV_COLUMNS if primary_masks else COLUMNS
+    write_report(root, MANIFEST_NAME, header,
+                 [dict(zip(header, row if primary_masks else row[:-1], strict=True)) | optional for row, optional in rows])
     log.info('manifest: %d written, %d refused', len(rows), refused)
     return len(rows), refused

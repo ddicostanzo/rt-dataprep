@@ -10,5 +10,11 @@ def read(folder):
         return json.load(handle)
 
 
+def columns(row):
+    """The SERIES_COLUMNS part of a convert object, in order: `dicom` (a dict on every object convert writes) is checked apart."""
+    assert list(row)[-1] == 'dicom' and isinstance(row['dicom'], dict)
+    return {column: row[column] for column in conv.SERIES_COLUMNS}
+
+
 def write(rows, path):
     conv.write_series_json(rows, path)

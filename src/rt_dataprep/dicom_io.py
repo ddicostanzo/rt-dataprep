@@ -223,8 +223,8 @@ def sanitize_path_component(value, fallback='UNKNOWN'):
 def write_report(out_root, name, header, rows):
     """
     `rows` under `header` at out_root/<stem>_<UTC time><suffix of name>, one file per run so a rerun loses nothing (#50), then
-    copied to out_root/`name`, the latest run's report. A '.jsonl' name gets one JSON object per row (cells may be lists), any
-    other name CSV.
+    copied to out_root/`name`, the latest run's report. A '.jsonl' name gets one JSON object per row (cells may be lists; a row that is a dict is written as is, so a line may
+    carry optional keys the others lack), any other name CSV.
     """
     out_root = Path(out_root)
     stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())  # shortcut: two runs in one second share a file; add a counter if that happens
@@ -232,7 +232,7 @@ def write_report(out_root, name, header, rows):
     jsonl = dated.suffix == '.jsonl'
     with open(dated, 'w', newline='\n' if jsonl else '', encoding='utf-8') as handle:
         if jsonl:  # ensure_ascii keeps U+2028 and U+0085 out of the file, so no reader splits a line there
-            handle.writelines(json.dumps(dict(zip(header, row, strict=True))) + '\n' for row in rows)
+            handle.writelines(json.dumps(row if isinstance(row, dict) else dict(zip(header, row, strict=True))) + '\n' for row in rows)
         else:
             writer = csv.writer(handle)
             writer.writerow(header)

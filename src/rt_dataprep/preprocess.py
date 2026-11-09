@@ -643,7 +643,8 @@ def _no_duplicate_keys(pairs):
 
 def read_series_json(folder):
     """(rows, malformed) of a plan's or study's series.json. malformed: not UTF-8 JSON (a BOM, duplicate keys or deep nesting included), not an array,
-    an item that is not an object, key sets other than SERIES_COLUMNS or SERIES_COLUMNS + `retained` (one set for the whole file), or a value that is not a string.
+    an item that is not an object, key sets other than SERIES_COLUMNS or SERIES_COLUMNS + `retained`, each with or without `dicom` (one set for the whole file: on every item or none),
+    a value that is not a string, or a `dicom` that is not an object (convert's metadata; carried unread).
     rows is the array when it is one, else []; an OSError (the file cannot be opened) propagates."""
     try:
         with open(folder / conv.SERIES_NAME, encoding='utf-8') as handle:
@@ -653,8 +654,9 @@ def read_series_json(folder):
     if not isinstance(rows, list):
         return [], True
     first = set(rows[0]) if rows and isinstance(rows[0], dict) else None
-    malformed = bool(rows) and (first not in (set(conv.SERIES_COLUMNS), set(PREPROCESSED_SERIES_COLUMNS)) or not all(
-        isinstance(row, dict) and set(row) == first and all(isinstance(value, str) for value in row.values()) for row in rows))
+    malformed = bool(rows) and (first is None or first - {'dicom'} not in (set(conv.SERIES_COLUMNS), set(PREPROCESSED_SERIES_COLUMNS)) or not all(
+        isinstance(row, dict) and set(row) == first and all(isinstance(value, dict if key == 'dicom' else str) for key, value in row.items())
+        for row in rows))
     return rows, malformed
 
 

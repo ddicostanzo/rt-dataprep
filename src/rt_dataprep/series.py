@@ -210,9 +210,9 @@ def _reg_text(reg, ct_frame, series_frame, headers_by_sop):
     return ' '.join('%.10g' % v for v in matrix.ravel())
 
 
-def registration(ct_frame, series_frame, regs, headers_by_sop):
+def registration_reg(ct_frame, series_frame, regs, headers_by_sop):
     """
-    (registered, reg_matrix) of a series on `series_frame` against the planning CT on `ct_frame`.
+    (registered, reg_matrix, reg) of a series on `series_frame` against the planning CT on `ct_frame`.
 
     `regs`: the patient's REG headers, already deduplicated by SOPInstanceUID and without those in an excluded study (the
     caller does both). `headers_by_sop`: {SOPInstanceUID: header} of every readable file of the patient, excluded studies
@@ -222,17 +222,23 @@ def registration(ct_frame, series_frame, regs, headers_by_sop):
     that REG's items do not give exactly one usable rigid matrix per frame, or when no REG qualifies (registered False).
     A REG qualifies with an item (real or implied by its own frame) for each frame, whatever its matrices hold; a REG with a
     malformed tag does not qualify. Nothing here raises for a bad header.
+    reg: the header of the REG that was chosen (also when reg_matrix is ''); None for identity and when none qualifies.
     """
     if not ct_frame:  # no FrameOfReferenceUID on the CT: an empty series frame is not the same frame
-        return False, ''
+        return False, '', None
     if ct_frame == series_frame:
-        return True, IDENTITY
+        return True, IDENTITY, None
     keyed = [(sop, reg) for reg in regs if (sop := _or_none(lambda r: str(r.SOPInstanceUID), reg)) is not None]
     for _, reg in sorted(keyed, key=lambda pair: pair[0]):
         text = _or_none(_reg_text, reg, ct_frame, series_frame, headers_by_sop)
         if text is not None:
-            return True, text
-    return False, ''
+            return True, text, reg
+    return False, '', None
+
+
+def registration(ct_frame, series_frame, regs, headers_by_sop):
+    """(registered, reg_matrix) of registration_reg(): the same results without the chosen REG."""
+    return registration_reg(ct_frame, series_frame, regs, headers_by_sop)[:2]
 
 
 IMAGE_MODALITIES = ('CT', 'MR', 'PT')

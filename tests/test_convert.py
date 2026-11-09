@@ -55,14 +55,14 @@ def dose_spec(value, summation='PLAN', **kwargs):
     return spec
 
 
-def make_plan(folder, doses=(), rois=(), values=None, contour_images=True, patient=PID, ct_meta=None, plan_meta=None):
+def make_plan(folder, doses=(), rois=(), values=None, contour_images=True, patient=PID, ct_meta=None, plan_meta=None, struct_meta=None):
     """One plan folder: CT, RTSTRUCT, RTPLAN and an RTDOSE per entry of `doses` (write_rtdose kwargs)."""
     folder.mkdir(parents=True, exist_ok=True)
     if values is None:
         values = (np.arange(np.prod(SHAPE)) % 200 - 100).reshape(SHAPE)
     ct = sd.write_ct_series(folder, values, spacing=SPACING, origin=ORIGIN, patient_id=patient, **(ct_meta or {}))
     study = dict(patient_id=patient, study_uid=ct['study_uid'])
-    struct = sd.write_rtstruct_rois(folder / 'struct.dcm', ct, list(rois), contour_images=contour_images, **study)
+    struct = sd.write_rtstruct_rois(folder / 'struct.dcm', ct, list(rois), contour_images=contour_images, **study, **(struct_meta or {}))
     plan = sd.write_rtplan(folder / 'plan.dcm', struct, np.zeros((2, 3)), **study, **(plan_meta or {}))
     for k, spec in enumerate(doses):
         spec = dict(spec)
@@ -563,8 +563,8 @@ RING_CHANNEL = [dict(applicator_id='Ring-1', dwells_mm=np.zeros((2, 3)), roi=2)]
 
 def series_rows(out, folder='plan_1'):
     rows = sf.read(out / PID / folder)
-    assert all(list(row) == SERIES_COLUMNS for row in rows)  # the keys and their order are what series.csv's header was
-    return rows
+    assert all(list(row) == [*SERIES_COLUMNS, 'dicom'] for row in rows)  # series.csv's header, then the metadata object (own tests)
+    return [{column: row[column] for column in SERIES_COLUMNS} for row in rows]
 
 
 def describe(path, text, date):

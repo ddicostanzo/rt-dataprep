@@ -146,7 +146,8 @@ headers inside test files.
   PatientAge each convert with the affected keys absent, no refusal, no abort.
 - An RTSTRUCT with two ROIs of different RTROIInterpretedType gives each mask row its own type; an applicator row gets its
   own ROI's type.
-- A two-file RTDOSE with different DoseType → `{"distinct"}` on the dose row.
+- A two-file RTDOSE whose files differ in a tag (e.g. Manufacturer) → `{"distinct"}` on the dose row. (DoseType itself cannot
+  differ end to end: convert refuses a DoseType other than PHYSICAL; its distinct path is unit-tested past that check.)
 - A registered MR's rows carry the chosen REG's keys; the CT row has none.
 - preprocess keeps `dicom`; manifest.jsonl has the 8 keys from the primary image.
 - No new log line; caplog of the full synthetic run and of the guard and refused-plan cases holds no synthetic patient

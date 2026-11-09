@@ -205,3 +205,60 @@ def test_study_date_and_time_only_when_given(tmp_path):
     assert 'StudyTime' not in pydicom.dcmread(dose)
     sd.write_rtdose(dose, np.zeros((1, 2, 2)), study_date=STUDY_DATE, study_time=STUDY_TIME)
     assert (pydicom.dcmread(dose).StudyDate, pydicom.dcmread(dose).StudyTime) == (STUDY_DATE, STUDY_TIME)
+
+
+def test_tags_flat_sequence_blank_and_delete(tmp_path):
+    path = tmp_path / 'plan.dcm'
+    tags = dict(Manufacturer='SYNTHETIC_MAKER', ImageType=['A', 'B'], PatientAge='',
+                SourceSequence=[dict(SourceIsotopeName='SYNTHETIC_ISO', ReferenceAirKermaRate=40.5),
+                                dict(SourceIsotopeName='SYNTHETIC_ISO2', SourceStrengthReferenceDate='20240101')],
+                FractionGroupSequence=None)
+    sd.write_rtplan(path, sd.generate_uid(), [(0, 0, 0)], tags=tags)
+    ds = pydicom.dcmread(path)
+    assert ds.Manufacturer == 'SYNTHETIC_MAKER'
+    assert list(ds.ImageType) == ['A', 'B']
+    assert ds.PatientAge in ('', None)
+    assert [i.SourceIsotopeName for i in ds.SourceSequence] == ['SYNTHETIC_ISO', 'SYNTHETIC_ISO2']
+    assert float(ds.SourceSequence[0].ReferenceAirKermaRate) == 40.5
+    assert ds.SourceSequence[1].SourceStrengthReferenceDate == '20240101'
+    assert 'FractionGroupSequence' not in ds  # None deleted what the writer set
+
+
+def test_tags_empty_sequence_and_nested_sequence(tmp_path):
+    ct = sd.write_ct_series(tmp_path, np.zeros((1, 2, 2)), modality='PT', tags=dict(RadiopharmaceuticalInformationSequence=[]))
+    assert len(pydicom.dcmread(ct['paths'][0]).RadiopharmaceuticalInformationSequence) == 0
+    (tmp_path / 'n').mkdir()
+    nested = [dict(Radiopharmaceutical='SYNTHETIC_TRACER', RadionuclideCodeSequence=[dict(CodeMeaning='SYNTHETIC_NUCLIDE')])]
+    ct = sd.write_ct_series(tmp_path / 'n', np.zeros((1, 2, 2)), modality='PT',
+                            tags=dict(RadiopharmaceuticalInformationSequence=nested))
+    item = pydicom.dcmread(ct['paths'][0]).RadiopharmaceuticalInformationSequence[0]
+    assert item.RadionuclideCodeSequence[0].CodeMeaning == 'SYNTHETIC_NUCLIDE'
+
+
+def test_per_slice_tags_override_and_delete(tmp_path):
+    ct = sd.write_ct_series(tmp_path, np.zeros((3, 2, 2)), tags=dict(KVP='120', SliceThickness=9),
+                            per_slice=[dict(XRayTubeCurrent='100'), None, dict(XRayTubeCurrent='200', KVP=None)])
+    ds = [pydicom.dcmread(p) for p in ct['paths']]
+    assert [d.get('XRayTubeCurrent') for d in ds] == ['100', None, '200']
+    assert [d.get('KVP') for d in ds] == ['120', '120', None]
+    assert {float(d.SliceThickness) for d in ds} == {9.0}  # tags= wins over the writer's own value
+
+
+def test_roi_generation_algorithm_option(tmp_path):
+    ct = sd.write_ct_series(tmp_path, np.zeros((2, 4, 4)))
+    rois = [dict(number=1, name='SYNTHETICA', kind='empty', algorithm='SEMIAUTOMATIC'),
+            dict(number=2, name='SYNTHETICB', kind='empty')]
+    sd.write_rtstruct_rois(tmp_path / 's.dcm', ct, rois)
+    ds = pydicom.dcmread(tmp_path / 's.dcm')
+    assert [r.ROIGenerationAlgorithm for r in ds.StructureSetROISequence] == ['SEMIAUTOMATIC', 'AUTOMATIC']
+
+
+def test_reg_types_and_dose_tags_reach_the_file(tmp_path):
+    path = tmp_path / 'reg.dcm'
+    sd.write_reg(path, sd.generate_uid(), sd.generate_uid(), tags=dict(Manufacturer='SYNTHETIC_REGMAKER', ContentDate='20240102'),
+                 registrations=[dict(matrices=[('RIGID', sd.transformation_matrix()), ('AFFINE', sd.transformation_matrix())])])
+    ds = pydicom.dcmread(path)
+    assert (ds.Manufacturer, ds.ContentDate) == ('SYNTHETIC_REGMAKER', '20240102')
+    types = [m.FrameOfReferenceTransformationMatrixType
+             for m in ds.RegistrationSequence[0].MatrixRegistrationSequence[0].MatrixSequence]
+    assert types == ['RIGID', 'AFFINE']

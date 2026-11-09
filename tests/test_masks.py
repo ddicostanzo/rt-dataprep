@@ -574,3 +574,20 @@ def test_no_case_refused_is_raised_inside_an_except_block_in_masks():
 
 def test_no_array_view_of_a_temporary_image_in_masks():
     assert 'GetArrayViewFromImage' not in inspect.getsource(masks)
+
+
+def test_applicator_and_line_records_carry_the_roi_number_first(tmp_path, monkeypatch):
+    seen = []
+    real = masks.classify
+
+    def spy(*args, **kwargs):
+        seen.append(real(*args, **kwargs))
+        return seen[-1]
+    monkeypatch.setattr(masks, 'classify', spy)
+    rois = [dict(number=3, name='Ring', kind='channel', points=channel_points(3)),
+            dict(number=7, name='RefLine', kind='line', lines=[SPANNING])]
+    run(tmp_path, make_plan(tmp_path, rois))
+    (plan,) = seen
+    assert [(n, f, name) for n, f, _, name in plan.applicators] == [(3, 'Ring.nii.gz', 'Ring')]
+    assert [(n, f, name) for n, f, _, name in plan.lines] == [(7, 'refline.nii.gz', 'RefLine')]
+    assert plan.applicators[0][2].shape == (3, 3) and plan.lines[0][2].shape == (3, 3)

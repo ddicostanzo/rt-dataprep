@@ -127,7 +127,7 @@ def test_the_plan_folder_is_what_it_was_before_study_folders(converted, plan):
     pinned = SERIES_CSV[plan].format(**uids(int(plan[-1])), CT_DATE=CT_DATE, STRUCT_DATE=STRUCT_DATE,
                                      DOSE_DATE=DOSE_DATE, PLAN_DATE=PLAN_DATE)
     # the rows (and their key order) v0.1.x wrote as CSV text are the objects of series.json now
-    assert [list(r.items()) for r in csv.DictReader(io.StringIO(pinned, newline=''))] == [list(o.items()) for o in sf.read(folder)]
+    assert [list(r.items()) for r in csv.DictReader(io.StringIO(pinned, newline=''))] == [list(sf.columns(o).items()) for o in sf.read(folder)]
     assert {p.name: pinned_volume(p) for p in sorted(folder.glob('*.nii.gz'))} == VOLUMES[plan]
 
 

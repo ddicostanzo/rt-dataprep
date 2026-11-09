@@ -168,7 +168,24 @@ Plan numbering reflects the organized plan order. Study folders are numbered by 
 their written series, with blank dates/times last and StudyInstanceUID as a tie breaker. Series numbers are per modality
 within each destination. `series.json` records the actual output files and metadata; inspect it instead of inferring
 relationships from filenames. It is a JSON array with one object per output file, holding the same fields the earlier
-`series.csv` held (every value a string). Read it with `json.load(open(path))`.
+`series.csv` held (every value a string), then a `dicom` object (below). Read it with `json.load(open(path))`.
+
+Every object has a `dicom` key whose value is an object of DICOM metadata; it is `{}` when the headers hold none of it.
+A key appears only when its value is present, so a missing key means the tag was absent or unusable, never a default.
+Values are the DICOM values as written: strings (raw DA/TM/DT text such as `20240105`), a list of strings for a
+multi-valued element (`pixel_spacing`, `image_type`), and two numbers, `patient_age` (years, from `PatientAge` or from the
+birth date and study date; the birth date itself is not written) and `slices` (the count of slice headers). When the
+headers of a row (every slice of a series, every file of a multi-file dose) disagree, the value is
+`{"min": a, "max": b}` for a single numeric element or a DA/TM/DT (the first-seen texts of the extremes), and
+`{"distinct": [v1, v2, ...]}` otherwise (first-seen order); equal numbers such as `3` and `3.0` are one value.
+Which keys a row carries depends on its kind: patient, study, device and acquisition keys (`manufacturer`, `model`,
+`institution_name`, `study_date`, ...) on every row; image, CT, MR and PET keys (`rows`, `kvp`, `echo_time`,
+`injected_dose`, ...) on `ct` and `series` rows; RTSTRUCT keys, including `roi_interpreted_type` and
+`roi_generation_algorithm` of that row's ROI, on `mask`, `applicator` and `line` rows; `dose_units` and `dose_type` on
+`dose` rows. Plan keys (`plan_intent`, `prescription_dose`, `treatment_machine`, `source_isotope`, ...) are on every row
+of a plan folder, and the registration keys (`reg_type`, `reg_date`, `reg_time`, `reg_manufacturer`) on the
+`series` rows of a plan folder registered through a REG (not same-frame rows); study folders carry neither. Patient name, birth date and ethnic group are never written.
+These values are patient data: they appear only in `series.json` and `manifest.jsonl`, never in a log line or a report.
 
 Trees created with the old `images/` conversion layout must be re-converted. Current manifest and preprocessing walkers
 use `study_<n>/` and ignore the old `images/` layout.
@@ -308,8 +325,9 @@ these keys:
 | `case_type`, `modality`, `image` | `plan` or `imaging`; image modality; volume filename for imaging (blank for plans). |
 | `series` | List of aligned plan series (objects with `file`, `modality`, optional `fov_mask`); `[]` for imaging. |
 | `fov_mask` (optional) | Planning-CT or study-image support-mask filename, relative to its case folder; blank when absent. |
+| `patient_age`, `patient_sex`, `patient_weight`, `study_date`, `series_date`, `manufacturer`, `model`, `institution_name` (all optional) | From the `dicom` object of the case's primary image (a plan's planning CT; an imaging line's own series), `series_date` from that image's `series_date` field. A key the image has no value for is left out of that line, so lines can differ in which of these they carry. A value that varied over the series is the `{"min": ..., "max": ...}` or `{"distinct": [...]}` object, copied as is. They follow the fixed keys (and `fov_mask`) in the order listed; a `series.json` without `dicom` gives only `series_date`. `split` ignores them. |
 
-`masks` and `series` are native JSON lists; every other value is a string. The `fov_mask` key appears on every line only
+`masks` and `series` are native JSON lists, `patient_age` is a number, and the optional metadata values may be objects; every other value is a string. The `fov_mask` key appears on every line only
 when at least one usable primary-image mask is present in the tree. Without those masks, the original fourteen keys are
 written. Aligned-series masks remain in their `series` entries. A dated copy `manifest_<UTC timestamp>.jsonl` is kept next
 to it.
