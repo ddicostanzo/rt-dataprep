@@ -51,3 +51,6 @@ Decisions:
 
 Gotchas:
 - A REG whose items cover both frames qualifies whatever frame the REG itself names; the "none qualifies" test needs an item list that omits the CT item and a REG in neither frame.
+
+## review-group-2
+PASS (no BLOCKING, no deferred). Notes only: test_series picks the expected REG by min SOP UID; AC1 test spies on classify via convert_plan.
