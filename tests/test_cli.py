@@ -335,10 +335,12 @@ def refusal(capsys_result, reason):
     assert capsys_result.out == '' and capsys_result.err.splitlines()[-1] == f'rt_dataprep: {reason}'
 
 
-def test_manifest_then_split_run_end_to_end_and_print_counts_only(tree, capfd):
+def test_manifest_then_split_run_end_to_end_and_print_counts_only(tree, capfd, caplog):
+    caplog.set_level('INFO')
     cli.main(['manifest', str(tree)])
     first = capfd.readouterr()
-    assert first.out == 'manifest: 5 written, 0 refused\n'
+    # the counts line is logged once and not also printed (it appeared twice in job logs)
+    assert first.out == '' and [r.getMessage() for r in caplog.records].count('manifest: 5 written, 0 refused') == 1
     cli.main(split_args(tree))
     second = capfd.readouterr()
     assert second.out == 'train: 3 patients, 3 cases\nval: 1 patients, 1 cases\ntest: 1 patients, 1 cases\n'
