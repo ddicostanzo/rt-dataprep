@@ -783,6 +783,16 @@ def test_a_run_sweeps_the_leftover_staging_of_a_killed_run(tree):
     assert leftovers(out) == []
 
 
+def test_the_sweep_keeps_the_old_and_partial_folders_of_a_patient_named_unzip(tree):
+    src, out = tree
+    planning_study(src / 'a')
+    for hidden in ('.unzip-x.old', '.unzip-x.partial'):  # .old is a killed --overwrite swap's only copy: recover restores it
+        (out / hidden).mkdir(parents=True)
+        (out / hidden / 'f').write_bytes(b'x')
+    organize(src, out)
+    assert leftovers(out) == ['.unzip-x.old', '.unzip-x.partial']
+
+
 def test_a_file_system_without_flock_logs_one_fixed_warning_and_runs_unlocked_without_a_sweep(tree, monkeypatch, caplog):
     src, out = tree
     planning_study(src / 'a')

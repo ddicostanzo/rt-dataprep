@@ -94,7 +94,8 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
     try:
         if lock is not None:  # only the lock holder may sweep: another run's staging is not a leftover
             for leftover in out_root.glob('.unzip-*'):
-                dicom_io.remove_tree(leftover)
+                if not leftover.name.endswith(('.old', '.partial')):  # a patient named unzip-*: recover owns those
+                    dicom_io.remove_tree(leftover)
         staging_parent = Path(tempfile.mkdtemp(prefix='.unzip-', dir=out_root))
     except BaseException:
         _unlock(lock)
