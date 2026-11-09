@@ -4,9 +4,9 @@ Turn an organized tree (<patient>/plan_<n>/) into NIfTI on the native CT grid, o
 Per plan: RTPLAN -> RTSTRUCT -> the one CT series it references -> planning_ct.nii.gz (float32 HU), and the plan's RTDOSE
 as dose.nii.gz (Gy, linearly resampled onto the CT grid). Masks and applicators (masks.py) are written into the same
 folder. Every other CT/MR/PT series of the patient (series.py) is read once and written into the plan folders it is registered
-to and into its study folder <patient>/study_<n>/ (numbered by StudyDate, StudyTime, StudyInstanceUID). series.csv is written last, one row per file. The organized tree is only read. Log lines and exception messages
+to and into its study folder <patient>/study_<n>/ (numbered by StudyDate, StudyTime, StudyInstanceUID). series.json (an indented JSON array, one object per file) is written last. The organized tree is only read. Log lines and exception messages
 carry counts and the fixed REASON_ constants only, never a PatientID, folder name, date, path or UID. convert_report.csv in
-the output root is the one place the folder names appear; the series.csv files hold the UIDs, dates and descriptions. Every third-party read runs inside dicom_io's quiet wrapper.
+the output root is the one place the folder names appear; the series.json files hold the UIDs, dates and descriptions. Every third-party read runs inside dicom_io's quiet wrapper.
 """
 import contextlib
 import json

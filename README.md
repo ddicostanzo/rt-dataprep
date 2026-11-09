@@ -86,8 +86,8 @@ count before accepting the cohort. Successful process completion can include ref
 | `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers auto` or `1..64` (default `auto`); `--overwrite` |
 | `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers auto` or `1..64` (default `auto`); `--overwrite` |
 | `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers auto` or `1..64` (default `auto`); at least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--new-spacing`, `--final-spacing`, `--new-shape`, `--allow-crop`, `--min-mask-retention`, `--ahe-kernel-mm`, `--ahe-bins`, `--ahe-clip-limit`, `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
-| `manifest ROOT` | Write `ROOT/manifest.csv` and a dated copy. | Works on converted or preprocessed trees. |
-| `split ROOT` | Read `ROOT/manifest.csv`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
+| `manifest ROOT` | Write `ROOT/manifest.jsonl` and a dated copy. | Works on converted or preprocessed trees. |
+| `split ROOT` | Read `ROOT/manifest.jsonl`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
 
 Use `uv run python -m rt_dataprep COMMAND --help` for exact arguments. Study exclusion defaults to a case-sensitive
 `Acuity` substring in `ManufacturerModelName`; `organize()` and `convert()` expose `exclude_models` through the Python API.
@@ -150,27 +150,32 @@ converted/
       dose.nii.gz
       liver.nii.gz
       series_MR_1.nii.gz
-      series.csv
+      series.json
     study_1/
       series_CT_1.nii.gz
       series_MR_1.nii.gz
-      series.csv
+      series.json
     study_2/
       series_PT_1.nii.gz
-      series.csv
+      series.json
   SYNTHETIC_P002/
     study_1/
       series_CT_1.nii.gz
-      series.csv
+      series.json
 ```
 
 Plan numbering reflects the organized plan order. Study folders are numbered by the earliest StudyDate/StudyTime among
 their written series, with blank dates/times last and StudyInstanceUID as a tie breaker. Series numbers are per modality
-within each destination. `series.csv` records the actual output files and metadata; inspect it instead of inferring
-relationships from filenames.
+within each destination. `series.json` records the actual output files and metadata; inspect it instead of inferring
+relationships from filenames. It is a JSON array with one object per output file, holding the same fields the earlier
+`series.csv` held (every value a string). Read it with `json.load(open(path))`.
 
 Trees created with the old `images/` conversion layout must be re-converted. Current manifest and preprocessing walkers
 use `study_<n>/` and ignore the old `images/` layout.
+
+Trees converted by v0.1.x hold a `series.csv` and no `series.json`. `preprocess` and `manifest` refuse those folders (the
+CSV is never read) with the reason `converted by an older version (series.csv); reconvert with --overwrite`, and count
+them as refused. Reconvert them with `convert --overwrite`.
 
 ## Conversion behavior
 
@@ -182,10 +187,10 @@ use `study_<n>/` and ignore the old `images/` layout.
   supported beam-dose inputs are summed. Ambiguous or unsupported dose combinations refuse the plan.
 - Kept RTSTRUCT ROIs become binary masks on the planning CT grid. Empty, mismatched, or inconsistent mask results refuse
   the plan. Point-only ROIs and names containing `dose` are excluded. Brachy applicator outputs are **gzip-compressed
-  coordinate text**, despite their legacy `.nii.gz` extension; consult `kind` in `series.csv` before opening a file as NIfTI.
+  coordinate text**, despite their legacy `.nii.gz` extension; consult `kind` in `series.json` before opening a file as NIfTI.
   An applicator ROI that no plan channel references is dropped when a referenced channel has the same file name (ignoring
   case) and point count (the structure set's copy of that channel). An applicator named like a mask is written as `<name>_channel.nii.gz`. Find
-  an applicator's file through `series.csv` (`kind` applicator), not from its `SourceApplicatorID`.
+  an applicator's file through `series.json` (`kind` applicator), not from its `SourceApplicatorID`.
   An ROI whose every contour crosses CT slices (a reference line drawn on a reformatted plane) is not a mask: its points
   are written as the same coordinate text with `kind` `line`, and preprocess copies it unchanged. An ROI that mixes axial
   and crossing contours refuses the plan. Any other output name clash refuses the plan.
@@ -227,8 +232,8 @@ pad a large extent at native spacing.
 
 By default a plan whose dose or mask extends past the final CT grid is refused. `--allow-crop` (needs at least one of
 `--initial-resample`, `--resample`, `--reshape`) writes the plan anyway, with the dose and masks cut to the final grid. In
-`series.csv`, the `retained` column of each dose and mask row is the fraction of that file's native-grid content (summed dose,
-mask volume) kept by the crop: exactly `1.0` when nothing is cut, and blank for CT, applicator, line and series rows and on runs
+`series.json`, the `retained` key of each dose and mask object is the fraction of that file's native-grid content (summed dose,
+mask volume) kept by the crop: exactly `1.0` when nothing is cut, and blank for CT, applicator, line and series entries and on runs
 without a geometric step. In `preprocess_report.csv`, the `cropped` column counts the dose and mask files the final grid cut; a
 negligible tail counts. A dose or mask that the final grid empties entirely refuses the plan, with or without `--allow-crop`.
 
@@ -242,7 +247,7 @@ Masks use nearest-neighbor interpolation and uint8 by default. `--legacy-linear-
 behavior. `--series-fov-mask` adds a uint8 `fovmask_<image filename>` for the planning CT, each study image, and aligned
 plan series. A value of 1 marks acquired support and 0 marks outside-FOV fill or crop/pad fill. Planning/study masks follow
 each geometric step with nearest-neighbor interpolation and zero padding; true zero-valued image voxels remain valid.
-Auxiliary masks do not add rows to `series.csv`. The manifest lists them only when their headers match the relevant image grid.
+Auxiliary masks do not add entries to `series.json`. The manifest lists them only when their headers match the relevant image grid.
 
 An optional `--min-mask-retention FRACTION` refuses a plan when resampling retains less than the configured fraction of
 a mask's physical foreground volume, even when a few voxels survive. Binary masks use foreground count times voxel
@@ -291,23 +296,37 @@ after preprocessing so its `image` and `series` fields point to the resulting fi
 
 ## Manifests and patient splits
 
-`manifest.csv` contains one row per plan and one row per imaging series:
+`manifest.jsonl` is JSON Lines: one case object per line, one line per plan and one per imaging series. Each object has
+these keys:
 
-| Columns | Meaning |
+| Keys | Meaning |
 | --- | --- |
 | `case_dir`, `patient`, `fx` | Case ID, patient directory, and plan directory (`fx` is blank for imaging). |
 | `ct_size`, `ct_spacing` | Semicolon-separated x/y/z dimensions and mm spacing of the case image. |
-| `dose`, `masks` | Dose-presence flag and JSON ROI-name list; imaging rows have `0` and `[]`. |
+| `dose`, `masks` | Dose-presence flag (`"0"` or `"1"`) and the list of ROI names; imaging lines have `"0"` and `[]`. |
 | `rtplan_uid`, `ct_series_uid`, `study_uid` | Original identifiers; imaging uses its own series UID in `ct_series_uid`. |
 | `case_type`, `modality`, `image` | `plan` or `imaging`; image modality; volume filename for imaging (blank for plans). |
-| `series` | JSON list of aligned plan series (`file`, `modality`, optional `fov_mask`); `[]` for imaging. |
-| `fov_mask` (optional trailing column) | Planning-CT or study-image support-mask filename, relative to its case folder; blank when absent. |
+| `series` | List of aligned plan series (objects with `file`, `modality`, optional `fov_mask`); `[]` for imaging. |
+| `fov_mask` (optional) | Planning-CT or study-image support-mask filename, relative to its case folder; blank when absent. |
 
-The trailing `fov_mask` column appears only when at least one usable primary-image mask is present in the tree. Without
-those masks, the original fourteen-column schema is retained. Aligned-series masks remain in their `series` JSON entries.
+`masks` and `series` are native JSON lists; every other value is a string. The `fov_mask` key appears on every line only
+when at least one usable primary-image mask is present in the tree. Without those masks, the original fourteen keys are
+written. Aligned-series masks remain in their `series` entries. A dated copy `manifest_<UTC timestamp>.jsonl` is kept next
+to it.
+
+```python
+import json
+
+import pandas as pd
+
+cases = pd.read_json('/secure/converted/manifest.jsonl', lines=True, dtype=False)  # dtype=False keeps '00123' and dates as text
+series = json.load(open('/secure/converted/SYNTHETIC_P001/plan_1/series.json'))
+```
+
+`dtype=False` stops pandas turning zero-padded patient IDs and dates into integers.
 
 An imaging `case_dir`, for example `SYNTHETIC_P001/study_1/series_MR_1`, is an ID, **not a directory path**. Resolve its image
-as `ROOT / patient / study_folder / image`. Plan image names come from the plan's `series.csv`.
+as `ROOT / patient / study_folder / image`. Plan image names come from the plan's `series.json`.
 
 `split` keeps every case of a patient in one split. It deterministically orders patients using a hash of seed and patient
 ID, allocates `ceil(n × test_size)` patients to test and `ceil(n × val_size)` to validation (with numeric rounding before
@@ -321,7 +340,7 @@ imaging patients, can change assignments despite the same seed.
 Check an external cohort for overlapping patient strings before writing a split:
 
 ```bash
-uv run python -m rt_dataprep split /secure/converted --test-size 0.2 --val-size 0.2 --seed 42 --external /secure/external/manifest.csv
+uv run python -m rt_dataprep split /secure/converted --test-size 0.2 --val-size 0.2 --seed 42 --external /secure/external/manifest.jsonl
 ```
 
 This checks patient IDs, not cross-institution identity linkage or clinical stratification. Maintain consistent patient
@@ -331,7 +350,7 @@ mapping and perform any required outcome/site/time stratification separately.
 
 Organization, conversion, and preprocessing write their report under the output root, alongside dated per-run copies;
 manifest generation also keeps dated copies. Log and exception text uses counts, fixed refusal reasons, or safe error
-class/module/line details. Reports and per-folder CSVs are sensitive artifacts and are excluded from Git.
+class/module/line details. Reports, manifests and per-folder `series.json` files are sensitive artifacts and are excluded from Git.
 
 | Symptom | What to check |
 | --- | --- |
@@ -339,7 +358,7 @@ class/module/line details. Reports and per-folder CSVs are sensitive artifacts a
 | A plan is refused | Read its fixed reason in the conversion report; verify the RTPLAN → RTSTRUCT → CT reference chain and geometry. |
 | Fewer images than expected | Review study summary skips, series eligibility, model exclusions, localizers, and readable pixel data. |
 | Preprocessing reports no step is on | Pass a step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`), or enable applicable `PreprocessSteps` in Python. |
-| A series or plan is missing from the manifest | Check the refusal count, `series.csv`, file presence, and image headers. |
+| A series or plan is missing from the manifest | Check the refusal count, `series.json`, file presence, and image headers. |
 | Split refuses existing content | Preserve the old cohort record and generate the new cohort in a separate output root. |
 | A patient fails with the I/O-error reason | A disk or permission error while reading one of its inputs fails the whole patient (no plan rows, no partial folder), and the run carries on with the next patient. Check the disk and file permissions, then rerun. A file that is missing or is not a valid image still refuses only its plan or series. |
 | Unexpected internal error | Preserve source data and reports in approved storage; report a synthetic reproducer and safe class/site details. |
@@ -375,7 +394,7 @@ uv run python -m rt_dataprep convert /secure/organized /secure/converted --overw
   `organize` always refuses such a folder. `convert` and `preprocess` do the same under `--overwrite`, including names
   that differ only in letter case, because a case-insensitive file system would map them to one folder.
 - **Downstream outputs are not updated.** After replacing converted output, rerun `preprocess` (into a fresh or
-  `--overwrite` output root), `manifest`, and `split`. `manifest.csv` and `splits.json` are not regenerated for you, and
+  `--overwrite` output root), `manifest`, and `split`. `manifest.jsonl` and `splits.json` are not regenerated for you, and
   `split` still refuses changed content: once a root holds a `splits.json`, preprocess the new cohort into a fresh root
   rather than overwriting that one.
 - **One writer per output root.** `--overwrite` does not coordinate simultaneous runs.
@@ -401,7 +420,7 @@ def main():
     steps = PreprocessSteps(resample=True, rescale=True, harmonize_spacing=True, reshape=True, new_shape=(320, 320, 256))
     prep = preprocess(workspace / 'converted', workspace / 'preprocessed', steps, workers=4)
     written, refused = manifest(workspace / 'preprocessed')
-    cohorts = split(workspace / 'preprocessed' / 'manifest.csv', test_size=0.2, val_size=0.2, seed=42)
+    cohorts = split(workspace / 'preprocessed' / 'manifest.jsonl', test_size=0.2, val_size=0.2, seed=42)
     # Inspect conversion.rows, prep.rows and refused in approved storage; do not print patient-bearing rows into shared logs.
 
 
@@ -421,7 +440,7 @@ calls under an `if __name__ == '__main__':` guard, as above; without it every wo
 | `organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overwrite=False)` | `OrganizeReport(rows)` of `PatientRow` | `organize_report.csv` |
 | `convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwrite=False)` | `ConvertReport(rows)` of `ConvertRow` | `convert_report.csv` |
 | `preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, overwrite=False)` | `PreprocessReport(rows)` of `PreprocessRow` | `preprocess_report.csv` |
-| `manifest(root)` | `(written, refused)` case counts | `manifest.csv` |
+| `manifest(root)` | `(written, refused)` case counts | `manifest.jsonl` |
 | `split(manifest_path, *, test_size, val_size, seed, external=None)` | the `splits.json` content as a dict | `splits.json` next to the manifest |
 
 Report rows are dataclasses. Their fields match the report CSV columns, except that `organize_report.csv` names
@@ -465,7 +484,7 @@ Errors:
 
 - `ValueError` with a fixed reason text refuses the whole call before any patient is processed: an output root inside
   the input, no step enabled (the `steps` default enables none), an invalid option combination, invalid split sizes, a
-  manifest without the `patient`/`case_dir` columns or with a row missing them or not UTF-8, sizes that leave no patient
+  manifest with a line missing the `patient`/`case_dir` keys, not JSON, or not UTF-8, sizes that leave no patient
   for train, a patient overlap with `external=`, or a `splits.json` with different content. One exception: organize
   raises `ValueError` mid-run when a patient's output folder resolves outside `out_root`; patients before it are
   already written.
@@ -533,19 +552,18 @@ Through the API, apply the same check to `report.rows`. Decide in advance which 
   report row to show it.
 - Run one writer per output root.
 - Regenerate `manifest` after any `preprocess` or `--overwrite` run; it is not updated for you.
-- Keep each root's `manifest.csv` and `splits.json` as the cohort record. `split` refuses to replace a `splits.json`
+- Keep each root's `manifest.jsonl` and `splits.json` as the cohort record. `split` refuses to replace a `splits.json`
   with different content, so a changed cohort belongs in a new root.
 
 See [Replacing existing output with `--overwrite`](#replacing-existing-output-with---overwrite) for the replacement rules.
 
 ### Load cases for training
 
-`manifest.csv` lists the cases, `splits.json` assigns them to `train`, `val`, and `test`, and each case folder's
-`series.csv` names its files. Do not derive file names from case IDs: preprocessing adds step prefixes, and imaging
+`manifest.jsonl` lists the cases, `splits.json` assigns them to `train`, `val`, and `test`, and each case folder's
+`series.json` names its files. Do not derive file names from case IDs: preprocessing adds step prefixes, and imaging
 `case_dir` values are IDs, not paths.
 
 ```python
-import csv
 import json
 from pathlib import Path
 
@@ -553,7 +571,7 @@ import SimpleITK as sitk
 
 root = Path('/secure/project/preprocessed')
 splits = json.loads((root / 'splits.json').read_text())
-cases_by_id = {row['case_dir']: row for row in csv.DictReader(open(root / 'manifest.csv', newline=''))}
+cases_by_id = {row['case_dir']: row for row in map(json.loads, open(root / 'manifest.jsonl', encoding='utf-8'))}
 
 
 def load(case_dir):
@@ -561,7 +579,7 @@ def load(case_dir):
     if row['case_type'] == 'imaging':  # case_dir is patient/study_<n>/series_<MOD>_<k>
         return {'image': sitk.ReadImage(root / row['patient'] / case_dir.split('/')[1] / row['image'])}
     folder = root / row['patient'] / row['fx']
-    files = list(csv.DictReader(open(folder / 'series.csv', newline='')))
+    files = json.load(open(folder / 'series.json', encoding='utf-8'))
     case = {'image': sitk.ReadImage(folder / next(f['file'] for f in files if f['kind'] == 'ct'))}
     case.update({f['roi_name'] or f['kind']: sitk.ReadImage(folder / f['file'])
                  for f in files if f['kind'] in ('dose', 'mask')})
@@ -571,11 +589,11 @@ def load(case_dir):
 train = [load(case) for cases in splits['train'].values() for case in cases]
 ```
 
-In a plan's `series.csv`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, or `line`.
+In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, or `line`.
 Applicator and line files are gzip-compressed coordinate text, not NIfTI; see [Conversion behavior](#conversion-behavior).
-After a geometric `preprocess` run, the `retained` column gives the fraction of each dose (summed dose) and mask (volume)
+After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (summed dose) and mask (volume)
 kept on the final grid. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should
-not be used. The optional `fov_mask` manifest column and `fov_mask` entries in
+not be used. The optional `fov_mask` manifest key and `fov_mask` entries in
 the `series` JSON name support masks for excluding fill voxels from losses or metrics.
 
 ## Development

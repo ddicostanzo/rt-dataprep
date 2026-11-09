@@ -41,3 +41,15 @@ Gotchas:
 
 ## review-2
 PASS, no BLOCKING; splits.json byte-identical old vs new on a 37-patient synthetic cohort. Deferred: W1 lone-surrogate patient/case_dir passes _read then UnicodeEncodeError in the hash (CLI shows fixed unexpected-error line, no content); N5 a root with only an old manifest.csv gives a generic file-system error from split (no rerun hint).
+
+## task-03
+
+Files: README.md, examples/README.md, SECURITY.md, project-profile.yml, .gitignore, and module docstrings/comments of src/rt_dataprep/{convert,manifest,preprocess,series,split}.py (text only, no behaviour change).
+
+Decisions:
+- .gitignore adds `manifest*.jsonl` and `series.json`; `series.csv` and `manifest*.csv` stay (v0.1.x trees exist and are PHI).
+- README: series.json described as a JSON array, one object per file, same string fields; manifest.jsonl key table (masks/series native lists); reading examples (`json.load`, `pd.read_json(..., lines=True, dtype=False)` with the dtype note); v0.1.x trees refused with the REASON_LEGACY_SERIES text and reconverted with `convert --overwrite`; 'column' wording became 'key' for manifest/series.json fields (report CSV columns keep 'column'). The load-cases example uses json.loads per manifest line and json.load for series.json.
+- preprocess.py's module docstring needed only the series.json name; its legacy docstrings (is_legacy etc.) already say series.csv on purpose.
+
+AC17 grep leftovers (all allowed): .gitignore series.csv / manifest*.csv; preprocess.py LEGACY_SERIES_NAME and REASON_LEGACY_SERIES definitions plus legacy docstrings; manifest.py comment "the CSV is never parsed"; README legacy-tree paragraph (names series.csv and the reason text); tests that build legacy folders.
+Gotcha: README line on the Python API `split(manifest_path)` ValueError list still said "columns" for the manifest; reworded to keys.

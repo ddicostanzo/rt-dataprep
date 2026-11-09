@@ -1,7 +1,7 @@
 """
-splits.json from manifest.csv (spec: f3-manifest-split): whole patients per split, in rnt's {split: {patient: [case ids]}} shape.
+splits.json from manifest.jsonl (spec: f3-manifest-split): whole patients per split, in rnt's {split: {patient: [case ids]}} shape.
 
-Only manifest.csv is read, with csv.DictReader so every value stays a string (a patient '00123' stays '00123'). The patients
+Only manifest.jsonl is read, one JSON object per line, and patient and case_dir must be strings (a patient '00123' stays '00123'). The patients
 are ordered by sha256(f'{seed}\\n{patient}'), the same on every numpy and Python version (#75); the first
 ceil(round(n*test_size, 9)) go to test, the next ceil(round(n*val_size, 9)) to val, the rest to train. Every refusal is a ValueError with a fixed text, raised before anything is written; nothing here
 logs or raises a patient name, case id or path.
@@ -98,7 +98,7 @@ def _write_new(path, text):
 
 
 def check_disjoint(splits, external_manifest):
-    """Raise ValueError(REASON_OVERLAP) when a patient of the external manifest.csv is in any split of `splits`."""
+    """Raise ValueError(REASON_OVERLAP) when a patient of the external manifest.jsonl is in any split of `splits`."""
     placed = {patient for name in SPLIT_NAMES for patient in splits.get(name, {})}
     if any(row['patient'] in placed for row in _read(external_manifest)):
         raise ValueError(REASON_OVERLAP)

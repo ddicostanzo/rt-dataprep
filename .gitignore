@@ -16,9 +16,11 @@ dist/
 *.npy
 *.pkl
 manifest*.csv
+manifest*.jsonl
 splits.json
 !tests/fixtures/SYNTHETIC_*
 organize_report*.csv
 convert_report*.csv
 preprocess_report*.csv
 series.csv
+series.json
