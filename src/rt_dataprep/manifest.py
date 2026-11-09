@@ -16,7 +16,7 @@ import numpy as np
 
 from rt_dataprep import convert as conv
 from rt_dataprep.dicom_io import CaseRefused, write_report
-from rt_dataprep.preprocess import STUDY_FOLDER, check_rows, check_study_rows, read_info, read_series_csv, same_grid, series_id, study_refusal_count
+from rt_dataprep.preprocess import STUDY_FOLDER, check_rows, check_study_rows, holds_series, is_legacy, read_info, read_series_json, same_grid, series_id, study_refusal_count
 
 log = logging.getLogger(__name__)
 
@@ -32,10 +32,12 @@ def _geometry(size, spacing):
 
 
 def _study_rows(patient, study):
-    """(rows, refused) of one study folder: every series of a valid series.csv whose header reads, else the folder's refusal count."""
+    """(rows, refused) of one study folder: every series of a valid series.json whose header reads, else the folder's refusal count."""
+    if is_legacy(study):  # before any read: the CSV is never parsed, the study counts 1
+        return [], 1
     try:
-        parsed = read_series_csv(study)
-    except OSError:  # an unreadable series.csv refuses the study, not the run
+        parsed = read_series_json(study)
+    except OSError:  # an unreadable series.json refuses the study, not the run
         return [], 1
     try:
         series = check_study_rows(study, parsed)
@@ -66,7 +68,7 @@ def image_fov_mask(folder, file, info):
 
 
 def _aligned(plan, series, ct):
-    """The plan's series rows that are in the CT frame (identity) and on the CT grid, as {file, modality}, in series.csv order (D10);
+    """The plan's series rows that are in the CT frame (identity) and on the CT grid, as {file, modality}, in series.json order (D10);
     plus fov_mask when fovmask_<file> beside it has a header on the CT grid (#129, #146: a stray mask file is not listed)."""
     listed = []
     for row in series:
@@ -93,10 +95,10 @@ def manifest(root):
     root = Path(root)
     rows, refused = [], 0
     for patient in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith('.')):
-        for plan in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(conv.PLAN_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()):
+        for plan in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(conv.PLAN_FOLDER, p.name) and holds_series(p)):
             try:
                 kept, ct, series = check_rows(plan)
-            except (CaseRefused, OSError):  # an unreadable series.csv is one refused plan, not the end of the run (#74)
+            except (CaseRefused, OSError):  # an unreadable series.json is one refused plan, not the end of the run (#74)
                 refused += 1
                 continue
             masks = sorted(row['roi_name'] for row in kept if row['kind'] == 'mask')
@@ -105,7 +107,7 @@ def manifest(root):
                          str(int(any(row['kind'] == 'dose' for row in kept))), json.dumps(masks),
                          kept[0]['rtplan_uid'], kept[0]['series_instance_uid'], kept[0]['study_instance_uid'],  # kept[0] is the ct row
                          'plan', 'CT', '', json.dumps(_aligned(plan, series, ct)), image_fov_mask(plan, kept[0]['file'], ct)])
-        for study in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(STUDY_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()):
+        for study in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(STUDY_FOLDER, p.name) and holds_series(p)):
             study_rows, study_refused = _study_rows(patient, study)
             rows += study_rows
             refused += study_refused

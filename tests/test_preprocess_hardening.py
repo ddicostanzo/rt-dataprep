@@ -139,14 +139,14 @@ def test_study_mask_propagates_both_resamples_and_marks_only_real_support(tmp_pa
     report = pre.preprocess(converted, out, steps)
     folder = out / 'SYNTHETICPTA' / 'study_1'
     name = pre.output_name(f'series_{modality}_1.nii.gz', steps, ct=modality == 'CT', image=True)
-    assert report.rows[0].files == [name, f'fovmask_{name}', 'series.csv']
+    assert report.rows[0].files == [name, f'fovmask_{name}', 'series.json']
     mask, image = [sitk.ReadImage(str(folder / file)) for file in (f'fovmask_{name}', name)]
     assert header(mask) == header(image) and mask.GetPixelID() == sitk.sitkUInt8
     # 5^3 -> 3^3 at 1.5 mm -> 3^3 at 1.25 mm -> 9^3, with 3 padded voxels at each end.
     expected = np.zeros((9, 9, 9), np.uint8)
     expected[3:6, 3:6, 3:6] = 1
     np.testing.assert_array_equal(sitk.GetArrayFromImage(mask), expected)
-    assert [row['file'] for row in conv_rows(folder)] == [name]  # auxiliary masks never change series.csv kinds
+    assert [row['file'] for row in conv_rows(folder)] == [name]  # auxiliary masks never change series.json kinds
 
 
 @pytest.mark.parametrize('context', ['plan', 'study'])

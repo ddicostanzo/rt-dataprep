@@ -38,7 +38,7 @@ def test_a2_12_convert_runs_end_to_end_and_writes_the_report(tmp_path, org):
     assert result.returncode == 0
     with open(out / conv.REPORT_NAME, newline='') as handle:
         assert [(r['patient'], r['folder'], r['outcome']) for r in csv.DictReader(handle)] == [(PID, 'plan_1', 'converted')]
-    assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == ['planning_ct.nii.gz', 'series.csv']
+    assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == ['planning_ct.nii.gz', 'series.json']
     assert PID not in result.stdout + result.stderr and str(tmp_path) not in result.stdout + result.stderr
 
 

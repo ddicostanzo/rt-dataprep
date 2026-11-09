@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import pydicom
 import pytest
+import series_files as sf
 import SimpleITK as sitk
 import synthetic_dicom as sd
 from test_dicom_io import fail_python_open as fail_open  # workers=1 where used: a worker process would not see the patch
@@ -134,8 +135,8 @@ def test_a2_1_ct_equals_source_and_dose_is_scaled_and_resampled(tree):
     assert inside.sum() == 36 and outside.any()
     np.testing.assert_allclose(got[inside], expected[inside], atol=1e-4)
     assert (got[outside] == 0).all()
-    assert row.files == ['planning_ct.nii.gz', 'dose.nii.gz', 'series.csv']
-    assert sorted(p.name for p in folder.iterdir()) == ['dose.nii.gz', 'planning_ct.nii.gz', 'series.csv']  # no temp left
+    assert row.files == ['planning_ct.nii.gz', 'dose.nii.gz', 'series.json']
+    assert sorted(p.name for p in folder.iterdir()) == ['dose.nii.gz', 'planning_ct.nii.gz', 'series.json']  # no temp left
 
 
 def test_ct_with_different_rescale_slopes_is_not_quantized(tree):
@@ -180,7 +181,7 @@ def test_dose_none_converts_without_dose_file(tree):
     _, rows, out = one_plan(tree, doses=[])
     assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
     assert not (out / PID / 'plan_1' / 'dose.nii.gz').exists()
-    assert row_of(rows).files == ['planning_ct.nii.gz', 'series.csv']
+    assert row_of(rows).files == ['planning_ct.nii.gz', 'series.json']
 
 
 @pytest.mark.parametrize('doses, reason', [
@@ -480,7 +481,7 @@ def test_report_columns_and_joined_files(tree):
         written = list(reader)
         assert reader.fieldnames == ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series']
     assert written == [dict(patient=PID, folder='plan_1', outcome='converted', reason='',
-                            files='planning_ct.nii.gz;dose.nii.gz;series.csv', skipped_series='0')]
+                            files='planning_ct.nii.gz;dose.nii.gz;series.json', skipped_series='0')]
 
 
 @pytest.mark.parametrize('where', ['same', 'inside'])
@@ -509,9 +510,9 @@ def test_convert_plan_writes_into_case_dir_and_returns_the_files(tree):
     make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN')])
     case = org.parent / 'case'
     result = run_plan(org / PID / 'plan_1', case)
-    assert result.files == ['planning_ct.nii.gz', 'dose.nii.gz']  # series.csv is the report's to add
-    assert sorted(p.name for p in case.iterdir()) == ['dose.nii.gz', 'planning_ct.nii.gz']  # series.csv is the patient level's, last
-    assert [r['file'] for r in result.series_rows] == result.files  # one series.csv row per data file, in write order
+    assert result.files == ['planning_ct.nii.gz', 'dose.nii.gz']  # series.json is the report's to add
+    assert sorted(p.name for p in case.iterdir()) == ['dose.nii.gz', 'planning_ct.nii.gz']  # series.json is the patient level's, last
+    assert [r['file'] for r in result.series_rows] == result.files  # one series.json row per data file, in write order
     assert result.series_rows[0]['kind'] == 'ct' and result.series_rows[1]['kind'] == 'dose'
 
 
@@ -534,7 +535,7 @@ def test_an_unreadable_file_in_misc_files_is_ignored_and_only_its_count_is_logge
     caplog.set_level(logging.DEBUG)
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.files, r.skipped_series) for r in rows] == [
-        ('plan_1', conv.OUTCOME_CONVERTED, ['planning_ct.nii.gz', 'series.csv'], 0)]
+        ('plan_1', conv.OUTCOME_CONVERTED, ['planning_ct.nii.gz', 'series.json'], 0)]
     assert 'convert: 1 malformed or vanished files in misc_files' in caplog.messages
     assert all(secret not in text for text in caplog.messages for secret in (PID, 'SYNTHETIC_junk', str(org)))
 
@@ -549,7 +550,7 @@ def test_convert_plan_refusal_raises_the_reason_and_leaves_no_case_dir(tree):
     assert not case.exists()
 
 
-# ---------------------------------------------------------------- series.csv (A2.4d)
+# ---------------------------------------------------------------- series.json (A2.4d)
 
 SERIES_COLUMNS = ['file', 'kind', 'modality', 'series_description', 'series_instance_uid', 'study_instance_uid',
                   'frame_of_reference_uid', 'series_date', 'roi_name', 'dose_summation_type', 'reg_matrix', 'rtplan_uid',
@@ -561,10 +562,9 @@ RING_CHANNEL = [dict(applicator_id='Ring-1', dwells_mm=np.zeros((2, 3)), roi=2)]
 
 
 def series_rows(out, folder='plan_1'):
-    with open(out / PID / folder / 'series.csv', newline='') as handle:
-        reader = csv.DictReader(handle)
-        assert reader.fieldnames == SERIES_COLUMNS
-        return list(reader)
+    rows = sf.read(out / PID / folder)
+    assert all(list(row) == SERIES_COLUMNS for row in rows)  # the keys and their order are what series.csv's header was
+    return rows
 
 
 def describe(path, text, date):
@@ -573,7 +573,7 @@ def describe(path, text, date):
     edit(path, change)
 
 
-def test_series_csv_has_one_row_per_written_file_with_the_values_of_each_kind(tree):
+def test_series_json_has_one_row_per_written_file_with_the_values_of_each_kind(tree):
     org, out = tree
     plan = make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'PLAN', series_date=DOSE_DATE)], rois=[BOX, RING],
                      ct_meta=dict(series_date=CT_DATE),
@@ -585,9 +585,9 @@ def test_series_csv_has_one_row_per_written_file_with_the_values_of_each_kind(tr
     describe(folder / 'dose_0.dcm', 'Dose', DOSE_DATE)
     struct, dose = pydicom.dcmread(folder / 'struct.dcm'), pydicom.dcmread(folder / 'dose_0.dcm')
     row = row_of(conv.convert(org, out).rows)
-    assert row.files == ['planning_ct.nii.gz', 'dose.nii.gz', 'liver.nii.gz', 'Ring1.nii.gz', 'series.csv']
+    assert row.files == ['planning_ct.nii.gz', 'dose.nii.gz', 'liver.nii.gz', 'Ring1.nii.gz', 'series.json']
     rows = series_rows(out)
-    assert [r['file'] for r in rows] == row.files[:-1]  # no row for series.csv itself
+    assert [r['file'] for r in rows] == row.files[:-1]  # no row for series.json itself
     ct_row, dose_row, mask_row, applicator_row = rows
     plan_columns = dict(rtplan_uid=plan['plan'], rtplan_label='Plan A', rtplan_date=PLAN_DATE, fractions_planned='5')
     assert ct_row == dict(file='planning_ct.nii.gz', kind='ct', modality='CT', series_description='Planning CT',
@@ -605,7 +605,7 @@ def test_series_csv_has_one_row_per_written_file_with_the_values_of_each_kind(tr
                            dose_summation_type='', reg_matrix='', **plan_columns)
 
 
-def test_series_csv_of_a_summed_beam_dose_joins_the_series_uids(tree):
+def test_series_json_of_a_summed_beam_dose_joins_the_series_uids(tree):
     org, out = tree
     uids = [pydicom.uid.generate_uid(), pydicom.uid.generate_uid()]
     make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'BEAM', series_uid=uid) for uid in uids])
@@ -615,7 +615,7 @@ def test_series_csv_of_a_summed_beam_dose_joins_the_series_uids(tree):
     assert dose_row['series_instance_uid'] == ';'.join(uids)
 
 
-def test_series_csv_leaves_absent_plan_tags_empty(tree):
+def test_series_json_leaves_absent_plan_tags_empty(tree):
     org, out = tree
     make_plan(org / PID / 'plan_1', plan_meta=dict(fractions=None))
     conv.convert(org, out)
@@ -624,7 +624,7 @@ def test_series_csv_leaves_absent_plan_tags_empty(tree):
         'rtplan_label': '', 'rtplan_date': '', 'fractions_planned': '', 'series_description': '', 'series_date': ''}
 
 
-def test_series_csv_is_the_last_file_and_goes_through_a_temp_name(tree, monkeypatch):
+def test_series_json_is_the_last_file_and_goes_through_a_temp_name(tree, monkeypatch):
     org, out = tree
     make_plan(org / PID / 'plan_1', rois=[BOX])
     replaced = []
@@ -636,17 +636,17 @@ def test_series_csv_is_the_last_file_and_goes_through_a_temp_name(tree, monkeypa
     monkeypatch.setattr(conv.os, 'replace', spy)
     conv.convert(org, out)
     source, target, _ = [r for r in replaced if r[2] == 'plan_1'][-1]  # the run report is replaced after it, in out/
-    assert target == 'series.csv' and source != target and source.endswith('series.csv')
-    assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == ['liver.nii.gz', 'planning_ct.nii.gz', 'series.csv']
+    assert target == 'series.json' and source != target and source.endswith('series.json')
+    assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == ['liver.nii.gz', 'planning_ct.nii.gz', 'series.json']
 
 
-def test_a_failed_series_csv_write_is_a_patient_level_io_error_and_leaves_nothing(tree, monkeypatch):
+def test_a_failed_series_json_write_is_a_patient_level_io_error_and_leaves_nothing(tree, monkeypatch):
     org, out = tree
     make_plan(org / PID / 'plan_1')
     real = conv.os.replace
 
     def fail(source, target):
-        if Path(target).name == 'series.csv':
+        if Path(target).name == 'series.json':
             raise OSError(f'cannot write {target} for {PID}')
         real(source, target)
     monkeypatch.setattr(conv.os, 'replace', fail)
@@ -672,7 +672,7 @@ def test_a2_9_an_rtstruct_in_another_study_is_organized_and_converts(tmp_path):
     organize(src, org)
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.files) for r in rows] == [
-        ('plan_1', 'converted', ['planning_ct.nii.gz', 'liver.nii.gz', 'series.csv'])]
+        ('plan_1', 'converted', ['planning_ct.nii.gz', 'liver.nii.gz', 'series.json'])]
     assert arr(out / PID / 'plan_1' / 'liver.nii.gz').sum() == 27
 
 
@@ -996,7 +996,7 @@ def test_a_failed_rename_of_an_output_file_names_no_path(tmp_path, monkeypatch):
         raise OSError(f'cannot rename {target}')
     monkeypatch.setattr(conv.os, 'replace', refuse_rename)
     with pytest.raises(OSError) as err:
-        conv.write_series_csv([], tmp_path / 'series.csv')
+        conv.write_series_json([], tmp_path / 'series.json')
     assert str(err.value) == conv.REASON_WRITE
     assert operator.attrgetter('__cause__', '__context__')(err.value) == (None, None)
     assert list(tmp_path.rglob('*')) == []
@@ -1015,14 +1015,14 @@ def test_crash_site_is_the_caller_of_quiet_call(monkeypatch):
     assert 'quiet_call(run' in inspect.getsource(pre).splitlines()[line - 1]
 
 
-def test_series_csv_is_utf8_whatever_the_locale(tmp_path):
+def test_series_json_is_utf8_whatever_the_locale(tmp_path):
     script = ("import sys; from rt_dataprep import convert as conv; "
               "row = dict.fromkeys(conv.SERIES_COLUMNS, '') | dict(file='SYNTHETIC.nii.gz', kind='ct', series_description='Thorax \\u00e9'); "
-              "conv.write_series_csv([row], sys.argv[1])")
+              "conv.write_series_json([row], sys.argv[1])")
     env = {**os.environ, 'LC_ALL': 'C', 'PYTHONCOERCECLOCALE': '0', 'PYTHONUTF8': '0'}  # an ASCII locale
-    result = subprocess.run([sys.executable, '-c', script, str(tmp_path / 'series.csv')], env=env, capture_output=True)
+    result = subprocess.run([sys.executable, '-c', script, str(tmp_path / 'series.json')], env=env, capture_output=True)
     assert result.returncode == 0, result.stderr
-    assert 'Thorax \u00e9' in (tmp_path / 'series.csv').read_bytes().decode('utf-8')
+    assert 'Thorax \u00e9' in (tmp_path / 'series.json').read_bytes().decode('utf-8')
 
 
 def test_a_missing_organized_root_writes_no_output_root(tmp_path):
@@ -1065,8 +1065,8 @@ def test_another_series_on_an_empty_frame_is_not_registered_to_a_planning_ct_on_
     rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.reason) for r in rows] == [
         ('plan_1', 'converted', ''), ('studies', 'converted', ''), ('study_1/series_MR_1', 'converted', '')]
-    assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == ['planning_ct.nii.gz', 'series.csv']
-    assert sorted(p.name for p in (out / PID / 'study_1').iterdir()) == ['series.csv', 'series_MR_1.nii.gz']
+    assert sorted(p.name for p in (out / PID / 'plan_1').iterdir()) == ['planning_ct.nii.gz', 'series.json']
+    assert sorted(p.name for p in (out / PID / 'study_1').iterdir()) == ['series.json', 'series_MR_1.nii.gz']
     assert series_rows(out, 'study_1')[0]['reg_matrix'] == ''
 
 

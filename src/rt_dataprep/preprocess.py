@@ -13,7 +13,7 @@ and writes a separate tree plus preprocess_report.csv in the output root. Log li
 is the one place the patient folder names appear.
 """
 import bisect
-import csv
+import json
 import logging
 import os
 import re
@@ -42,20 +42,22 @@ REASON_ALLOW_CROP_STEPS = 'allow_crop needs a geometric step: resample, harmoniz
 REASON_NO_SERIES_STEPS = 'no preprocessing step that is on applies to an MR or PT series'
 REASON_EXISTS = 'output folder already exists'
 REASON_NAME_CLAIMED = 'another folder of this run already maps to this output name (case-insensitive)'
-REASON_NO_CASES = 'patient folder holds no plan or study folder with a series.csv'
+REASON_NO_CASES = 'patient folder holds no plan or study folder with a series.json'
 STUDY_FOLDER = r'study_[0-9]+'
-PREPROCESSED_SERIES_COLUMNS = [*conv.SERIES_COLUMNS, 'retained']  # preprocess's series.csv; blank until a step sets it
-REASON_NO_CT = 'series.csv does not list exactly one ct file'
-REASON_DOSE_COUNT = 'series.csv lists more than one dose file'
-REASON_KIND = 'series.csv has a row of an unknown kind'
-REASON_SERIES_CSV = 'series.csv is malformed: columns, row length, encoding, or one file named twice'
+PREPROCESSED_SERIES_COLUMNS = [*conv.SERIES_COLUMNS, 'retained']  # preprocess's series.json; blank until a step sets it
+REASON_NO_CT = 'series.json does not list exactly one ct file'
+REASON_DOSE_COUNT = 'series.json lists more than one dose file'
+REASON_KIND = 'series.json has a row of an unknown kind'
+REASON_SERIES_CSV = 'series.json is malformed: not valid JSON, not an array of objects of strings with the expected keys, or one file named twice'
+LEGACY_SERIES_NAME = 'series.csv'  # what convert v0.1.x wrote; never read
+REASON_LEGACY_SERIES = 'converted by an older version (series.csv); reconvert with --overwrite'
 REASON_TOO_SMALL = 'the image is shorter than one output voxel along an axis'
 REASON_NOT_VOLUME = 'the image is not a 3D volume of one real value per voxel'
 REASON_NONFINITE = 'the image contains non-finite voxel values'
 REASON_AHE_OPTIONS = 'AHE requires at least 2 bins, a finite clip limit from 0 to 1, and three positive finite kernel widths'
-REASON_FILE_MISSING = 'a series.csv row names a file that is not in the case folder'
-REASON_STUDY_MODALITY = 'a series.csv series row has a modality other than CT, MR or PT, or one that differs from its file name'
-REASON_STUDY_NAME = 'a series.csv series row names a file that is not a series volume'
+REASON_FILE_MISSING = 'a series.json row names a file that is not in the case folder'
+REASON_STUDY_MODALITY = 'a series.json series row has a modality other than CT, MR or PT, or one that differs from its file name'
+REASON_STUDY_NAME = 'a series.json series row names a file that is not a series volume'
 REASON_GRID = 'a dose or mask is not on the planning CT grid'
 REASON_CROP = 'a dose or mask would lose voxels to the final grid'
 REASON_MASK_RETENTION = 'a resampled mask retains less than the configured minimum physical volume'
@@ -468,9 +470,9 @@ def preprocess_patient(folder, out_root, steps, overwrite=False):
     exists = os.path.lexists(target)  # lexists, as publish: a dangling link is an existing target
     if exists and not overwrite:
         return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_EXISTS)], None
-    plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(conv.PLAN_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()),
+    plans = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(conv.PLAN_FOLDER, p.name) and holds_series(p)),
                    key=lambda p: (int(p.name.split('_')[1]), p.name))  # plan_1 and fx_1: a fixed order
-    studies = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(STUDY_FOLDER, p.name) and (p / conv.SERIES_NAME).is_file()),
+    studies = sorted((p for p in folder.iterdir() if p.is_dir() and re.fullmatch(STUDY_FOLDER, p.name) and holds_series(p)),
                      key=lambda p: int(p.name.split('_')[1]))
     if not plans and not studies:
         return [PreprocessRow(folder.name, '', conv.OUTCOME_SKIPPED, REASON_NO_CASES)], 'kept' if exists else None
@@ -539,7 +541,7 @@ def preprocess_study(study_dir, out_dir, steps):
         rows.append(PreprocessRow(patient, folder, OUTCOME_PREPROCESSED,
                                   files=[name, *([f'fovmask_{name}'] if steps.series_fov_mask else [])]))
     if written:
-        conv.write_series_csv(written, out_dir / conv.SERIES_NAME, PREPROCESSED_SERIES_COLUMNS)
+        conv.write_series_json(written, out_dir / conv.SERIES_NAME)
         next(r for r in rows if r.outcome == OUTCOME_PREPROCESSED).files.append(conv.SERIES_NAME)
     return rows
 
@@ -574,7 +576,9 @@ def same_grid(a, b):
 
 def check_rows(plan_dir):
     """(kept rows, ct first; the CT's read_info; the kind=series rows in input order). Every row is checked here, the CT and dose/mask headers only, before the plan's first write."""
-    rows, malformed = read_series_csv(plan_dir)
+    if is_legacy(plan_dir):
+        raise CaseRefused(REASON_LEGACY_SERIES)
+    rows, malformed = read_series_json(plan_dir)
     if malformed:  # raised here, after the except block: nothing chained
         raise CaseRefused(REASON_SERIES_CSV)
     if any(row['kind'] not in (*KINDS, 'series') for row in rows):
@@ -620,28 +624,51 @@ def check_series_rows(series):
         raise CaseRefused(REASON_SERIES_CSV)
 
 
-def read_series_csv(folder):
-    """(rows, malformed) of a plan's or study's series.csv: malformed when unparseable, other columns than SERIES_COLUMNS with or without the trailing `retained`, or a cell is missing or extra."""
-    malformed = False
-    with open(folder / conv.SERIES_NAME, newline='', encoding='utf-8') as handle:
-        try:
-            reader = csv.DictReader(handle)
-            rows = list(reader)
-            malformed = reader.fieldnames not in (conv.SERIES_COLUMNS, PREPROCESSED_SERIES_COLUMNS) or any(None in row or None in row.values() for row in rows)
-        except (ValueError, csv.Error):  # UnicodeDecodeError is a ValueError
-            rows, malformed = [], True
+def holds_series(folder):
+    """A plan or study folder that holds a series.json, or a legacy series.csv (check_rows and check_study_rows refuse that one)."""
+    return (folder / conv.SERIES_NAME).is_file() or (folder / LEGACY_SERIES_NAME).is_file()
+
+
+def is_legacy(folder):
+    """A series.csv and no series.json: refused with REASON_LEGACY_SERIES, before any read, and the CSV is never parsed."""
+    return (folder / LEGACY_SERIES_NAME).is_file() and not (folder / conv.SERIES_NAME).is_file()
+
+
+def _no_duplicate_keys(pairs):
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError  # no content in it: read_series_json maps it to the fixed reason
+    return dict(pairs)
+
+
+def read_series_json(folder):
+    """(rows, malformed) of a plan's or study's series.json. malformed: not UTF-8 JSON (a BOM, duplicate keys or deep nesting included), not an array,
+    an item that is not an object, key sets other than SERIES_COLUMNS or SERIES_COLUMNS + `retained` (one set for the whole file), or a value that is not a string.
+    rows is the array when it is one, else []; an OSError (the file cannot be opened) propagates."""
+    try:
+        with open(folder / conv.SERIES_NAME, encoding='utf-8') as handle:
+            rows = json.load(handle, object_pairs_hook=_no_duplicate_keys)
+    except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors; no `from`: they quote the file
+        return [], True
+    if not isinstance(rows, list):
+        return [], True
+    first = set(rows[0]) if rows and isinstance(rows[0], dict) else None
+    malformed = bool(rows) and (first not in (set(conv.SERIES_COLUMNS), set(PREPROCESSED_SERIES_COLUMNS)) or not all(
+        isinstance(row, dict) and set(row) == first and all(isinstance(value, str) for value in row.values()) for row in rows))
     return rows, malformed
 
 
 def study_refusal_count(rows):
-    """What a refused study counts in the manifest: its series.csv data rows (read_series_csv), or 1 when it cannot be parsed or holds no row."""
+    """What a refused study counts in the manifest: its series.json items (read_series_json), or 1 when it cannot be parsed or holds no row."""
     return max(1, len(rows))
 
 
 def check_study_rows(study_dir, parsed=None):
-    """The series.csv rows of a study folder, every one checked here and no NIfTI header read. A failure refuses the whole study.
-    `parsed` is read_series_csv's result when the caller has already read it."""
-    rows, malformed = parsed or read_series_csv(study_dir)
+    """The series.json rows of a study folder, every one checked here and no NIfTI header read. A failure refuses the whole study.
+    `parsed` is read_series_json's result when the caller has already read it."""
+    if is_legacy(study_dir):
+        raise CaseRefused(REASON_LEGACY_SERIES)
+    rows, malformed = parsed or read_series_json(study_dir)
     if malformed or not rows or len({row['file'] for row in rows}) != len(rows):
         raise CaseRefused(REASON_SERIES_CSV)
     if any(row['kind'] != 'series' for row in rows):
@@ -701,7 +728,7 @@ def native_retained(native, final):
 
 
 def preprocess_plan(plan_dir, out_dir, steps):
-    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.csv last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run). CaseRefused on a refusal."""
+    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run). CaseRefused on a refusal."""
     kept, ct, series = check_rows(plan_dir)
     if too_small(ct, steps):
         raise CaseRefused(REASON_TOO_SMALL)
@@ -710,7 +737,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
     files, series_rows, cropped = [], [], 0
     for row in kept:  # the CT first: its final grid is the reference of the rest
         kind, source = row['kind'], plan_dir / row['file']
-        cell = ''  # series.csv `retained`: only a dose or mask of a geometric run
+        cell = ''  # series.json `retained`: only a dose or mask of a geometric run
         name = row['file'] if kind in ('applicator', 'line') else output_name(row['file'], steps, ct=kind == 'ct', image=kind == 'ct')
         if kind == 'ct':
             final = process_ct(read_image(source), steps)
@@ -759,11 +786,11 @@ def preprocess_plan(plan_dir, out_dir, steps):
             name = output_name(row['file'], steps, ct=is_ct, image=True)
             conv.write_atomic(image, out_dir / name)
             files.append(name)
-            if fov is not None:  # the mask is listed after its series, not in series.csv
+            if fov is not None:  # the mask is listed after its series, not in series.json
                 conv.write_atomic(fov, out_dir / f'fovmask_{name}')
                 files.append(f'fovmask_{name}')
             series_rows.append(row | {'file': name, 'retained': '', 'reg_matrix': IDENTITY, 'frame_of_reference_uid': kept[0]['frame_of_reference_uid']})
             del image
         del native, fov
-    conv.write_series_csv(series_rows, out_dir / conv.SERIES_NAME, PREPROCESSED_SERIES_COLUMNS)
+    conv.write_series_json(series_rows, out_dir / conv.SERIES_NAME)
     return [*files, conv.SERIES_NAME], skipped, cropped if geometric else ''

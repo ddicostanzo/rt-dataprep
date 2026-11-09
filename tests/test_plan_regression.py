@@ -1,14 +1,17 @@
 """
 Plan folders are pinned (task-01, #17): the converted plan folders of one synthetic patient must keep the exact file list,
-series.csv text and voxel/geometry of every volume while images/ is replaced by study folders. A characterization test,
+series rows (pinned as the CSV text they were) and voxel/geometry of every volume while images/ is replaced by study folders. A characterization test,
 written green against the code before that change. The pinned values are literals, taken once from that run.
 Every tree is synthetic.
 """
+import csv
 import hashlib
+import io
 import re
 
 import numpy as np
 import pytest
+import series_files as sf
 import SimpleITK as sitk
 import synthetic_dicom as sd
 from pydicom.uid import generate_uid
@@ -89,8 +92,8 @@ def csv_text(*rows):
 
 PLAN_1_COLUMNS = '{PLAN_SOP},Plan A,{PLAN_DATE},5'
 FILES = {
-    'plan_1': ['dose.nii.gz', 'liver.nii.gz', 'planning_ct.nii.gz', 'series.csv', 'series_MR_1.nii.gz'],
-    'plan_2': ['dose.nii.gz', 'planning_ct.nii.gz', 'series.csv'],
+    'plan_1': ['dose.nii.gz', 'liver.nii.gz', 'planning_ct.nii.gz', 'series.json', 'series_MR_1.nii.gz'],
+    'plan_2': ['dose.nii.gz', 'planning_ct.nii.gz', 'series.json'],
 }
 SERIES_CSV = {
     'plan_1': csv_text(
@@ -121,9 +124,10 @@ VOLUMES = {
 def test_the_plan_folder_is_what_it_was_before_study_folders(converted, plan):
     folder = converted / plan
     assert sorted(p.name for p in folder.iterdir()) == FILES[plan]
-    text = (folder / 'series.csv').read_bytes().decode('utf-8')
-    assert text == SERIES_CSV[plan].format(**uids(int(plan[-1])), CT_DATE=CT_DATE, STRUCT_DATE=STRUCT_DATE,
-                                           DOSE_DATE=DOSE_DATE, PLAN_DATE=PLAN_DATE)
+    pinned = SERIES_CSV[plan].format(**uids(int(plan[-1])), CT_DATE=CT_DATE, STRUCT_DATE=STRUCT_DATE,
+                                     DOSE_DATE=DOSE_DATE, PLAN_DATE=PLAN_DATE)
+    # the rows (and their key order) v0.1.x wrote as CSV text are the objects of series.json now
+    assert [list(r.items()) for r in csv.DictReader(io.StringIO(pinned, newline=''))] == [list(o.items()) for o in sf.read(folder)]
     assert {p.name: pinned_volume(p) for p in sorted(folder.glob('*.nii.gz'))} == VOLUMES[plan]
 
 

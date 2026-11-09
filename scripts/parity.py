@@ -4,7 +4,7 @@ Parity of a preprocessed tree against rnt's legacy pooled folders (phase1.md, "P
     uv run python scripts/parity.py PREPROCESSED POOLED [--json OUT.json]
 
 A pooled folder <mrn>_<x>_<fx> (rnt's per_fraction_dataframe naming) pairs with PREPROCESSED/<mrn>/plan_<fx>/; the
-new files are found through that folder's series.csv. Per pair: the CT (ct.nii.gz) by geometry, max abs difference
+new files are found through that folder's series.json. Per pair: the CT (ct.nii.gz) by geometry, max abs difference
 and Pearson r; each legacy structure mask (<structure>.nii.gz) against the new mask of the same format_name, by Dice
 after thresholding both at 0.5; dose_gy.nii.gz against the new dose when the grids are equal, as information only (the
 new dose is resampled twice, legacy once, so no tolerance applies). Prints a JSON summary of counts and distributions only: no folder
@@ -16,7 +16,6 @@ results carry a 'resampled_' prefix and are information only: no pass/fail.
 """
 import argparse
 import collections
-import csv
 import json
 import os
 import sys
@@ -31,7 +30,7 @@ STRUCTURES = ('hrctv', 'bladder', 'rectum', 'sigmoid', 'bowel', 'body')
 CT_TOL, DICE_MIN = 1e-3, 0.98
 SPACING_TOL, ORIGIN_TOL_MM = 1e-4, 1e-3
 
-REASON_NEW_MISSING = 'no new plan folder with a series.csv for the pooled folder'
+REASON_NEW_MISSING = 'no new plan folder with a series.json for the pooled folder'
 REASON_SHARED = 'two pooled folders map to the same new plan folder'
 REASON_NO_CT = 'the pooled or the new CT is missing'
 REASON_UNREADABLE = 'a file of the pair is unreadable or malformed'
@@ -50,10 +49,10 @@ def pooled_folders(pooled):
 
 
 def new_files(folder):
-    """{'ct': path, 'dose': path, 'mask': {format_name: path}} from series.csv."""
+    """{'ct': path, 'dose': path, 'mask': {format_name: path}} from series.json."""
     found = {'mask': {}}
-    with open(folder / 'series.csv', newline='', encoding='utf-8') as f:
-        for row in csv.DictReader(f):
+    with open(folder / 'series.json', encoding='utf-8') as f:
+        for row in json.load(f):
             path = folder / row['file']
             if row['kind'] in ('ct', 'dose'):
                 found[row['kind']] = path
@@ -192,7 +191,7 @@ def run(preprocessed, pooled):
         try:
             if shared[(mrn, fx)] > 1:
                 reason = REASON_SHARED
-            elif not (new / 'series.csv').is_file():
+            elif not (new / 'series.json').is_file():
                 reason = REASON_NEW_MISSING
             else:
                 reason = compare_pair(old, new, pair)
@@ -209,7 +208,7 @@ def run(preprocessed, pooled):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0].strip())
-    parser.add_argument('preprocessed', help='the preprocessed root: <patient>/plan_<n>/series.csv')
+    parser.add_argument('preprocessed', help='the preprocessed root: <patient>/plan_<n>/series.json')
     parser.add_argument('pooled', help="rnt's pooled root of <mrn>_<x>_<fx> folders")
     parser.add_argument('--json', help='also write the summary to this file')
     args = parser.parse_args(argv)
