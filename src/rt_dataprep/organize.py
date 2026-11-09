@@ -5,10 +5,13 @@ Files are copied, never moved. Log lines and exception messages carry counts and
 PatientID, folder name, date or path; organize_report.csv in the output root is the one place the sanitized id appears.
 """
 import logging
+import lzma
 import os
 import shutil
 import sys
 import time
+import zipfile
+import zlib
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,8 +34,23 @@ REASON_IO_ERROR = 'file system error while reading or copying; nothing kept for 
 REASON_OUTSIDE_SRC = 'output root is the source root or inside it'
 REASON_NO_SOP_UID = 'a DICOM file has no or an empty SOPInstanceUID'
 REASON_INTERNAL = 'an unexpected error stopped the organizing; the report lists what was finished'
+REASON_ZIP_TOO_LARGE = 'zip archives in the source folder exceed the size or member cap; nothing kept'
+REASON_ZIP_UNREADABLE = 'a zip archive in the source folder cannot be read safely; nothing kept'
+REASON_LOCKED = 'another organize run holds the output root lock'
+MAX_UNZIP_BYTES = 16 * 2**30  # declared bytes of all zips in one source folder
+MAX_ZIP_MEMBERS = 200_000  # non-directory members of all zips in one source folder
+_ZIP_METHODS = {0, 8, 12, 14}  # stored, deflate, bzip2, lzma
+_ZIP_ERRORS = (zipfile.BadZipFile, EOFError, zlib.error, lzma.LZMAError, UnicodeDecodeError, NotImplementedError, RuntimeError)
 _CT_DATES = (('SeriesDate', 'SeriesTime'), ('StudyDate', 'StudyTime'), ('AcquisitionDate', 'AcquisitionTime'),
              ('ContentDate', 'ContentTime'))  # fx order: the first non-blank date wins, with its own time as the tiebreak (#68)
+
+
+class ZipRefused(Exception):
+    """A folder's zips cannot be used and it has no loose DICOM. str() is exactly the fixed reason; nothing is chained."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
 
 
 class OrganizeAborted(Exception):
@@ -236,7 +254,7 @@ def _copy_patient(folder, out_root, name, cases, misc, overwrite):
 
 def _read_one(path):
     """(path, header) for a DICOM file, (path, None) when it has the preamble but its read fails, None for any other file."""
-    if not _has_preamble(path):  # an OSError here propagates and refuses the patient
+    if _has_preamble(path) != 'dicom':  # an OSError here propagates and refuses the patient; a zip is never read as DICOM
         return None
     try:
         return path, dicom_io.read_header_core(path)  # via the module: a test patches this seam
@@ -257,11 +275,77 @@ def _walk(folder):
 
 
 def _has_preamble(path):
-    """A regular file whose bytes 128-131 are DICM, whatever its name (#10)."""
+    """'dicom' for a regular file whose bytes 128-131 are DICM, whatever its name (#10); 'zip' for PK\\x03\\x04 first; else None."""
     if not path.is_file():
-        return False
+        return None
     with open(path, 'rb') as handle:
-        return handle.read(132)[128:] == b'DICM'
+        head = handle.read(132)
+    return 'dicom' if head[128:] == b'DICM' else 'zip' if head[:4] == b'PK\x03\x04' else None
+
+
+def _zip_scan(path):
+    """(declared bytes, non-directory members) of a zip that opens and passes the allow-list, else None. Reads the central directory only."""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+    except _ZIP_ERRORS:  # no `as`: its text can quote a member name
+        return None
+    if any(i.flag_bits & 0x61 or i.compress_type not in _ZIP_METHODS for i in infos):  # encrypted, strong-encrypted, patched; odd methods
+        return None
+    files = [i for i in infos if not i.is_dir()]
+    return sum(i.file_size for i in files), len(files)
+
+
+def _unzip(path, dest):
+    """Stage every non-directory member of one zip as dest/<infolist position>; the paths, or None if the zip fails while read."""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            staged = []
+            for n, info in enumerate(zf.infolist(), start=1):
+                if info.is_dir():
+                    continue
+                dest.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as source, open(dest / str(n), 'wb') as target:  # the name is never a path; zipfile bounds the read by file_size
+                    shutil.copyfileobj(source, target)
+                staged.append(dest / str(n))
+            return staged
+    except _ZIP_ERRORS:
+        return None
+
+
+def _stage_zips(paths, staging):
+    """
+    Extract the zips among a folder's walked `paths` into `staging` as <zip #>/<member #> (both from 1).
+    Returns (staged paths, zips staged, zip members staged, zips skipped). With a loose DICOM file (preamble) a bad zip (over the
+    folder's caps, off the allow-list, or failing while read) is skipped and counted; without one the folder gets ZipRefused.
+    Whatever this staged is removed before a ZipRefused; `staging` itself stays the caller's.
+    """
+    kinds = [(path, _has_preamble(path)) for path in paths]  # one read each; an OSError propagates
+    zips = sorted(path for path, kind in kinds if kind == 'zip')
+    if not zips:
+        return [], 0, 0, 0
+    loose = any(kind == 'dicom' for _, kind in kinds)
+    scans = [_zip_scan(path) for path in zips]
+    good = [scan for scan in scans if scan is not None]
+    if sum(s[0] for s in good) > MAX_UNZIP_BYTES or sum(s[1] for s in good) > MAX_ZIP_MEMBERS:  # before anything is written
+        if loose:
+            return [], 0, 0, len(zips)
+        raise ZipRefused(REASON_ZIP_TOO_LARGE) from None
+    if len(good) < len(zips) and not loose:
+        raise ZipRefused(REASON_ZIP_UNREADABLE) from None
+    staged, extracted = [], 0
+    for n, (path, scan) in enumerate(zip(zips, scans, strict=True), start=1):
+        here = None if scan is None else _unzip(path, staging / str(n))
+        if here is None:  # a scan failure (loose DICOM only: else refused above) or a failure while read
+            dicom_io.remove_tree(staging / str(n))
+            if not loose:
+                for k in range(1, len(zips) + 1):
+                    dicom_io.remove_tree(staging / str(k))
+                raise ZipRefused(REASON_ZIP_UNREADABLE) from None  # outside any except: nothing is chained
+            continue
+        staged += here
+        extracted += 1
+    return staged, extracted, len(staged), len(zips) - extracted
 
 
 def _uids(ds, sequence, tag):
