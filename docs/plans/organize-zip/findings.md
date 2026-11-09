@@ -30,3 +30,21 @@ Task-02 must: wrap _stage_zips in task A's try/except BaseException (an OSError 
 
 ## plan-fix-1 (task-02)
 AC18 amended: test_organize.py helpers listing/hidden/snapshot ignore the persistent .organize.lock (AC16 keeps it on disk; unlinking an flock file races). Plan bug found by the task-02 implementer before editing.
+
+## task-02
+
+Files: src/rt_dataprep/organize.py, src/rt_dataprep/__main__.py (REASON_LOCKED in the fixed refusal list), tests/test_organize_zip.py (+35 tests), tests/test_cli.py (+1), tests/test_organize.py (helpers listing/hidden/snapshot ignore `LOCK_NAME`), tests/pool_workers.py (fake tuples 7 -> 11).
+
+Decisions:
+- Task A is now `_read_patient(folder, exclude_models, skip_root, staging_parent)` (a thin wrapper: classify once, mkdtemp the sub-folder only when a zip is present, `_stage_zips(paths, staging, kinds)`, `finally` drops the sub-folder unless the result has files to copy) around `_read_folder` (the old body). `ZipRefused` is caught inside the wrapper and becomes the refusal tuple (sanitized folder name, reads_kept False). The `finally` replaces the plan's `except BaseException: remove; raise`: same effect, also covers refusal and skip returns.
+- Double `_has_preamble` read folded: `_stage_zips` takes optional `kinds`; loose DICOM paths go straight to `_read_header` (the header half of `_read_one`); `_read_one` still classifies (staged files, and the AC1 tests).
+- `_copy_patient(..., overwrite, staging=None)`; with staging it calls `_copy_all` through `functools.partial(..., staging=)`, because an existing test fakes `_copy_all(paths, folder)` with two parameters (AC18 forbids editing it). Only paths under staging are hard-linked; loose source files are always copied.
+- Lock: `_lock_root` returns the open handle (closed = released); `.organize.lock` stays. Sweep of `.unzip-*` only when the lock is held. Setup (lock, sweep, mkdtemp) sits before the existing try, with `except BaseException: _unlock; raise` so a failing mkdtemp cannot leak the lock; the staging parent is removed first thing in the existing `finally`, the lock is released in an outer `finally` after the report.
+- WARN_STAGING_LEFT count = 1 (the parent) + the entries still under it. WARN_NO_LOCK and WARN_STAGING_LEFT are fixed module constants.
+- Summary line regex in tests/test_organize.py (`.*; (\d+) replaced`) already absorbed the new fields, so it is unchanged; the exact AC17 format is pinned by a new test in test_organize_zip.py.
+- `walked` = loose + staged files (the zip file itself counts as a walked loose file).
+
+Gotchas:
+- A local named `partial` in `_copy_patient` shadows `functools.partial`; hence `import functools`.
+- `listing()` is also used for assertions where the lock file would otherwise appear; the three helpers are the only edits in test_organize.py.
+- KeyboardInterrupt test uses workers=1 (spawned workers do not see monkeypatches); the workers=2 test patches nothing.

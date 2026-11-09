@@ -8,7 +8,7 @@ from rt_dataprep.dicom_io import REASON_INPUT_INSIDE_OUTPUT
 from rt_dataprep.convert import REASON_INTERNAL, REASON_OUTSIDE_ORG, ConvertAborted, convert, crash_site
 from rt_dataprep.manifest import MANIFEST_NAME, manifest
 from rt_dataprep.organize import REASON_INTERNAL as ORGANIZE_REASON_INTERNAL
-from rt_dataprep.organize import REASON_OUTSIDE_SRC, OrganizeAborted, organize
+from rt_dataprep.organize import REASON_LOCKED, REASON_OUTSIDE_SRC, OrganizeAborted, organize
 from rt_dataprep.pool import MAX_WORKERS
 from rt_dataprep.preprocess import (
     REASON_AHE_OPTIONS,
@@ -131,7 +131,8 @@ def main(argv=None):
     except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug, reported as below
         if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_AHE_OPTIONS,
                             REASON_MASK_RETENTION_LIMIT, REASON_OUTSIDE_SRC, REASON_INPUT_INSIDE_OUTPUT,
-                            REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS):
+                            REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS,
+                            REASON_LOCKED):
             parser.exit(1, unexpected(exc))
         parser.exit(1, f'rt_dataprep: {exc}\n')
     except ConvertAborted:  # the report is written; the text is fixed, nothing of the original reaches the terminal

@@ -592,3 +592,17 @@ def test_a8_a_source_root_with_mode_0o444_exits_1_without_an_output_root(tmp_pat
 
 def test_cli_cap_is_the_pools():
     assert cli.MAX_WORKERS is pool.MAX_WORKERS
+
+
+def test_a_second_organize_run_on_a_locked_root_exits_1_with_the_fixed_reason(tmp_path):
+    import fcntl  # noqa: PLC0415
+    from rt_dataprep import organize as org  # noqa: PLC0415
+    src, out = tmp_path / 'src', tmp_path / 'out'
+    src.mkdir()
+    out.mkdir()
+    with open(out / org.LOCK_NAME, 'a') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run([sys.executable, '-m', 'rt_dataprep', 'organize', str(src), str(out)], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert result.stderr == f'rt_dataprep: {org.REASON_LOCKED}\n' and result.stdout == ''
+    assert not (out / org.REPORT_NAME).exists()

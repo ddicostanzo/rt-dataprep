@@ -4,11 +4,13 @@ Sort an export tree into <out>/<patient>/plan_<n>/, one folder per RTPLAN (spec:
 Files are copied, never moved. Log lines and exception messages carry counts and the fixed REASON_ constants only, never a
 PatientID, folder name, date or path; organize_report.csv in the output root is the one place the sanitized id appears.
 """
+import functools
 import logging
 import lzma
 import os
 import shutil
 import sys
+import tempfile
 import time
 import zipfile
 import zlib
@@ -37,6 +39,9 @@ REASON_INTERNAL = 'an unexpected error stopped the organizing; the report lists 
 REASON_ZIP_TOO_LARGE = 'zip archives in the source folder exceed the size or member cap; nothing kept'
 REASON_ZIP_UNREADABLE = 'a zip archive in the source folder cannot be read safely; nothing kept'
 REASON_LOCKED = 'another organize run holds the output root lock'
+LOCK_NAME = '.organize.lock'
+WARN_NO_LOCK = 'organize: the output root cannot be locked here; running without a lock and without removing leftover staging'
+WARN_STAGING_LEFT = 'organize: %d item(s) of the staging folder under the output root could not be removed; the next run removes them'
 MAX_UNZIP_BYTES = 16 * 2**30  # declared bytes of all zips in one source folder
 MAX_ZIP_MEMBERS = 200_000  # non-directory members of all zips in one source folder
 _ZIP_METHODS = {0, 8, 12, 14}  # stored, deflate, bzip2, lzma
@@ -85,11 +90,21 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
     if overwrite and src_root.resolve().is_relative_to(out_root.resolve()):  # a replaced patient folder could hold the source
         raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
     out_root.mkdir(parents=True, exist_ok=True)
+    lock = _lock_root(out_root)
+    try:
+        if lock is not None:  # only the lock holder may sweep: another run's staging is not a leftover
+            for leftover in out_root.glob('.unzip-*'):
+                dicom_io.remove_tree(leftover)
+        staging_parent = Path(tempfile.mkdtemp(prefix='.unzip-', dir=out_root))
+    except BaseException:
+        _unlock(lock)
+        raise
     read_fn, copy_fn = _read_fn or _read_patient, _copy_fn or _copy_patient
     claimed = set()  # casefolded output names taken in this run: a case-insensitive filesystem would merge them
     done, held = {}, {}  # folder index -> its row; index -> (reading s, files walked, row, output name) of a patient whose copy is under way
     statuses = {}  # casefolded output name -> 'replaced'/'kept': one count per output folder, whatever number of source folders map to it
     files = 0
+    zip_counts = [0, 0, 0]  # zips staged, zip members staged, zips skipped
     reading = copying = 0.0  # seconds; a patient refused by an error adds none
     aborted = False
     folders = []
@@ -122,9 +137,11 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
             read_s, walked, row, name = held.pop(i)
             finish(i, row, read_s, walked, name, *result)
             return None
+        name, refusal, cases, misc, unreadable, walked, read_s, staging, *counts = result
         if aborted:  # a read delivered after the abort: that patient is not started (no claim, recover, copy or row)
+            _drop(staging)
             return None
-        name, refusal, cases, misc, unreadable, walked, read_s = result
+        zip_counts[:] = [a + b for a, b in zip(zip_counts, counts, strict=True)]
         if refusal is not None:
             row, reads_kept = refusal
             # read-only: a refusal before the claim never recovers or touches the root; it only reports an old folder kept
@@ -132,6 +149,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
             finish(i, row, read_s, walked, name, status=status)
             return None
         if name.casefold() in claimed:  # two folders, one output name: refuse, never merge
+            _drop(staging)
             finish(i, PatientRow(name, 0, 0, unreadable, OUTCOME_REFUSED, REASON_NAME_CLAIMED), read_s, walked, name)
             return None
         claimed.add(name.casefold())
@@ -142,34 +160,75 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
                 raise ValueError(REASON_OUTSIDE_ROOT)
             dicom_io.recover(out_root, name)
         except OSError:  # its message names a path, i.e. the patient: report a fixed reason and go on
+            _drop(staging)
             done[i] = _failure_row(folder, REASON_IO_ERROR)
             log.warning('organize: %s', REASON_IO_ERROR)
             return None
         # cases None: task A saw the target and did not group; recover never removes a target, so it is still a skip
         if cases is None or (not overwrite and os.path.lexists(target)):  # lexists, as publish: a dangling link is an existing target
+            _drop(staging)
             finish(i, PatientRow(name, 0, 0, unreadable, OUTCOME_SKIPPED, REASON_EXISTS), read_s, walked, name)
             return None
         held[i] = (read_s, walked, PatientRow(name, len(cases), len(misc), unreadable, OUTCOME_ORGANIZED), name)
-        return pool.Task(_worker, (copy_fn, folder, out_root, name, cases, misc, overwrite))
+        return pool.Task(_worker, (copy_fn, folder, out_root, name, cases, misc, overwrite, staging))
 
     started = time.monotonic()
     try:
-        folders = sorted(p for p in src_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # .X.partial too
-        tasks = [pool.Task(_worker, (read_fn, folder, exclude_models, None if overwrite else out_root)) for folder in folders]
-        workers = pool.run_auto(workers, tasks, handle, lambda k: k in done and done[k].outcome == OUTCOME_ORGANIZED)  # an int from here on
-    finally:  # Ctrl-C too: the report lists what was done
-        rows = [done[i] for i in sorted(done)]
-        write_report(out_root, REPORT_NAME, ['patient', 'plan_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'],
-                     ([r.patient, r.plans, r.misc, r.unreadable, r.outcome, r.reason] for r in rows))
-    log.info('organize: %d patient folders, %d organized, %d plan folders, %d misc files, %d unreadable files; %d replaced, %d kept',
-             len(rows), sum(r.outcome == OUTCOME_ORGANIZED for r in rows), sum(r.plans for r in rows),
-             sum(r.misc for r in rows), sum(r.unreadable for r in rows),
-             *(sum(v == status for v in statuses.values()) for status in ('replaced', 'kept')))
-    log.info('organize: %.1f s total, %.1f s reading (summed over patients), %.1f s copying (summed over patients), %d files, workers %d',
-             time.monotonic() - started, reading, copying, files, workers)
-    if aborted:  # raised here: nothing of the original is chained
-        raise OrganizeAborted(REASON_INTERNAL)
-    return OrganizeReport(rows)
+        try:
+            folders = sorted(p for p in src_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # .X.partial too
+            tasks = [pool.Task(_worker, (read_fn, folder, exclude_models, None if overwrite else out_root, staging_parent)) for folder in folders]
+            workers = pool.run_auto(workers, tasks, handle, lambda k: k in done and done[k].outcome == OUTCOME_ORGANIZED)  # an int from here on
+        finally:  # Ctrl-C too: the report lists what was done
+            dicom_io.remove_tree(staging_parent)
+            if os.path.lexists(staging_parent):  # remove_tree swallows its error; the next run's sweep retries
+                log.warning(WARN_STAGING_LEFT, 1 + sum(1 for _ in staging_parent.rglob('*')))
+            rows = [done[i] for i in sorted(done)]
+            write_report(out_root, REPORT_NAME, ['patient', 'plan_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'],
+                         ([r.patient, r.plans, r.misc, r.unreadable, r.outcome, r.reason] for r in rows))
+        log.info('organize: %d patient folders, %d organized, %d plan folders, %d misc files, %d unreadable files, %d zips, %d zip members, '
+                 '%d zips skipped; %d replaced, %d kept',
+                 len(rows), sum(r.outcome == OUTCOME_ORGANIZED for r in rows), sum(r.plans for r in rows),
+                 sum(r.misc for r in rows), sum(r.unreadable for r in rows), *zip_counts,
+                 *(sum(v == status for v in statuses.values()) for status in ('replaced', 'kept')))
+        log.info('organize: %.1f s total, %.1f s reading (summed over patients), %.1f s copying (summed over patients), %d files, workers %d',
+                 time.monotonic() - started, reading, copying, files, workers)
+        if aborted:  # raised here: nothing of the original is chained
+            raise OrganizeAborted(REASON_INTERNAL)
+        return OrganizeReport(rows)
+    finally:
+        _unlock(lock)
+
+
+def _lock_root(out_root):
+    """
+    The open lock file, holding flock(LOCK_EX) while it stays open, or None where there is no flock (Windows, or a file system
+    that refuses it: one fixed warning, and the caller must not sweep). ValueError(REASON_LOCKED) when another run holds it.
+    """
+    if sys.platform == 'win32':
+        return None
+    import fcntl  # POSIX only
+    handle = None
+    try:
+        handle = open(out_root / LOCK_NAME, 'a')
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:  # before OSError: it is a subclass
+        _unlock(handle)
+        raise ValueError(REASON_LOCKED) from None
+    except OSError:
+        _unlock(handle)
+        log.warning(WARN_NO_LOCK)
+        return None
+    return handle
+
+
+def _unlock(handle):
+    if handle is not None:
+        handle.close()
+
+
+def _drop(path):
+    if path is not None:
+        dicom_io.remove_tree(path)
 
 
 def _failure_row(folder, reason):
@@ -193,20 +252,43 @@ def _worker(fn, folder, *args):
         return pool.Stop((None, _failure_row(folder, REASON_INTERNAL)))
 
 
-def _read_patient(folder, exclude_models, skip_root=None):
+def _read_patient(folder, exclude_models, skip_root, staging_parent):
     """
     Task A, skip_root the out_root without --overwrite: (sanitized name, refusal, per-plan path lists
-    (None: the output exists, not grouped), misc paths, unreadable count, files walked, reading seconds). The refusal is
-    None or (row, whether its status may be 'kept'); the parent decides that and the claim. Paths only, no datasets. A raise (OSError) adds none.
+    (None: the output exists, not grouped), misc paths, unreadable count, files walked, reading seconds, staging, zips,
+    zip members, zips skipped). The refusal is None or (row, whether its status may be 'kept'); the parent decides that and
+    the claim. Paths only, no datasets. A raise (OSError) adds none.
+    The folder's zips are extracted into a fresh sub-folder of `staging_parent`; `staging` names it when the result has
+    files to copy (task B removes it), else it is removed here, a raise included.
     """
     started = time.monotonic()
     paths = sorted(_walk(folder))
+    kinds = [(path, _has_preamble(path)) for path in paths]  # the one classification read of each walked file
+    staging = Path(tempfile.mkdtemp(dir=staging_parent)) if any(kind == 'zip' for _, kind in kinds) else None
+    keep = False
+    try:
+        try:
+            staged, zips, members, skipped = _stage_zips(paths, staging, kinds)
+        except ZipRefused as refused:  # a fixed reason: this folder is refused, the run goes on
+            name = sanitize_path_component(folder.name)
+            row = PatientRow(name, 0, 0, 0, OUTCOME_REFUSED, refused.reason)
+            return name, (row, False), [], [], 0, len(paths), time.monotonic() - started, None, 0, 0, 0
+        result = _read_folder(exclude_models, skip_root, folder, started, [p for p, kind in kinds if kind == 'dicom'], staged, len(paths) + len(staged))
+        keep = staging is not None and result[1] is None and result[2] is not None  # else: a refusal or a skip
+    finally:  # Ctrl-C too
+        if not keep:
+            _drop(staging)
+    return (*result, staging if keep else None, zips, members, skipped)
+
+
+def _read_folder(exclude_models, skip_root, folder, started, loose, staged, walked):
+    """The first seven fields of _read_patient's result, from the loose DICOM paths then the staged paths."""
     with dicom_io._pydicom_quiet():  # the whole folder read: pydicom's warnings and log records quote values
-        results = [r for r in map(_read_one, paths) if r]
+        results = [r for r in [*map(_read_header, loose), *map(_read_one, staged)] if r]
     headers = [(path, ds) for path, ds in results if ds is not None]
     bad = [path for path, ds in results if ds is None]  # has the preamble but the read fails; copied to misc_files (#13)
     unreadable = len(bad)
-    reading, walked = time.monotonic() - started, len(paths)
+    reading = time.monotonic() - started
     # A file with a blank PatientID is the folder's but never placed in a plan: it is copied to misc_files (#12).
     blank = [(path, ds) for path, ds in headers if not str(ds.get('PatientID', '')).strip()]
     headers = [(path, ds) for path, ds in headers if str(ds.get('PatientID', '')).strip()]
@@ -233,22 +315,28 @@ def _read_patient(folder, exclude_models, skip_root=None):
     return name, None, cases, misc, unreadable, walked, reading
 
 
-def _copy_patient(folder, out_root, name, cases, misc, overwrite):
-    """Task B: (copying seconds, status None/'new'/'replaced'/'kept'). `folder` only names the patient for the failure row."""
+def _copy_patient(folder, out_root, name, cases, misc, overwrite, staging=None):
+    """
+    Task B: (copying seconds, status None/'new'/'replaced'/'kept'). `folder` only names the patient for the failure row.
+    Files under `staging` are hard-linked (a copy where that fails), the others copied; `staging` is removed in every outcome.
+    """
     # Build under a hidden name and rename at the end: a run that dies part-way leaves no folder that a later run
     # would skip as already done.
     partial = out_root / f'.{name}.partial'
     copy_started = time.monotonic()  # the parent's recover already removed a leftover partial
+    copy_all = _copy_all if staging is None else functools.partial(_copy_all, staging=staging)
     try:
         partial.mkdir()  # a leftover (recover failed to remove it) raises: its stale plan folders must never be published
         for n, paths in enumerate(cases, start=1):
-            _copy_all(paths, partial / f'plan_{n}')
-        _copy_all(misc, partial / 'misc_files')
+            copy_all(paths, partial / f'plan_{n}')
+        copy_all(misc, partial / 'misc_files')
         status = dicom_io.publish(out_root, name, overwrite=overwrite, success=bool(cases))  # no plan (e.g. an unreadable RTPLAN) keeps the old folder
     except BaseException:  # Ctrl-C too: no hidden half-copied folder left behind
         # A second Ctrl-C during this rmtree leaves a partly deleted .partial: the source scan skips it and the next run removes it before copying.
         dicom_io.remove_tree(partial)
         raise
+    finally:
+        _drop(staging)
     return time.monotonic() - copy_started, status
 
 
@@ -256,6 +344,11 @@ def _read_one(path):
     """(path, header) for a DICOM file, (path, None) when it has the preamble but its read fails, None for any other file."""
     if _has_preamble(path) != 'dicom':  # an OSError here propagates and refuses the patient; a zip is never read as DICOM
         return None
+    return _read_header(path)
+
+
+def _read_header(path):
+    """(path, header) for a file already classified 'dicom', (path, None) when its read fails."""
     try:
         return path, dicom_io.read_header_core(path)  # via the module: a test patches this seam
     except OSError:
@@ -313,14 +406,15 @@ def _unzip(path, dest):
         return None
 
 
-def _stage_zips(paths, staging):
+def _stage_zips(paths, staging, kinds=None):
     """
     Extract the zips among a folder's walked `paths` into `staging` as <zip #>/<member #> (both from 1).
     Returns (staged paths, zips staged, zip members staged, zips skipped). With a loose DICOM file (preamble) a bad zip (over the
     folder's caps, off the allow-list, or failing while read) is skipped and counted; without one the folder gets ZipRefused.
     Whatever this staged is removed before a ZipRefused; `staging` itself stays the caller's.
+    `kinds`: [(path, _has_preamble(path))] when the caller has classified `paths` already.
     """
-    kinds = [(path, _has_preamble(path)) for path in paths]  # one read each; an OSError propagates
+    kinds = kinds or [(path, _has_preamble(path)) for path in paths]  # one read each; an OSError propagates
     zips = sorted(path for path, kind in kinds if kind == 'zip')
     if not zips:
         return [], 0, 0, 0
@@ -419,7 +513,8 @@ def _group(headers, exclude_models):
     return cases, [p for p, _ in headers if p not in placed]
 
 
-def _copy_all(paths, folder):
+def _copy_all(paths, folder, staging=None):
+    """Copy `paths` into a new `folder`; those under `staging` (ours, removed later) are hard-linked, never a file of the source tree."""
     if not paths:
         return
     folder.mkdir(parents=True)
@@ -427,4 +522,12 @@ def _copy_all(paths, folder):
         target, n = folder / source.name, 1
         while target.exists():  # the same file name from two source sub-folders: keep both
             target, n = folder / f'{source.stem}_{n}{source.suffix}', n + 1
+        if staging is not None and source.is_relative_to(staging):
+            linked = True
+            try:
+                os.link(source, target)
+            except OSError:  # no hard links here (another file system...): copy, as masks._link_or_copy
+                linked = False
+            if linked:
+                continue
         shutil.copy2(source, target)

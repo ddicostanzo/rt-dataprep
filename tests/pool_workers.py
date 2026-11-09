@@ -122,13 +122,14 @@ def preprocess_record(folder, *args, **kwargs):
 
 def organize_read(folder, *args, **kwargs):
     _raise_for(folder)
-    return Path(folder).name, None, [], [], 0, 0, 0.0  # name, refusal, per-plan paths, misc paths, unreadable, walked, reading seconds
+    # name, refusal, per-plan paths, misc paths, unreadable, walked, reading seconds, staging, zips, zip members, zips skipped
+    return Path(folder).name, None, [], [], 0, 0, 0.0, None, 0, 0, 0
 
 
 def organize_read_escaping(folder, *args, **kwargs):
     """Folder 'a' reads as the hostile name '..'; any other folder reads normally (in-order delivery puts it after a's raise)."""
     if Path(folder).name == 'a':
-        return '..', None, [], [], 0, 0, 0.0
+        return '..', None, [], [], 0, 0, 0.0, None, 0, 0, 0
     return organize_read(folder)
 
 
