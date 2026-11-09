@@ -53,3 +53,6 @@ Decisions:
 
 AC17 grep leftovers (all allowed): .gitignore series.csv / manifest*.csv; preprocess.py LEGACY_SERIES_NAME and REASON_LEGACY_SERIES definitions plus legacy docstrings; manifest.py comment "the CSV is never parsed"; README legacy-tree paragraph (names series.csv and the reason text); tests that build legacy folders.
 Gotcha: README line on the Python API `split(manifest_path)` ValueError list still said "columns" for the manifest; reworded to keys.
+
+## review-loop-pass-1
+Code review: no findings. Spec axis: 21/21 met; PLAN-BUG (AC17 grep exclusions too narrow vs AC4/AC15/AC7, no code change). Deferred filed as hardening issues (see PR body).
