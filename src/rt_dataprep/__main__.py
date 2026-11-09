@@ -121,8 +121,7 @@ def main(argv=None):
                 ahe_bins=128 if args.ahe_bins is None else args.ahe_bins,
                 ahe_clip_limit=0.05 if args.ahe_clip_limit is None else args.ahe_clip_limit), workers=args.workers, overwrite=args.overwrite)
         elif args.command == 'manifest':
-            written, refused = manifest(args.root)
-            print(f'manifest: {written} written, {refused} refused')
+            manifest(args.root)  # logs its own counts line
         elif args.command == 'split':
             splits = split(Path(args.root) / MANIFEST_NAME, test_size=args.test_size, val_size=args.val_size, seed=args.seed, external=args.external)
             for name in SPLIT_NAMES:  # counts only, never the ids

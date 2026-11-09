@@ -105,5 +105,14 @@ geometry, dose units, masks, and cohort membership before accepting the result. 
 Use fresh roots for a changed configuration; existing patient outputs are skipped. Keep prior manifests and splits for
 provenance rather than deleting them to make a different split fit.
 
+On a Slurm cluster, [slurm_pipeline.sbatch](slurm_pipeline.sbatch) runs organize, convert and manifest as one job, plus
+preprocess when preprocess flags follow WORK. `rt-dataprep` must be on PATH, or set `RT_DATAPREP` to its path:
+
+```bash
+sbatch -A <account> examples/slurm_pipeline.sbatch /secure/export /secure/work
+sbatch -A <account> --export=ALL,RT_DATAPREP=$HOME/venvs/rt-dataprep/bin/rt-dataprep \
+    examples/slurm_pipeline.sbatch /secure/export /secure/work --initial-resample --rescale --resample --reshape
+```
+
 All example code is licensed under [AGPL-3.0-only](../LICENSE), like the rest of the project. Generated clinical data is
 not covered by a grant of dataset rights.
