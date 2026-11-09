@@ -92,7 +92,7 @@ def run(workspace):
         written, refused = manifest(root)
         if (written, refused) != (PATIENTS * len(MODALITIES), 0):
             raise RuntimeError('synthetic manifest had unexpected case counts')
-        cohorts = split(root / 'manifest.csv', test_size=0.2, val_size=0.2, seed=42)
+        cohorts = split(root / 'manifest.jsonl', test_size=0.2, val_size=0.2, seed=42)
         if [len(cohorts[name]) for name in SPLIT_NAMES] != [2, 2, 2]:
             raise RuntimeError('synthetic split had unexpected patient counts')
     print('Synthetic workflow complete: 6 patients, 18 imaging cases; train=2, val=2, test=2; no refusals.')

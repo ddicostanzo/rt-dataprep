@@ -1,5 +1,4 @@
 """manifest: one row per plan folder or study series of a converted or preprocessed tree (task-01, task-04); patient folder names are SYNTHETIC-prefixed."""
-import csv
 import dataclasses
 import json
 import logging
@@ -8,6 +7,7 @@ import shutil
 
 import numpy as np
 import pytest
+import series_files as sf
 import SimpleITK as sitk
 from test_convert import BOX, PID, dose_spec, make_plan
 from test_preprocess import (AHE_MR_OUT, AHE_STUDY_CT, MR_OUT, MR_RAMP, MR_SIZE, SMALL, SMALL_AHE, box, grid, landmark, mr_spec, rigid, run_plan,
@@ -17,6 +17,7 @@ from test_series import STUDY_D1, STUDY_D2, STUDY_T1, STUDY_T2, put
 from rt_dataprep import convert as conv
 from rt_dataprep import manifest as man
 from rt_dataprep import preprocess as pre
+from rt_dataprep import split as sp
 
 COLUMNS = ['case_dir', 'patient', 'fx', 'ct_size', 'ct_spacing', 'dose', 'masks', 'rtplan_uid', 'ct_series_uid', 'study_uid',
            'case_type', 'modality', 'image', 'series']
@@ -41,10 +42,9 @@ def tree(root):
 
 
 def read(root):
-    with open(root / 'manifest.csv', newline='') as handle:
-        reader = csv.DictReader(handle)
-        assert reader.fieldnames in (COLUMNS, [*COLUMNS, 'fov_mask'])
-        return list(reader)
+    rows = [json.loads(line) for line in (root / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]
+    assert all(list(row) in (COLUMNS, [*COLUMNS, 'fov_mask']) for row in rows)
+    return rows
 
 
 def test_rows_columns_and_values_on_a_converted_tree(tmp_path):
@@ -53,10 +53,10 @@ def test_rows_columns_and_values_on_a_converted_tree(tmp_path):
     rows = read(root)
     assert [r['case_dir'] for r in rows] == [f'{PATIENT_B}/fx_1', f'{PATIENT_A}/plan_1', f'{PATIENT_A}/plan_2']  # '_' sorts after 'P'
     assert rows[1] == dict(case_dir=f'{PATIENT_A}/plan_1', patient=PATIENT_A, fx='plan_1', ct_size='12;12;12', ct_spacing='1.0;1.0;1.0',
-                           dose='1', masks='["bladder", "ptv"]', rtplan_uid='SYNTHETICRTPLANA1', ct_series_uid='SYNTHETICCTA1',
-                           study_uid='SYNTHETICSTUDYA1', case_type='plan', modality='CT', image='', series='[]')
-    assert (rows[2]['dose'], rows[2]['masks'], rows[2]['rtplan_uid']) == ('0', '["ptv"]', 'SYNTHETICRTPLANA2')
-    assert (rows[0]['patient'], rows[0]['fx'], rows[0]['ct_size'], rows[0]['masks']) == (PATIENT_B, 'fx_1', '14;14;14', '[]')
+                           dose='1', masks=['bladder', 'ptv'], rtplan_uid='SYNTHETICRTPLANA1', ct_series_uid='SYNTHETICCTA1',
+                           study_uid='SYNTHETICSTUDYA1', case_type='plan', modality='CT', image='', series=[])
+    assert (rows[2]['dose'], rows[2]['masks'], rows[2]['rtplan_uid']) == ('0', ['ptv'], 'SYNTHETICRTPLANA2')
+    assert (rows[0]['patient'], rows[0]['fx'], rows[0]['ct_size'], rows[0]['masks']) == (PATIENT_B, 'fx_1', '14;14;14', [])
     assert {r['case_type'] for r in rows} == {'plan'} and {r['modality'] for r in rows} == {'CT'} and {r['image'] for r in rows} == {''}
 
 
@@ -81,21 +81,21 @@ def test_converted_and_preprocessed_trees_list_the_same_cases(tmp_path):
 
 def test_the_walk_gives_no_row_to_images_misc_hidden_or_series_less_folders(tmp_path):
     root = tree(tmp_path / 'converted')
-    for name in ('images', 'misc_files'):  # even with a series.csv inside, not a plan folder
+    for name in ('images', 'misc_files'):  # even with a series.json inside, not a plan folder
         folder = root / PATIENT_A / name
         folder.mkdir()
         (folder / conv.SERIES_NAME).write_bytes((root / PATIENT_A / 'plan_1' / conv.SERIES_NAME).read_bytes())
-    (root / PATIENT_A / 'plan_3').mkdir()  # a plan folder without series.csv
+    (root / PATIENT_A / 'plan_3').mkdir()  # a plan folder without series.json
     write_plan(root, '.SYNTHETICPTC.partial', 'plan_1')  # a hidden patient folder
     (root / 'stray.txt').write_text('x')
     assert man.manifest(root) == (3, 0)
     assert len(read(root)) == 3
 
 
-def test_a_malformed_series_csv_is_left_out_and_counted_without_a_name_in_the_log(tmp_path, caplog, capfd):
+def test_a_malformed_series_json_is_left_out_and_counted_without_a_name_in_the_log(tmp_path, caplog, capfd):
     root = tree(tmp_path / 'converted')
     bad = plan(root, 'SYNTHETIC_DISTINCTIVE_NAME', 'plan_1', 'D1')
-    (bad / conv.SERIES_NAME).write_text('not,the,columns\n1,2\n')
+    (bad / conv.SERIES_NAME).write_text('[{"not": "the keys"}]')
     with caplog.at_level(logging.DEBUG):
         assert man.manifest(root) == (3, 1)
     assert 'SYNTHETIC_DISTINCTIVE_NAME' not in [r['case_dir'].split('/')[0] for r in read(root)]
@@ -106,13 +106,13 @@ def test_a_malformed_series_csv_is_left_out_and_counted_without_a_name_in_the_lo
     assert [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.manifest'] == ['manifest: 3 written, 1 refused']
 
 
-def test_only_manifest_csv_and_its_dated_copy_are_written(tmp_path):
+def test_only_manifest_jsonl_and_its_dated_copy_are_written(tmp_path):
     root = tree(tmp_path / 'converted')
     before = state(root)
     man.manifest(root)
     after = state(root)
     new = {p for p in after if p not in before}
-    assert {p.name for p in new} >= {'manifest.csv'} and all(re.fullmatch(r'manifest(_\d{8}T\d{6}Z)?\.csv', p.name) for p in new)
+    assert {p.name for p in new} >= {'manifest.jsonl'} and all(re.fullmatch(r'manifest(_\d{8}T\d{6}Z)?\.jsonl', p.name) for p in new)
     assert len(new) == 2
     assert all(after[p] == data for p, data in before.items())
 
@@ -123,19 +123,19 @@ def test_a_semicolon_roi_name_and_float32_spacing_read_back_exactly(tmp_path):
     plan(root, PATIENT_A, 'plan_1', 'A1', spacing=0.8, masks={'ptv;boost': box((4, 4, 4), (8, 8, 8))})
     man.manifest(root)
     row = read(root)[0]
-    assert (json.loads(row['masks']), row['ct_spacing']) == (['ptv;boost'], '0.8;0.8;0.8')
+    assert (row['masks'], row['ct_spacing']) == (['ptv;boost'], '0.8;0.8;0.8')
 
 
 def test_a_plan_whose_series_row_names_a_missing_file_is_counted_refused(tmp_path):
     root = tree(tmp_path / 'converted')
     path = plan(root, 'SYNTHETICPTC', 'plan_1', 'C1')
-    rows = pre.read_series_csv(path)[0]
+    rows = pre.read_series_json(path)[0]
     save_rows(path, [*rows, series_row('series_MR_1.nii.gz', 'series', modality='MR', reg_matrix='identity')])  # no such file
     assert man.manifest(root) == (3, 1)
     assert 'SYNTHETICPTC' not in {r['patient'] for r in read(root)}
 
 
-def test_an_unreadable_series_csv_is_one_refused_plan_not_the_end_of_the_run(tmp_path, monkeypatch):
+def test_an_unreadable_series_json_is_one_refused_plan_not_the_end_of_the_run(tmp_path, monkeypatch):
     root = tree(tmp_path / 'converted')
     check = man.check_rows
 
@@ -150,8 +150,7 @@ def test_an_unreadable_series_csv_is_one_refused_plan_not_the_end_of_the_run(tmp
 
 # ---------------------------------------------------------------- task-04: imaging rows of the study folders
 
-BLANK_IMAGING = dict(fx='', dose='0', masks='[]', rtplan_uid='', series='[]')
-SERIES_CSV_COLUMN = conv.SERIES_COLUMNS.index
+BLANK_IMAGING = dict(fx='', dose='0', masks=[], rtplan_uid='', series=[])
 
 
 @pytest.fixture(scope='module')
@@ -205,35 +204,32 @@ def test_an_imaging_size_and_spacing_are_formatted_as_a_plan_rows(converted):
 
 def study_edit(change):
     def run(study):
-        path = study / conv.SERIES_NAME
-        with open(path, newline='') as handle:
-            rows = list(csv.reader(handle))
+        rows = sf.read(study)
         change(rows)
-        with open(path, 'w', newline='') as handle:
-            csv.writer(handle).writerows(rows)
+        (study / conv.SERIES_NAME).write_text(json.dumps(rows), encoding='utf-8')  # raw: a change may break the keys
     return run
 
 
-def set_cell(row, column, value):
+def set_cell(row, column, value):  # row 1 is the first item
     def change(rows):
-        rows[row][SERIES_CSV_COLUMN(column)] = value
+        rows[row - 1][column] = value
     return study_edit(change)
 
 
 def drop_data_rows(rows):
-    del rows[1:]
+    del rows[:]
 
 
 def rename_first_column(rows):
-    rows[0][0] = 'filename'
+    rows[0]['filename'] = rows[0].pop('file')
 
 
 BROKEN_STUDIES = {
     'unparseable': (lambda study: (study / conv.SERIES_NAME).write_bytes(b'\xff\xfe\x00\x80'), 1),
     'empty file': (lambda study: (study / conv.SERIES_NAME).write_bytes(b''), 1),
-    'header only': (study_edit(drop_data_rows), 1),
-    'wrong columns': (study_edit(rename_first_column), 2),
-    'none cell': (study_edit(lambda rows: rows[1].pop()), 2),
+    'empty array': (study_edit(drop_data_rows), 1),
+    'wrong keys': (study_edit(rename_first_column), 2),
+    'missing key': (study_edit(lambda rows: rows[0].popitem()), 2),
     'kind': (set_cell(1, 'kind', 'ct'), 2),
     'modality': (set_cell(2, 'modality', 'RTDOSE'), 2),
     'bad name': (set_cell(1, 'file', 'weird.nii.gz'), 2),
@@ -267,21 +263,21 @@ def test_a_series_whose_header_cannot_be_read_is_refused_and_its_siblings_are_ke
     assert [r['case_dir'] for r in read(converted)] == [f'{PID}/plan_1', f'{PID}/study_1/series_CT_1', f'{PID}/study_2/series_MR_2']
 
 
-def test_an_unreadable_study_series_csv_is_one_refused_study_and_the_plan_row_is_kept(converted, monkeypatch):
-    real = man.read_series_csv
+def test_an_unreadable_study_series_json_is_one_refused_study_and_the_plan_row_is_kept(converted, monkeypatch):
+    real = man.read_series_json
 
     def flaky(folder):
         if folder.name == 'study_2':
             raise OSError('SYNTHETIC_PATH')
         return real(folder)
 
-    monkeypatch.setattr(man, 'read_series_csv', flaky)
+    monkeypatch.setattr(man, 'read_series_json', flaky)
     assert man.manifest(converted) == (2, 1)
     assert [r['case_dir'] for r in read(converted)] == [f'{PID}/plan_1', f'{PID}/study_1/series_CT_1']
 
 
-def test_a_study_whose_check_fails_after_series_csv_reads_counts_its_rows_from_that_single_read(converted, monkeypatch):
-    real_read, real_check, reads = man.read_series_csv, man.check_study_rows, []
+def test_a_study_whose_check_fails_after_series_json_reads_counts_its_rows_from_that_single_read(converted, monkeypatch):
+    real_read, real_check, reads = man.read_series_json, man.check_study_rows, []
 
     def counted(folder):
         reads.append(folder.name)
@@ -292,15 +288,15 @@ def test_a_study_whose_check_fails_after_series_csv_reads_counts_its_rows_from_t
             raise OSError('SYNTHETIC_PATH')
         return real_check(study, parsed)
 
-    monkeypatch.setattr(man, 'read_series_csv', counted)
+    monkeypatch.setattr(man, 'read_series_json', counted)
     monkeypatch.setattr(man, 'check_study_rows', flaky)
     assert man.manifest(converted) == (2, 2)  # study_2's two series rows
     assert reads.count('study_2') == 1
 
 
-def test_only_study_n_folders_with_a_series_csv_are_walked(converted):
+def test_only_study_n_folders_with_a_series_json_are_walked(converted):
     patient = converted / PID
-    (patient / 'study_3').mkdir()  # no series.csv: not a study, not a refusal
+    (patient / 'study_3').mkdir()  # no series.json: not a study, not a refusal
     for name in ('study_x', 'study_1b', '.study_0', 'images'):
         (patient / name).mkdir()
         (patient / name / conv.SERIES_NAME).write_bytes((patient / 'study_2' / conv.SERIES_NAME).read_bytes())
@@ -323,7 +319,7 @@ def test_the_log_and_exceptions_of_the_imaging_path_carry_counts_only(converted,
 
 def series_column(root, case='plan_1'):
     man.manifest(root)
-    return json.loads(next(r for r in read(root) if r['case_dir'].endswith(f'/{case}'))['series'])
+    return next(r for r in read(root) if r['case_dir'].endswith(f'/{case}'))['series']
 
 
 CT_GRID_SIZE = (12, 12, 12)  # write_plan's native CT grid
@@ -365,7 +361,7 @@ def test_ac11_a_translated_mr_with_the_ct_geometry_is_not_listed_but_an_identity
     assert series_column(tmp_path / 'converted') == [{'file': 'series_PT_1.nii.gz', 'modality': 'PT'}]
 
 
-def test_the_series_column_keeps_series_csv_order_and_skips_an_unreadable_header_without_refusing_the_plan(tmp_path):
+def test_the_series_column_keeps_series_json_order_and_skips_an_unreadable_header_without_refusing_the_plan(tmp_path):
     ones = np.ones(CT_GRID_SIZE)
     run_plan(tmp_path, [mr_spec(ones, 'identity', grid(12), file='series_PT_1.nii.gz', modality='PT'),
                         mr_spec(b'not a nifti', 'identity', file='series_MR_2.nii.gz'),
@@ -376,7 +372,7 @@ def test_the_series_column_keeps_series_csv_order_and_skips_an_unreadable_header
 
 def test_imaging_rows_hold_an_empty_series_list(converted):
     man.manifest(converted)
-    assert [r['series'] for r in read(converted)[1:]] == ['[]'] * 3
+    assert [r['series'] for r in read(converted)[1:]] == [[]] * 3
 
 
 # ---- AHE task-05: the ahe_ names go through series_id, so the manifest reads them for study series and aligned plan series (spec AC5) ----
@@ -388,8 +384,8 @@ def test_ac5_an_ahe_study_series_is_listed_under_its_series_id_with_its_ahe_file
     assert man.manifest(out) == (2, 0)
     rows = read(out)
     assert [(r['case_dir'], r['case_type'], r['modality'], r['image'], r['series']) for r in rows] == [
-        ('SYNTHETICPTA/study_1/series_CT_1', 'imaging', 'CT', AHE_STUDY_CT, '[]'),
-        ('SYNTHETICPTA/study_1/series_MR_1', 'imaging', 'MR', AHE_MR_OUT, '[]')]
+        ('SYNTHETICPTA/study_1/series_CT_1', 'imaging', 'CT', AHE_STUDY_CT, []),
+        ('SYNTHETICPTA/study_1/series_MR_1', 'imaging', 'MR', AHE_MR_OUT, [])]
     assert all((out / 'SYNTHETICPTA' / 'study_1' / r['image']).is_file() for r in rows)
 
 
@@ -419,9 +415,96 @@ def test_a_converted_tree_and_a_preprocessed_tree_both_pass_the_checks_and_the_m
         assert man.manifest(root) == (3, 0)
 
 
-def test_a_series_csv_header_matching_neither_column_list_is_malformed_and_left_out(tmp_path):
+def test_a_series_json_with_keys_matching_neither_list_is_malformed_and_left_out(tmp_path):
     root = tmp_path / 'converted'
     path, rows = write_plan(root)
-    conv.write_series_csv(rows, path / 'series.csv', [*conv.SERIES_COLUMNS, 'other'])
-    assert pre.read_series_csv(path)[1] is True
+    sf.write([row | {'other': ''} for row in rows], path / 'series.json')
+    assert pre.read_series_json(path)[1] is True
     assert man.manifest(root) == (0, 1)
+
+
+# ---------------------------------------------------------------- json-outputs task-01: legacy series.csv folders are counted refused
+
+def make_legacy(folder):
+    (folder / conv.SERIES_NAME).unlink()
+    (folder / pre.LEGACY_SERIES_NAME).write_text('file,kind\n', encoding='utf-8')
+
+
+def test_a_legacy_plan_and_a_legacy_study_count_one_refusal_each(converted):
+    patient = converted / PID
+    make_legacy(patient / 'plan_1')
+    make_legacy(patient / 'study_2')  # two series rows in the file it replaces: still 1, the CSV is never parsed
+    assert man.manifest(converted) == (1, 2)
+    assert [r['case_dir'] for r in read(converted)] == [f'{PID}/study_1/series_CT_1']
+
+
+def test_a_legacy_study_is_counted_without_reading_anything(converted, monkeypatch):
+    make_legacy(converted / PID / 'study_2')
+    monkeypatch.setattr(man, 'read_series_json', lambda *a: pytest.fail('series.json was read'))
+    assert man._study_rows(converted / PID, converted / PID / 'study_2') == ([], 1)
+
+
+def test_images_and_misc_files_with_a_series_csv_are_not_counted(converted):
+    for name in ('images', 'misc_files'):
+        (converted / PID / name).mkdir()
+        (converted / PID / name / pre.LEGACY_SERIES_NAME).write_text('file,kind\n', encoding='utf-8')
+    assert man.manifest(converted) == (4, 0)
+
+
+# ---------------------------------------------------------------- json-outputs task-02: manifest.jsonl
+
+def raw_lines(root, name='manifest.jsonl'):
+    """The file's bytes split on b'\\n' only, so a stray U+2028 would not be hidden by str.splitlines."""
+    data = (root / name).read_bytes()
+    assert data.endswith(b'\n') and b'\r' not in data
+    return data.decode('utf-8').split('\n')[:-1]
+
+
+def test_manifest_jsonl_has_one_ascii_json_object_per_line_in_column_order_with_native_lists(tmp_path):
+    root = tree(tmp_path / 'converted')
+    assert man.MANIFEST_NAME == 'manifest.jsonl' and man.manifest(root) == (3, 0)
+    lines = raw_lines(root)
+    assert len(lines) == 3 and all(line.isascii() for line in lines)
+    objs = [json.loads(line) for line in lines]
+    assert [list(o) for o in objs] == [COLUMNS] * 3 and lines == [json.dumps(o) for o in objs]
+    assert [o['case_dir'] for o in objs] == sorted(o['case_dir'] for o in objs)
+    assert objs[1] == dict(case_dir=f'{PATIENT_A}/plan_1', patient=PATIENT_A, fx='plan_1', ct_size='12;12;12', ct_spacing='1.0;1.0;1.0',
+                           dose='1', masks=['bladder', 'ptv'], rtplan_uid='SYNTHETICRTPLANA1', ct_series_uid='SYNTHETICCTA1',
+                           study_uid='SYNTHETICSTUDYA1', case_type='plan', modality='CT', image='', series=[])
+    assert all(isinstance(o[k], str) for o in objs for k in COLUMNS if k not in ('masks', 'series'))
+
+
+def test_fov_mask_is_on_every_line_when_any_case_has_one_and_on_none_otherwise(tmp_path):
+    root = tree(tmp_path / 'converted')
+    man.manifest(root)
+    assert all('fov_mask' not in json.loads(line) for line in raw_lines(root))
+    plan_dir = root / PATIENT_A / 'plan_1'
+    shutil.copyfile(plan_dir / conv.CT_NAME, plan_dir / f'fovmask_{conv.CT_NAME}')  # a mask on the CT grid
+    man.manifest(root)
+    objs = [json.loads(line) for line in raw_lines(root)]
+    assert [list(o) for o in objs] == [[*COLUMNS, 'fov_mask']] * 3
+    assert {o['case_dir']: o['fov_mask'] for o in objs} == {f'{PATIENT_B}/fx_1': '', f'{PATIENT_A}/plan_1': f'fovmask_{conv.CT_NAME}',
+                                                              f'{PATIENT_A}/plan_2': ''}
+
+
+def test_a_root_without_cases_gets_a_zero_byte_manifest_and_a_dated_copy(tmp_path):
+    root = tmp_path / 'empty'
+    root.mkdir()
+    assert man.manifest(root) == (0, 0)
+    names = sorted(p.name for p in root.iterdir())
+    assert len(names) == 2 and names[0] == 'manifest.jsonl' and re.fullmatch(r'manifest_\d{8}T\d{6}Z\.jsonl', names[1])
+    assert all((root / name).stat().st_size == 0 for name in names)
+
+
+def test_an_roi_name_with_u2028_stays_on_its_line_and_splits(tmp_path):
+    root = tmp_path / 'converted'
+    name = 'ptv boost'
+    plan(root, PATIENT_A, 'plan_1', 'A1', masks={name: box((4, 4, 4), (8, 8, 8))})
+    plan(root, PATIENT_B, 'plan_1', 'B1')
+    assert man.manifest(root) == (2, 0)
+    data = (root / 'manifest.jsonl').read_bytes()
+    assert ' '.encode() not in data and b'\\u2028' in data
+    assert len(data.decode('utf-8').splitlines()) == 2
+    assert [json.loads(line)['masks'] for line in raw_lines(root)] == [['bladder', 'ptv'], [name]]  # B first: 'P' sorts before '_'
+    obj = sp.split(root / 'manifest.jsonl', test_size=0.0, val_size=0.0, seed=0)
+    assert sorted(obj['train']) == [PATIENT_B, PATIENT_A]

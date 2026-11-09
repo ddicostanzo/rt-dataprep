@@ -4,6 +4,7 @@ import csv
 import dataclasses
 import errno
 import inspect
+import json
 import logging
 import os
 import re
@@ -13,6 +14,7 @@ import weakref
 
 import numpy as np
 import pytest
+import series_files as sf
 import SimpleITK as sitk
 from test_dicom_io import fail_python_open
 
@@ -374,7 +376,7 @@ def series_row(file, kind, **extra):
 
 
 def write_plan(root, patient='SYNTHETICPTA', plan='plan_1', n=12, spacing=1.0, dose=DEFAULT_DOSE, masks=None, applicator=True, direction=(1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0)):
-    """<root>/<patient>/<plan>/ as F2a writes it. Returns (folder, series.csv rows)."""
+    """<root>/<patient>/<plan>/ as F2a writes it. Returns (folder, series.json rows)."""
     masks = DEFAULT_MASKS if masks is None else masks
     geometry = dict(grid(n, spacing), direction=direction)
     folder = root / patient / plan
@@ -396,7 +398,7 @@ def write_plan(root, patient='SYNTHETICPTA', plan='plan_1', n=12, spacing=1.0, d
 
 
 def save_rows(folder, rows):
-    conv.write_series_csv(rows, folder / conv.SERIES_NAME)
+    sf.write(rows, folder / conv.SERIES_NAME)
 
 
 def state(root):
@@ -424,8 +426,7 @@ def test_a_line_file_is_copied_unchanged_under_its_own_name(tmp_path):
     assert plan_row(report).outcome == 'preprocessed'
     done = out / 'SYNTHETICPTA' / 'plan_1'
     assert (done / 'refline.nii.gz').read_bytes() == APPLICATOR_BYTES
-    with open(done / 'series.csv', newline='') as f:
-        assert [(r['kind'], r['retained']) for r in csv.DictReader(f) if r['file'] == 'refline.nii.gz'] == [('line', '')]  # a geometric run leaves a line's retained blank
+    assert [(r['kind'], r['retained']) for r in sf.read(done) if r['file'] == 'refline.nii.gz'] == [('line', '')]  # a geometric run leaves a line's retained blank
 
 
 def test_four_steps_write_the_prefixed_files_and_leave_the_input_alone(tmp_path):
@@ -434,7 +435,7 @@ def test_four_steps_write_the_prefixed_files_and_leave_the_input_alone(tmp_path)
     before = state(converted)
     report = pre.preprocess(converted, out, SMALL)
     assert isinstance(report, pre.PreprocessReport)
-    expected = [CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt', 'series.csv']
+    expected = [CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt', 'series.json']
     row = plan_row(report)
     assert (row.outcome, row.reason, row.files) == ('preprocessed', '', expected) and len(report.rows) == 1
     assert sorted(p.name for p in (out / 'SYNTHETICPTA' / 'plan_1').iterdir()) == sorted(expected)
@@ -459,22 +460,21 @@ def test_rescale_only_renames_the_ct_and_copies_dose_and_masks_byte_equal(tmp_pa
     steps = PreprocessSteps(rescale=True, legacy_linear_masks=True)  # linear masks have no effect without a geometric step
     report = pre.preprocess(converted, out, steps)
     done = out / 'SYNTHETICPTA' / 'plan_1'
-    assert plan_row(report).files == ['rescale_planning_ct.nii.gz', 'dose.nii.gz', 'ptv.nii.gz', 'bladder.nii.gz', 'applicator_a.txt', 'series.csv']
+    assert plan_row(report).files == ['rescale_planning_ct.nii.gz', 'dose.nii.gz', 'ptv.nii.gz', 'bladder.nii.gz', 'applicator_a.txt', 'series.json']
     for name in ('dose.nii.gz', 'ptv.nii.gz', 'bladder.nii.gz', 'applicator_a.txt'):
         assert (done / name).read_bytes() == (folder / name).read_bytes()
     hu = sitk.GetArrayFromImage(sitk.ReadImage(str(folder / conv.CT_NAME)))
     assert np.abs(sitk.GetArrayFromImage(sitk.ReadImage(str(done / 'rescale_planning_ct.nii.gz'))) - (hu + 1024) / 4096).max() < 1e-6
 
 
-def test_series_csv_keeps_every_column_and_renames_files_and_lists_the_aligned_series_last(tmp_path):
+def test_series_json_keeps_every_column_and_renames_files_and_lists_the_aligned_series_last(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     folder, rows = write_plan(converted)
     sitk.WriteImage(make_image(np.ones((4, 4, 4))), str(folder / 'series_MR_1.nii.gz'))  # present, as check_rows now requires (task-02)
     series = series_row('series_MR_1.nii.gz', 'series', modality='MR', reg_matrix='identity')  # an empty matrix would leave it out
     save_rows(folder, [*rows[:2], series, *rows[2:]])
     pre.preprocess(converted, out, SMALL)
-    with open(out / 'SYNTHETICPTA' / 'plan_1' / 'series.csv', newline='') as handle:
-        written = list(csv.DictReader(handle))
+    written = sf.read(out / 'SYNTHETICPTA' / 'plan_1')
     names = [CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt', pre.output_name('series_MR_1.nii.gz', SMALL)]
     assert [r['file'] for r in written] == names
     assert [{k: v for k, v in r.items() if k != 'file'} for r in written] == [{k: v for k, v in r.items() if k != 'file'} | {'retained': '1.0' if r['kind'] in ('dose', 'mask') else ''} for r in [*rows, series]]  # SMALL cuts nothing
@@ -535,24 +535,24 @@ def test_check_rows_reads_no_series_header(tmp_path):
     assert len(pre.check_rows(folder)[2]) == 1
 
 
-def test_the_study_reasons_say_a_series_csv_series_row():
+def test_the_study_reasons_say_a_series_json_series_row():
     for reason in (pre.REASON_STUDY_MODALITY, pre.REASON_STUDY_NAME):
-        assert 'series.csv series row' in reason and 'study' not in reason
+        assert 'series.json series row' in reason and 'study' not in reason
 
 
 def test_a_plan_without_a_dose_writes_no_dose(tmp_path):
     write_plan(tmp_path / 'converted', dose=None, applicator=False)
     report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', SMALL)
-    assert plan_row(report).files == [CT_FILE, PTV_FILE, BLADDER_FILE, 'series.csv']
+    assert plan_row(report).files == [CT_FILE, PTV_FILE, BLADDER_FILE, 'series.json']
 
 
-def test_the_walk_skips_images_hidden_and_folders_without_a_series_csv(tmp_path):
+def test_the_walk_skips_images_hidden_and_folders_without_a_series_json(tmp_path):
     converted = tmp_path / 'converted'
     write_plan(converted, plan='plan_2')
     write_plan(converted, plan='plan_10')
     write_plan(converted, patient='.hidden')
     (converted / 'SYNTHETICPTA' / 'images').mkdir()
-    (converted / 'SYNTHETICPTA' / 'images' / 'series.csv').write_text('file,kind\n')
+    (converted / 'SYNTHETICPTA' / 'images' / 'series.json').write_text('[]')
     (converted / 'SYNTHETICPTA' / 'plan_3').mkdir()
     report = pre.preprocess(converted, tmp_path / 'out', SMALL)
     assert [(r.patient, r.folder, r.outcome) for r in report.rows] == [
@@ -626,7 +626,7 @@ def test_an_existing_patient_is_skipped_and_a_rerun_skips_everything(tmp_path):
     assert [(r.folder, r.outcome, r.reason) for r in again.rows] == [('', 'skipped', pre.REASON_EXISTS)] * 2
 
 
-def test_a_patient_without_a_plan_folder_with_a_series_csv_is_skipped_and_writes_nothing(tmp_path):
+def test_a_patient_without_a_plan_folder_with_a_series_json_is_skipped_and_writes_nothing(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     (converted / 'SYNTHETICPTA' / 'images').mkdir(parents=True)
     (converted / 'SYNTHETICPTA' / 'plan_1').mkdir()
@@ -668,24 +668,8 @@ def test_an_unreadable_nifti_refuses_for_every_nifti_kind(tmp_path):
 
 
 
-def rewrite_csv(folder, change):
-    path = folder / 'series.csv'
-    path.write_text(change(path.read_text()))
-
-
-SERIES_CSV_BREAKS = {
-    'missing column': lambda folder, rows: rewrite_csv(folder, lambda text: text.replace('file,kind,', 'file,', 1)),
-    'extra column': lambda folder, rows: rewrite_csv(folder, lambda text: text.replace('\n', ',extra\n', 1)),
-    'long row': lambda folder, rows: rewrite_csv(folder, lambda text: text.rstrip('\n') + ',extra\n'),
-    'short row': lambda folder, rows: rewrite_csv(folder, lambda text: text + 'ptv.nii.gz,mask\n'),
-    'not utf-8': lambda folder, rows: (folder / 'series.csv').write_bytes((folder / 'series.csv').read_bytes() + b'\xff\xfe,mask\n'),
-    'one file twice': lambda folder, rows: save_rows(folder, [*rows, rows[-1]]),
-}
-
-
-@pytest.mark.parametrize('what', list(SERIES_CSV_BREAKS))
-def test_a_malformed_series_csv_refuses_the_plan_only(tmp_path, what):
-    refuse(tmp_path, pre.REASON_SERIES_CSV, SERIES_CSV_BREAKS[what])
+def test_a_series_json_naming_one_file_twice_refuses_the_plan_only(tmp_path):
+    refuse(tmp_path, pre.REASON_SERIES_CSV, lambda folder, rows: save_rows(folder, [*rows, rows[-1]]))
 
 
 def test_a_ct_shorter_than_one_output_voxel_refuses_the_plan_only(tmp_path):
@@ -706,7 +690,7 @@ def test_a_ct_that_only_harmonize_spacing_would_empty_refuses(tmp_path, resample
     assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_TOO_SMALL)
 
 
-def test_the_ct_is_processed_first_whatever_its_series_csv_row(tmp_path):
+def test_the_ct_is_processed_first_whatever_its_series_json_row(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     folder, rows = write_plan(converted)
     save_rows(folder, [*rows[1:], rows[0]])
@@ -1136,16 +1120,16 @@ def test_ctrl_c_still_writes_the_report_of_what_was_done(tmp_path, monkeypatch):
     assert [(r['patient'], r['outcome']) for r in report_rows(out)] == [('SYNTHETICPTA', 'preprocessed')]
 
 
-# ---- task-03: the study series.csv validator (headers are not read; files may be empty placeholders). ----
+# ---- task-03: the study series.json validator (headers are not read; files may be empty placeholders). ----
 
 def study_row(file, modality='MR', kind='series'):
     return {**dict.fromkeys(conv.SERIES_COLUMNS, ''), 'file': file, 'kind': kind, 'modality': modality}
 
 
 def write_study(folder, rows, *, files=None):
-    """A study folder holding series.csv for `rows` and an empty placeholder per file (default: every row's)."""
+    """A study folder holding series.json for `rows` and an empty placeholder per file (default: every row's)."""
     folder.mkdir(parents=True, exist_ok=True)
-    conv.write_series_csv(rows, folder / conv.SERIES_NAME)
+    sf.write(rows, folder / conv.SERIES_NAME)
     for name in (files if files is not None else [r['file'] for r in rows]):
         (folder / name).write_bytes(b'')
     return folder
@@ -1183,28 +1167,27 @@ def test_series_id_is_group_five_of_a_full_match():
 
 @pytest.mark.parametrize('reason, make', [
     (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_bytes(b'\xff\xfe\x00bad')),
-    (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_text('file,kind\nseries_MR_1.nii.gz,series\n', encoding='utf-8')),
-    (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_text(','.join(conv.SERIES_COLUMNS) + '\nseries_MR_1.nii.gz,series,MR' + ',' * 20 + '\n',
-                                                                       encoding='utf-8')),
-    (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_text(','.join(conv.SERIES_COLUMNS) + '\n', encoding='utf-8')),
+    (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_text('[{"file": "series_MR_1.nii.gz", "kind": "series"}]', encoding='utf-8')),
+    (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_text(json.dumps([study_row('series_MR_1.nii.gz') | {'extra': ''}]), encoding='utf-8')),
+    (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_text('[]', encoding='utf-8')),
     (pre.REASON_SERIES_CSV, lambda f: (f / conv.SERIES_NAME).write_text('', encoding='utf-8')),
-    (pre.REASON_SERIES_CSV, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz')] * 2, f / conv.SERIES_NAME)),
-    (pre.REASON_SERIES_CSV, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz'), study_row('resample_series_MR_1.nii.gz')],
+    (pre.REASON_SERIES_CSV, lambda f: sf.write([study_row('series_MR_1.nii.gz')] * 2, f / conv.SERIES_NAME)),
+    (pre.REASON_SERIES_CSV, lambda f: sf.write([study_row('series_MR_1.nii.gz'), study_row('resample_series_MR_1.nii.gz')],
                                                            f / conv.SERIES_NAME)),
-    (pre.REASON_KIND, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz'), study_row('series_MR_2.nii.gz', kind='ct')],
+    (pre.REASON_KIND, lambda f: sf.write([study_row('series_MR_1.nii.gz'), study_row('series_MR_2.nii.gz', kind='ct')],
                                                       f / conv.SERIES_NAME)),
-    (pre.REASON_KIND, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz', kind='')], f / conv.SERIES_NAME)),
-    (pre.REASON_STUDY_MODALITY, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz', 'RTDOSE')], f / conv.SERIES_NAME)),
-    (pre.REASON_STUDY_MODALITY, lambda f: conv.write_series_csv([study_row('series_MR_1.nii.gz', 'mr')], f / conv.SERIES_NAME)),
-    (pre.REASON_STUDY_MODALITY, lambda f: conv.write_series_csv([study_row('series_CT_1.nii.gz', 'MR')], f / conv.SERIES_NAME)),
-    (pre.REASON_STUDY_NAME, lambda f: conv.write_series_csv([study_row('series_MR_\u0661.nii.gz')], f / conv.SERIES_NAME)),  # an Arabic-Indic digit
-    (pre.REASON_STUDY_NAME, lambda f: conv.write_series_csv([study_row('planning_ct.nii.gz')], f / conv.SERIES_NAME)),
-    (pre.REASON_STUDY_NAME, lambda f: conv.write_series_csv([study_row('series_MR_1.nii')], f / conv.SERIES_NAME)),
-    (pre.REASON_STUDY_NAME, lambda f: conv.write_series_csv([study_row('../series_MR_1.nii.gz')], f / conv.SERIES_NAME)),
+    (pre.REASON_KIND, lambda f: sf.write([study_row('series_MR_1.nii.gz', kind='')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_MODALITY, lambda f: sf.write([study_row('series_MR_1.nii.gz', 'RTDOSE')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_MODALITY, lambda f: sf.write([study_row('series_MR_1.nii.gz', 'mr')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_MODALITY, lambda f: sf.write([study_row('series_CT_1.nii.gz', 'MR')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_NAME, lambda f: sf.write([study_row('series_MR_\u0661.nii.gz')], f / conv.SERIES_NAME)),  # an Arabic-Indic digit
+    (pre.REASON_STUDY_NAME, lambda f: sf.write([study_row('planning_ct.nii.gz')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_NAME, lambda f: sf.write([study_row('series_MR_1.nii')], f / conv.SERIES_NAME)),
+    (pre.REASON_STUDY_NAME, lambda f: sf.write([study_row('../series_MR_1.nii.gz')], f / conv.SERIES_NAME)),
     (pre.REASON_FILE_MISSING, lambda f: (f / 'series_MR_1.nii.gz').unlink()),
     (pre.REASON_FILE_MISSING, lambda f: ((f / 'series_MR_1.nii.gz').unlink(), (f / 'series_MR_1.nii.gz').symlink_to(f / conv.SERIES_NAME))),
     (pre.REASON_FILE_MISSING, lambda f: ((f / 'series_MR_1.nii.gz').unlink(), (f / 'series_MR_1.nii.gz').mkdir())),
-], ids=['encoding', 'columns', 'long-row', 'zero-rows', 'empty-file', 'duplicate-file', 'duplicate-id', 'kind-ct', 'kind-blank',
+], ids=['encoding', 'keys', 'extra-key', 'zero-rows', 'empty-file', 'duplicate-file', 'duplicate-id', 'kind-ct', 'kind-blank',
         'modality-rtdose', 'modality-case', 'modality-vs-name', 'name-digit', 'name-other', 'name-suffix', 'name-separator', 'missing', 'symlink', 'directory'])
 def test_check_study_rows_refuses(tmp_path, reason, make):
     folder = write_study(tmp_path / 'study_1', [study_row('series_MR_1.nii.gz')])
@@ -1219,24 +1202,24 @@ def test_study_reasons_are_distinct_fixed_strings():
 
 
 @pytest.mark.parametrize('text, expected', [
-    (','.join(conv.SERIES_COLUMNS) + '\n' + 'a,series\n' * 3, 3),  # short rows still count: the validator refuses them whole
-    (','.join(conv.SERIES_COLUMNS) + '\n', 1),
+    ('[{"file": "a"}, {"file": "a"}, {"file": "a"}]', 3),  # short items still count: the validator refuses them whole
+    ('[]', 1),
     ('', 1),
-    ('file,kind\nseries_MR_1.nii.gz,series\nseries_MR_2.nii.gz,series\n', 2),  # wrong columns: rows are still the series
+    ('[{"file": "series_MR_1.nii.gz"}, {"file": "series_MR_2.nii.gz"}]', 2),  # wrong keys: items are still the series
 ])
 def test_study_refusal_count(tmp_path, text, expected):
     (tmp_path / conv.SERIES_NAME).write_text(text, encoding='utf-8')
-    assert pre.study_refusal_count(pre.read_series_csv(tmp_path)[0]) == expected
+    assert pre.study_refusal_count(pre.read_series_json(tmp_path)[0]) == expected
 
 
 def test_study_refusal_count_of_an_unparseable_file_is_one(tmp_path):
-    (tmp_path / conv.SERIES_NAME).write_bytes(b'file,kind\n\xff\xfe,series\nseries_MR_2.nii.gz,series\n')
-    assert pre.study_refusal_count(pre.read_series_csv(tmp_path)[0]) == 1
+    (tmp_path / conv.SERIES_NAME).write_bytes(b'[{"file": "a"}, {"file": "\xff\xfe"}]')
+    assert pre.study_refusal_count(pre.read_series_json(tmp_path)[0]) == 1
 
 
 def test_study_refusal_count_of_a_valid_study(tmp_path):
     rows = [study_row(f'series_MR_{k}.nii.gz') for k in (1, 2, 3, 4)]
-    assert pre.study_refusal_count(pre.read_series_csv(write_study(tmp_path / 'study_1', rows))[0]) == 4
+    assert pre.study_refusal_count(pre.read_series_json(write_study(tmp_path / 'study_1', rows))[0]) == 4
 
 
 def test_check_study_rows_logs_nothing_with_identifiers(tmp_path, caplog):
@@ -1255,7 +1238,7 @@ STUDY_MR = 'reshape_resample_initialresample_series_MR_1.nii.gz'  # no rescale p
 
 
 def write_study_tree(root, patient='SYNTHETICPTA', study='study_1', series=(('CT', 1), ('MR', 1)), n=8, spacing=1.0):
-    """<root>/<patient>/<study>/ as convert writes it: series_<MOD>_<k>.nii.gz (a ramp on a constant) and series.csv. Returns the folder."""
+    """<root>/<patient>/<study>/ as convert writes it: series_<MOD>_<k>.nii.gz (a ramp on a constant) and series.json. Returns the folder."""
     folder = root / patient / study
     folder.mkdir(parents=True)
     rows = []
@@ -1278,12 +1261,12 @@ def test_a_study_ct_gets_the_ct_prefixes_and_mr_and_pt_the_geometric_ones(tmp_pa
     report = pre.preprocess(converted, out, SMALL)
     names = [STUDY_CT, STUDY_MR, STUDY_MR.replace('MR_1', 'MR_2'), STUDY_MR.replace('MR_1', 'PT_1')]
     assert imaging_rows(report) == [
-        ('study_1/series_CT_1', 'preprocessed', '', [names[0], 'series.csv']),
+        ('study_1/series_CT_1', 'preprocessed', '', [names[0], 'series.json']),
         ('study_1/series_MR_1', 'preprocessed', '', [names[1]]),
         ('study_1/series_MR_2', 'preprocessed', '', [names[2]]),
         ('study_1/series_PT_1', 'preprocessed', '', [names[3]])]
     study = out / 'SYNTHETICPTA' / 'study_1'
-    assert sorted(p.name for p in study.iterdir()) == sorted([*names, 'series.csv'])
+    assert sorted(p.name for p in study.iterdir()) == sorted([*names, 'series.json'])
     assert [r['file'] for r in conv_rows(study)] == names
     assert {r['kind'] for r in conv_rows(study)} == {'series'} and conv_rows(study)[0]['series_instance_uid'] == 'SYNTHETICUIDCT1'
     assert all(sitk.ReadImage(str(study / name)).GetSize() == (10, 10, 10) for name in names)
@@ -1291,8 +1274,7 @@ def test_a_study_ct_gets_the_ct_prefixes_and_mr_and_pt_the_geometric_ones(tmp_pa
 
 
 def conv_rows(folder):
-    with open(folder / 'series.csv', newline='', encoding='utf-8') as handle:
-        return list(csv.DictReader(handle))
+    return sf.read(folder)
 
 
 def test_mr_and_pt_intensities_are_not_rescaled_and_ct_is(tmp_path):
@@ -1302,7 +1284,7 @@ def test_mr_and_pt_intensities_are_not_rescaled_and_ct_is(tmp_path):
     pre.preprocess(converted, out, steps)
     study = out / 'SYNTHETICPTA' / 'study_1'
     assert sorted(p.name for p in study.iterdir()) == ['initialresample_series_MR_1.nii.gz', 'initialresample_series_PT_1.nii.gz',
-                                                       'rescale_initialresample_series_CT_1.nii.gz', 'series.csv']
+                                                       'rescale_initialresample_series_CT_1.nii.gz', 'series.json']
     for modality in ('MR', 'PT'):
         got = sitk.GetArrayFromImage(sitk.ReadImage(str(study / f'initialresample_series_{modality}_1.nii.gz')))
         native = sitk.GetArrayFromImage(sitk.ReadImage(str(converted / 'SYNTHETICPTA' / 'study_1' / f'series_{modality}_1.nii.gz')))
@@ -1316,10 +1298,10 @@ def test_rescale_alone_refuses_an_mr_and_still_preprocesses_a_ct(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     write_study_tree(converted)
     report = pre.preprocess(converted, out, PreprocessSteps(rescale=True))
-    assert imaging_rows(report) == [('study_1/series_CT_1', 'preprocessed', '', ['rescale_series_CT_1.nii.gz', 'series.csv']),
+    assert imaging_rows(report) == [('study_1/series_CT_1', 'preprocessed', '', ['rescale_series_CT_1.nii.gz', 'series.json']),
                                     ('study_1/series_MR_1', 'refused', pre.REASON_NO_SERIES_STEPS, [])]
     study = out / 'SYNTHETICPTA' / 'study_1'
-    assert sorted(p.name for p in study.iterdir()) == ['rescale_series_CT_1.nii.gz', 'series.csv']  # no MR file, whatever its name
+    assert sorted(p.name for p in study.iterdir()) == ['rescale_series_CT_1.nii.gz', 'series.json']  # no MR file, whatever its name
     assert [r['file'] for r in conv_rows(study)] == ['rescale_series_CT_1.nii.gz']
 
 
@@ -1337,12 +1319,12 @@ def test_a_too_small_and_an_unreadable_series_are_refused_on_their_own_rows(tmp_
     report = pre.preprocess(converted, out, SMALL)
     pt = STUDY_MR.replace('MR_1', 'PT_1')
     assert imaging_rows(report) == [
-        ('study_1/series_CT_1', 'preprocessed', '', [STUDY_CT, 'series.csv']),
+        ('study_1/series_CT_1', 'preprocessed', '', [STUDY_CT, 'series.json']),
         ('study_1/series_MR_1', 'refused', pre.REASON_TOO_SMALL, []),
         ('study_1/series_MR_2', 'refused', pre.REASON_FILE_UNREADABLE, []),
         ('study_1/series_PT_1', 'preprocessed', '', [pt])]
     study = out / 'SYNTHETICPTA' / 'study_1'
-    assert sorted(p.name for p in study.iterdir()) == sorted([STUDY_CT, pt, 'series.csv'])  # no MR file, no leftover temp file
+    assert sorted(p.name for p in study.iterdir()) == sorted([STUDY_CT, pt, 'series.json'])  # no MR file, no leftover temp file
     assert [r['file'] for r in conv_rows(study)] == [STUDY_CT, pt]
 
 
@@ -1421,7 +1403,7 @@ def test_a_study_refused_by_check_study_rows_is_one_row_and_writes_nothing(tmp_p
     write_study_tree(converted, study='study_2', series=(('PT', 1),))
     report = pre.preprocess(converted, out, SMALL)
     assert imaging_rows(report) == [
-        ('study_1', 'refused', pre.REASON_FILE_MISSING, []), ('study_2/series_PT_1', 'preprocessed', '', [STUDY_MR.replace('MR_1', 'PT_1'), 'series.csv'])]
+        ('study_1', 'refused', pre.REASON_FILE_MISSING, []), ('study_2/series_PT_1', 'preprocessed', '', [STUDY_MR.replace('MR_1', 'PT_1'), 'series.json'])]
     assert sorted(p.name for p in (out / 'SYNTHETICPTA').iterdir()) == ['study_2']
 
 
@@ -1430,7 +1412,7 @@ def test_plans_come_first_and_studies_follow_in_numeric_order(tmp_path):
     write_study_tree(converted, study='study_10', series=(('MR', 1),))
     write_study_tree(converted, study='study_2', series=(('MR', 1),))
     write_plan(converted)
-    (converted / 'SYNTHETICPTA' / 'study_3').mkdir()  # no series.csv
+    (converted / 'SYNTHETICPTA' / 'study_3').mkdir()  # no series.json
     (converted / 'SYNTHETICPTA' / 'study_x').mkdir()
     (converted / 'SYNTHETICPTA' / '.study_0').mkdir()
     (converted / 'SYNTHETICPTA' / 'images').mkdir()
@@ -1443,7 +1425,7 @@ def test_plans_come_first_and_studies_follow_in_numeric_order(tmp_path):
 
 def test_a_patient_with_neither_plans_nor_studies_is_skipped_with_no_cases(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
-    (converted / 'SYNTHETICPTA' / 'study_1').mkdir(parents=True)  # no series.csv
+    (converted / 'SYNTHETICPTA' / 'study_1').mkdir(parents=True)  # no series.json
     report = pre.preprocess(converted, out, SMALL)
     assert [(r.folder, r.outcome, r.reason) for r in report.rows] == [('', 'skipped', pre.REASON_NO_CASES)]
     assert listing(out) == ['preprocess_report.csv']
@@ -1530,8 +1512,7 @@ def test_manifest_lists_the_same_cases_on_the_converted_and_the_preprocessed_tre
     assert man.manifest(converted) == (4, 0) and man.manifest(out) == (4, 0)
 
     def read(root):
-        with open(root / 'manifest.csv', newline='') as handle:
-            return list(csv.DictReader(handle))
+        return [json.loads(line) for line in (root / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]
     before, after = read(converted), read(out)
     assert [r['case_dir'] for r in after] == [r['case_dir'] for r in before]
     assert [r['case_dir'].split('/', 1)[1] for r in after] == ['plan_1', 'study_1/series_CT_1', 'study_2/series_MR_1', 'study_2/series_MR_2']
@@ -1581,7 +1562,7 @@ def landmark(size, index, value=100.0):
 
 
 def run_plan(tmp_path, specs, steps=SMALL, **plan):
-    """write_plan (with `plan`) plus the series of `specs` ((file, modality, array or raw bytes or None, reg_matrix text, geometry), in series.csv order);
+    """write_plan (with `plan`) plus the series of `specs` ((file, modality, array or raw bytes or None, reg_matrix text, geometry), in series.json order);
     preprocessed. Returns (report, output plan folder, converted plan folder)."""
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     folder, rows = write_plan(converted, **plan)
@@ -1630,7 +1611,7 @@ def read_out(folder, name=MR_OUT):
 
 def test_ac1_a_registered_mr_is_written_on_exactly_the_final_ct_grid_and_listed_after_the_existing_rows(tmp_path):
     report, done, _ = run_plan(tmp_path, [mr_spec(landmark(MR_SIZE, (3, 4, 2)), rigid(0, (1.25, 0, 0)))])
-    assert plan_row(report).outcome == 'preprocessed' and plan_row(report).files == [*BASE_FILES, MR_OUT, 'series.csv']
+    assert plan_row(report).outcome == 'preprocessed' and plan_row(report).files == [*BASE_FILES, MR_OUT, 'series.json']
     image, ct = read_out(done), read_out(done, CT_FILE)
     assert (image.GetSize(), image.GetOrigin(), image.GetSpacing(), image.GetDirection()) == (ct.GetSize(), ct.GetOrigin(), ct.GetSpacing(), ct.GetDirection())
     assert image.GetPixelID() == sitk.sitkFloat32
@@ -1727,7 +1708,7 @@ def test_ac4_a_registered_ct_is_rescaled_before_the_resample_and_gets_the_rescal
 def test_ac5_an_unusable_matrix_leaves_the_series_out_and_counts_it(tmp_path, text):
     report, done, _ = run_plan(tmp_path, [mr_spec(np.ones((4, 4, 4)), text)])
     assert (plan_row(report).outcome, plan_row(report).skipped_series) == ('preprocessed', 1)
-    assert plan_row(report).files == [*BASE_FILES, 'series.csv'] and sorted(p.name for p in done.iterdir()) == sorted(plan_row(report).files)
+    assert plan_row(report).files == [*BASE_FILES, 'series.json'] and sorted(p.name for p in done.iterdir()) == sorted(plan_row(report).files)
     assert [r['file'] for r in conv_rows(done)] == BASE_FILES
 
 
@@ -1735,7 +1716,7 @@ def test_ac6_a_series_entirely_outside_the_ct_is_left_out_and_one_partly_outside
     ones = np.ones((8, 8, 8))
     report, done, _ = run_plan(tmp_path, [mr_spec(ones, rigid(0, (500, 0, 0))), mr_spec(ones, rigid(0, (4, 0, 0)), file='series_MR_2.nii.gz')])
     kept = pre.output_name('series_MR_2.nii.gz', SMALL)
-    assert plan_row(report).skipped_series == 1 and plan_row(report).files == [*BASE_FILES, kept, 'series.csv']
+    assert plan_row(report).skipped_series == 1 and plan_row(report).files == [*BASE_FILES, kept, 'series.json']
     values = sitk.GetArrayFromImage(read_out(done, kept))
     interior, outside = coverage(read_out(done, kept), MR_GRID, (8, 8, 8), rigid(0, (4, 0, 0)))  # asserts both are nonempty: partial coverage
     assert np.abs(values[interior] - 1.0).max() < 1e-4 and (values[outside] == 0).all() and [r['file'] for r in conv_rows(done)][-1] == kept
@@ -1749,7 +1730,7 @@ def test_a_series_whose_nonzero_voxels_all_miss_the_ct_is_kept_when_its_fov_over
         ends.append(end)
     report, done, _ = run_plan(tmp_path, [mr_spec(ends[0], rigid(0, (4, 0, 0))), mr_spec(ends[1], rigid(0, (4, 0, 0)), file='series_MR_2.nii.gz')])
     assert plan_row(report).skipped_series == 0
-    assert plan_row(report).files == [*BASE_FILES, MR_OUT, pre.output_name('series_MR_2.nii.gz', SMALL), 'series.csv']
+    assert plan_row(report).files == [*BASE_FILES, MR_OUT, pre.output_name('series_MR_2.nii.gz', SMALL), 'series.json']
     assert sorted(not sitk.GetArrayFromImage(read_out(done, name)).any() for name in (MR_OUT, pre.output_name('series_MR_2.nii.gz', SMALL))) == [False, True]  # a copy: a view of a temporary image reads freed memory
 
 
@@ -1757,7 +1738,7 @@ def test_an_all_zero_series_is_left_out_by_where_it_sits_not_its_values(tmp_path
     zeros = np.zeros((8, 8, 8))
     report, done, _ = run_plan(tmp_path, [mr_spec(zeros, rigid(0, (500, 0, 0))), mr_spec(zeros, rigid(0, (4, 0, 0)), file='series_MR_2.nii.gz')])
     kept = pre.output_name('series_MR_2.nii.gz', SMALL)
-    assert plan_row(report).skipped_series == 1 and plan_row(report).files == [*BASE_FILES, kept, 'series.csv']
+    assert plan_row(report).skipped_series == 1 and plan_row(report).files == [*BASE_FILES, kept, 'series.json']
     assert not sitk.GetArrayFromImage(read_out(done, kept)).any()
 
 
@@ -1784,13 +1765,13 @@ def test_a_series_that_is_not_a_3d_scalar_volume_is_left_out_and_counted(tmp_pat
     sitk.WriteImage(image(), str(path))
     report, done, _ = run_plan(tmp_path, [mr_spec(path.read_bytes(), 'identity')])
     assert (plan_row(report).outcome, plan_row(report).skipped_series) == ('preprocessed', 1)
-    assert plan_row(report).files == [*BASE_FILES, 'series.csv'] and not (done / MR_OUT).exists()
+    assert plan_row(report).files == [*BASE_FILES, 'series.json'] and not (done / MR_OUT).exists()
 
 
 def test_ac7_an_unreadable_series_file_is_left_out_and_counted(tmp_path):
     report, done, _ = run_plan(tmp_path, [mr_spec(b'SYNTHETIC not a nifti', 'identity')])
     assert (plan_row(report).outcome, plan_row(report).skipped_series) == ('preprocessed', 1)
-    assert plan_row(report).files == [*BASE_FILES, 'series.csv'] and not (done / MR_OUT).exists()
+    assert plan_row(report).files == [*BASE_FILES, 'series.json'] and not (done / MR_OUT).exists()
 
 
 def test_ac7_an_internal_error_while_resampling_a_series_still_stops_the_run(tmp_path, monkeypatch):
@@ -1809,7 +1790,7 @@ def test_ac7_an_internal_error_while_resampling_a_series_still_stops_the_run(tmp
 def test_ac9_rescale_only_resamples_an_mr_onto_the_native_ct_grid_and_keeps_its_name(tmp_path):
     matrix = rigid(0, (1.0, -2.0, 1.0))
     report, done, folder = run_plan(tmp_path, [mr_spec(landmark(MR_SIZE, (2, 3, 3)), matrix)], PreprocessSteps(rescale=True))
-    assert plan_row(report).files == ['rescale_planning_ct.nii.gz', 'dose.nii.gz', 'ptv.nii.gz', 'bladder.nii.gz', 'applicator_a.txt', 'series_MR_1.nii.gz', 'series.csv']
+    assert plan_row(report).files == ['rescale_planning_ct.nii.gz', 'dose.nii.gz', 'ptv.nii.gz', 'bladder.nii.gz', 'applicator_a.txt', 'series_MR_1.nii.gz', 'series.json']
     image, native = read_out(done, 'series_MR_1.nii.gz'), sitk.ReadImage(str(folder / conv.CT_NAME))
     assert (image.GetSize(), image.GetOrigin(), image.GetSpacing(), image.GetDirection()) == (native.GetSize(), native.GetOrigin(), native.GetSpacing(), native.GetDirection())
     assert (done / 'series_MR_1.nii.gz').read_bytes() != (folder / 'series_MR_1.nii.gz').read_bytes()  # resampled, not copied
@@ -1839,7 +1820,7 @@ def test_two_registered_series_are_written_in_input_order_after_the_existing_row
     ones = np.ones((4, 4, 4))
     report, done, _ = run_plan(tmp_path, [mr_spec(ones, 'identity', file='series_MR_2.nii.gz'), mr_spec(ones, 'identity', file='series_PT_1.nii.gz', modality='PT')])
     names = [pre.output_name('series_MR_2.nii.gz', SMALL), pre.output_name('series_PT_1.nii.gz', SMALL)]
-    assert plan_row(report).files == [*BASE_FILES, *names, 'series.csv']
+    assert plan_row(report).files == [*BASE_FILES, *names, 'series.json']
     assert [r['file'] for r in conv_rows(done)] == [*BASE_FILES, *names]
     assert [r['modality'] for r in conv_rows(done)[-2:]] == ['MR', 'PT']
 
@@ -1875,8 +1856,8 @@ FOV_OUT = f'fovmask_{MR_OUT}'
                          ids=['translated', 'rotated_sub_voxel_odd_spacing'])
 def test_fov_mask_is_the_final_grid_uint8_where_the_series_lands_and_listed_right_after_its_series(tmp_path, matrix, geometry):
     report, done, _ = run_plan(tmp_path, [mr_spec(np.full((8, 8, 8), 3.0), matrix, geometry)], steps=FOV)
-    assert plan_row(report).files == [BASE_FILES[0], f'fovmask_{CT_FILE}', *BASE_FILES[1:], MR_OUT, FOV_OUT, 'series.csv']
-    assert [r['file'] for r in conv_rows(done)] == [*BASE_FILES, MR_OUT]  # no mask row in series.csv
+    assert plan_row(report).files == [BASE_FILES[0], f'fovmask_{CT_FILE}', *BASE_FILES[1:], MR_OUT, FOV_OUT, 'series.json']
+    assert [r['file'] for r in conv_rows(done)] == [*BASE_FILES, MR_OUT]  # no mask row in series.json
     mask, ct, image = read_out(done, FOV_OUT), read_out(done, CT_FILE), read_out(done)
     assert mask.GetPixelID() == sitk.sitkUInt8
     assert (mask.GetSize(), mask.GetOrigin(), mask.GetSpacing(), mask.GetDirection()) == (ct.GetSize(), ct.GetOrigin(), ct.GetSpacing(), ct.GetDirection())
@@ -1897,13 +1878,13 @@ def test_fov_mask_of_a_registered_ct_filled_with_its_minimum_equals_the_mr_mask(
 def test_a_series_left_out_gets_no_fov_mask(tmp_path, spec):
     report, done, _ = run_plan(tmp_path, [spec], steps=FOV)
     assert plan_row(report).skipped_series == 1
-    assert plan_row(report).files == [BASE_FILES[0], f'fovmask_{CT_FILE}', *BASE_FILES[1:], 'series.csv']
+    assert plan_row(report).files == [BASE_FILES[0], f'fovmask_{CT_FILE}', *BASE_FILES[1:], 'series.json']
     assert [p.name for p in done.iterdir() if p.name.startswith('fovmask_')] == [f'fovmask_{CT_FILE}']
 
 
 def test_no_fov_mask_is_written_by_default(tmp_path):
     report, done, _ = run_plan(tmp_path, [mr_spec(np.full((8, 8, 8), 3.0), rigid(0, (4, 0, 0)))])
-    assert plan_row(report).files == [*BASE_FILES, MR_OUT, 'series.csv'] and not any(p.name.startswith('fovmask_') for p in done.iterdir())
+    assert plan_row(report).files == [*BASE_FILES, MR_OUT, 'series.json'] and not any(p.name.startswith('fovmask_') for p in done.iterdir())
 
 
 def test_the_fov_mask_leaves_every_other_output_unchanged(tmp_path):
@@ -2026,7 +2007,7 @@ def test_ac4_study_mr_pt_and_ct_series_are_each_equalized(tmp_path):
     pre.preprocess(converted, out, SMALL_AHE)
     study = out / 'SYNTHETICPTA' / 'study_1'
     names = {'CT': AHE_STUDY_CT, 'MR': 'reshape_resample_ahe_initialresample_series_MR_1.nii.gz', 'PT': 'reshape_resample_ahe_initialresample_series_PT_1.nii.gz'}
-    assert sorted(p.name for p in study.iterdir()) == sorted([*names.values(), 'series.csv'])
+    assert sorted(p.name for p in study.iterdir()) == sorted([*names.values(), 'series.json'])
     for modality, name in names.items():
         expected = reference_pipeline(sitk.ReadImage(str(folder / f'series_{modality}_1.nii.gz')), SMALL_AHE if modality == 'CT' else dataclasses.replace(SMALL_AHE, rescale=False))
         done = sitk.ReadImage(str(study / name))
@@ -2038,7 +2019,7 @@ def test_ac4_an_ahe_only_run_processes_an_mr_study_series(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     folder = write_study_tree(converted, series=(('MR', 1),), n=16)
     report = pre.preprocess(converted, out, AHE)
-    assert imaging_rows(report) == [('study_1/series_MR_1', 'preprocessed', '', ['ahe_series_MR_1.nii.gz', 'series.csv'])]
+    assert imaging_rows(report) == [('study_1/series_MR_1', 'preprocessed', '', ['ahe_series_MR_1.nii.gz', 'series.json'])]
     source, done = sitk.ReadImage(str(folder / 'series_MR_1.nii.gz')), sitk.ReadImage(str(out / 'SYNTHETICPTA' / 'study_1' / 'ahe_series_MR_1.nii.gz'))
     np.testing.assert_array_equal(sitk.GetArrayFromImage(done), reference_equalize(source))
     assert header(done) == header(source)
@@ -2131,7 +2112,7 @@ def test_aligned_series_names_carry_ahe_for_mr_pt_and_ct_and_dose_and_masks_do_n
     specs = [mr_spec(MR_RAMP, matrix), mr_spec(MR_RAMP, matrix, file='series_PT_1.nii.gz', modality='PT'), mr_spec(CT_RAMP, matrix, file='series_CT_1.nii.gz', modality='CT')]
     report, done, _ = run_plan(tmp_path, specs, steps=SMALL_AHE)
     ct_out = 'reshape_resample_ahe_rescale_initialresample_series_CT_1.nii.gz'
-    assert plan_row(report).files == [AHE_CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt', AHE_MR_OUT, AHE_PT_OUT, ct_out, 'series.csv']
+    assert plan_row(report).files == [AHE_CT_FILE, DOSE_FILE, PTV_FILE, BLADDER_FILE, 'applicator_a.txt', AHE_MR_OUT, AHE_PT_OUT, ct_out, 'series.json']
     assert [r['file'] for r in conv_rows(done)] == plan_row(report).files[:-1]
 
 
@@ -2152,7 +2133,7 @@ def test_the_fov_mask_is_written_for_the_ahe_series_and_ahe_does_not_change_it(t
     for steps in (FOV, dataclasses.replace(SMALL_AHE, series_fov_mask=True)):
         report, done, _ = run_plan(tmp_path / str(steps.ahe), [mr_spec(MR_RAMP, matrix)], steps=steps)
         name = pre.output_name('series_MR_1.nii.gz', steps, image=True)
-        assert plan_row(report).files[-3:] == [name, f'fovmask_{name}', 'series.csv']
+        assert plan_row(report).files[-3:] == [name, f'fovmask_{name}', 'series.json']
         masks[steps.ahe] = read_out(done, f'fovmask_{name}')
     assert masks[True].GetPixelID() == sitk.sitkUInt8
     np.testing.assert_array_equal(sitk.GetArrayFromImage(masks[True]), sitk.GetArrayFromImage(masks[False]))
@@ -2443,41 +2424,40 @@ def test_an_internal_error_in_one_patient_aborts_a_two_process_run_with_the_repo
 
 # ---------------------------------------------------------------- allow-crop task-01: the trailing `retained` column
 
-def csv_header(path):
-    with open(path, newline='') as handle:
-        return next(csv.reader(handle))
+def key_orders(folder):
+    return {tuple(item) for item in sf.read(folder)}
 
 
-def test_every_series_csv_preprocess_writes_has_the_retained_column_and_convert_keeps_its_header(tmp_path):
+def test_every_series_json_preprocess_writes_has_the_retained_column_and_convert_keeps_its_header(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     write_plan(converted)
     write_study_tree(converted)
     pre.preprocess(converted, out, SMALL)
-    assert csv_header(converted / 'SYNTHETICPTA' / 'plan_1' / 'series.csv') == conv.SERIES_COLUMNS
+    assert key_orders(converted / 'SYNTHETICPTA' / 'plan_1') == {tuple(conv.SERIES_COLUMNS)}
     assert pre.PREPROCESSED_SERIES_COLUMNS == [*conv.SERIES_COLUMNS, 'retained']
     for folder in ('plan_1', 'study_1'):
-        assert csv_header(out / 'SYNTHETICPTA' / folder / 'series.csv') == pre.PREPROCESSED_SERIES_COLUMNS
-    assert {r['retained'] for r in pre.read_series_csv(out / 'SYNTHETICPTA' / 'study_1')[0]} == {''}
-    assert {r['kind']: r['retained'] for r in pre.read_series_csv(out / 'SYNTHETICPTA' / 'plan_1')[0]} == {'ct': '', 'dose': '1.0', 'mask': '1.0', 'applicator': ''}
+        assert key_orders(out / 'SYNTHETICPTA' / folder) == {tuple(pre.PREPROCESSED_SERIES_COLUMNS)}
+    assert {r['retained'] for r in pre.read_series_json(out / 'SYNTHETICPTA' / 'study_1')[0]} == {''}
+    assert {r['kind']: r['retained'] for r in pre.read_series_json(out / 'SYNTHETICPTA' / 'plan_1')[0]} == {'ct': '', 'dose': '1.0', 'mask': '1.0', 'applicator': ''}
 
 
 @pytest.mark.parametrize('columns, malformed', [
     (conv.SERIES_COLUMNS, False),
     ([*conv.SERIES_COLUMNS, 'retained'], False),
     ([*conv.SERIES_COLUMNS, 'other'], True),
-    (['retained', *conv.SERIES_COLUMNS], True),
+    (['retained', *conv.SERIES_COLUMNS], False),
     (conv.SERIES_COLUMNS[:-1], True),
 ])
-def test_read_series_csv_accepts_exactly_the_two_headers(tmp_path, columns, malformed):
-    (tmp_path / 'series.csv').write_text(','.join(columns) + '\n' + ','.join('x' * len(columns)) + '\n', encoding='utf-8')
-    assert pre.read_series_csv(tmp_path)[1] is malformed
+def test_read_series_json_accepts_exactly_the_two_key_sets(tmp_path, columns, malformed):
+    (tmp_path / 'series.json').write_text(json.dumps([dict.fromkeys(columns, 'x')]), encoding='utf-8')  # key order is not compared
+    assert pre.read_series_json(tmp_path)[1] is malformed
 
 
 @pytest.mark.parametrize('columns', [conv.SERIES_COLUMNS, pre.PREPROCESSED_SERIES_COLUMNS])
-def test_read_series_csv_still_refuses_a_missing_or_extra_cell(tmp_path, columns):
-    for cells in (len(columns) - 1, len(columns) + 1):
-        (tmp_path / 'series.csv').write_text(','.join(columns) + '\n' + ','.join(['x'] * cells) + '\n', encoding='utf-8')
-        assert pre.read_series_csv(tmp_path)[1] is True
+def test_read_series_json_still_refuses_a_missing_or_extra_key(tmp_path, columns):
+    for keys in (columns[1:], [*columns, 'extra']):
+        (tmp_path / 'series.json').write_text(json.dumps([dict.fromkeys(keys, 'x')]), encoding='utf-8')
+        assert pre.read_series_json(tmp_path)[1] is True
 
 
 def test_preprocessing_a_preprocessed_tree_succeeds_and_sets_retained_from_this_run(tmp_path):
@@ -2485,14 +2465,14 @@ def test_preprocessing_a_preprocessed_tree_succeeds_and_sets_retained_from_this_
     write_plan(tmp_path / 'converted')
     write_study_tree(tmp_path / 'converted')
     pre.preprocess(tmp_path / 'converted', first, SMALL)
-    for path in first.rglob('series.csv'):  # as if the first run had set it: the second must not carry it over
-        rows = pre.read_series_csv(path.parent)[0]
-        conv.write_series_csv([r | {'retained': 'STALE'} for r in rows], path, pre.PREPROCESSED_SERIES_COLUMNS)
+    for path in first.rglob('series.json'):  # as if the first run had set it: the second must not carry it over
+        rows = pre.read_series_json(path.parent)[0]
+        sf.write([r | {'retained': 'STALE'} for r in rows], path)
     report = pre.preprocess(first, second, SMALL)
     assert {(r.folder, r.outcome) for r in report.rows} == {('plan_1', 'preprocessed'), ('study_1/series_CT_1', 'preprocessed'),
                                                             ('study_1/series_MR_1', 'preprocessed')}
     for folder in ('plan_1', 'study_1'):
-        rows, malformed = pre.read_series_csv(second / 'SYNTHETICPTA' / folder)
+        rows, malformed = pre.read_series_json(second / 'SYNTHETICPTA' / folder)
         assert not malformed and {r['retained'] for r in rows} == ({'', '1.0'} if folder == 'plan_1' else {''})  # never 'STALE'
 
 
@@ -2506,8 +2486,8 @@ DOSE_SPLIT = np.where(np.arange(12)[:, None, None] < 3, 1.0, 3.0) * HALF_OUT
 
 
 def series_cells(out, folder='plan_1'):
-    """{file: retained cell} of an output plan's or study's series.csv."""
-    return {r['file']: r['retained'] for r in pre.read_series_csv(out / 'SYNTHETICPTA' / folder)[0]}
+    """{file: retained cell} of an output plan's or study's series.json."""
+    return {r['file']: r['retained'] for r in pre.read_series_json(out / 'SYNTHETICPTA' / folder)[0]}
 
 
 def test_allow_crop_defaults_off_and_adds_no_filename_prefix(tmp_path):
@@ -2692,3 +2672,179 @@ def test_the_cropped_column_is_an_int_on_preprocessed_plan_rows_only(tmp_path):
     again = pre.preprocess(converted, out, CUT)  # the patient's output exists: a patient-level row
     assert [(r.folder, r.outcome, r.cropped) for r in again.rows] == [('', 'skipped', '')]
     assert [r['cropped'] for r in report_rows(out)] == ['']
+
+
+# ---------------------------------------------------------------- json-outputs task-01: series.json, and the legacy series.csv refusal
+
+def good_series_bytes(folder):
+    return (folder / conv.SERIES_NAME).read_bytes()
+
+
+def full_row_json(**extra):
+    return json.dumps(series_row('a.nii.gz', 'ct') | extra)
+
+
+# each: the bytes of a series.json that read_series_json calls malformed, from the plan's good bytes
+SERIES_JSON_BREAKS = {
+    'invalid json': lambda good: b'[{"file": ',
+    'deep nesting': lambda good: b'[' * 100_000,
+    'duplicate key': lambda good: ('[' + full_row_json()[:-1] + ', "file": "b.nii.gz"}]').encode(),
+    'bom': lambda good: b'\xef\xbb\xbf' + good,
+    'not utf-8': lambda good: good + b'\xff\xfe',
+    'empty file': lambda good: b'',
+    'not an array': lambda good: b'{}',
+    'item not an object': lambda good: b'[[]]',
+    'null item': lambda good: b'[null]',
+    'missing key': lambda good: ('[' + json.dumps({k: '' for k in conv.SERIES_COLUMNS[1:]}) + ']').encode(),
+    'extra key': lambda good: ('[' + full_row_json(extra='') + ']').encode(),
+    'retained only': lambda good: b'[{"retained": ""}]',
+    'key sets differ': lambda good: ('[' + full_row_json() + ',' + full_row_json(retained='') + ']').encode(),
+    'number value': lambda good: ('[' + full_row_json(fractions_planned=5) + ']').encode(),
+    'null value': lambda good: ('[' + full_row_json(roi_name=None) + ']').encode(),
+    'list value': lambda good: ('[' + full_row_json(roi_name=['x']) + ']').encode(),
+}
+
+
+@pytest.mark.parametrize('what', list(SERIES_JSON_BREAKS))
+def test_a_malformed_series_json_refuses_the_plan_only(tmp_path, what):
+    def change(folder, rows):
+        (folder / conv.SERIES_NAME).write_bytes(SERIES_JSON_BREAKS[what](good_series_bytes(folder)))
+    refuse(tmp_path, pre.REASON_SERIES_CSV, change)
+
+
+@pytest.mark.parametrize('what', list(SERIES_JSON_BREAKS))
+def test_read_series_json_reports_malformed_and_never_raises_for_content(tmp_path, what):
+    folder, _ = write_plan(tmp_path)
+    (folder / conv.SERIES_NAME).write_bytes(SERIES_JSON_BREAKS[what](good_series_bytes(folder)))
+    assert pre.read_series_json(folder)[1] is True
+
+
+@pytest.mark.parametrize('what', list(SERIES_JSON_BREAKS))
+def test_a_malformed_series_json_chains_no_exception_and_leaks_no_content(tmp_path, what, caplog):
+    folder, _ = write_plan(tmp_path)
+    secret = b'SYNTHETICSECRETCONTENT'
+    (folder / conv.SERIES_NAME).write_bytes(SERIES_JSON_BREAKS[what](good_series_bytes(folder)) + secret)
+    with caplog.at_level('DEBUG'), pytest.raises(CaseRefused) as caught:
+        pre.check_rows(folder)
+    assert str(caught.value) == pre.REASON_SERIES_CSV and caught.value.__cause__ is None and caught.value.__context__ is None
+    assert secret.decode() not in caplog.text and caplog.records == []
+
+
+def test_a_malformed_study_series_json_chains_no_exception(tmp_path):
+    folder = write_study(tmp_path / 'study_1', [study_row('series_MR_1.nii.gz')])
+    (folder / conv.SERIES_NAME).write_bytes(b'[' * 100_000)
+    with pytest.raises(CaseRefused) as caught:
+        pre.check_study_rows(folder)
+    assert str(caught.value) == pre.REASON_SERIES_CSV and caught.value.__cause__ is None and caught.value.__context__ is None
+
+
+def test_read_series_json_returns_the_objects_of_a_good_file_in_both_key_sets(tmp_path):
+    for columns in (conv.SERIES_COLUMNS, pre.PREPROCESSED_SERIES_COLUMNS):
+        rows = [dict.fromkeys(columns, 'é'), dict.fromkeys(columns, '')]
+        sf.write(rows, tmp_path / conv.SERIES_NAME)
+        assert pre.read_series_json(tmp_path) == (rows, False)
+    (tmp_path / conv.SERIES_NAME).write_text('[]\n', encoding='utf-8')
+    assert pre.read_series_json(tmp_path) == ([], False)
+
+
+def test_read_series_json_keeps_the_items_of_a_valid_array_that_fails_the_key_check(tmp_path):
+    (tmp_path / conv.SERIES_NAME).write_text('[{"file": "a"}, {"file": "b"}]', encoding='utf-8')
+    rows, malformed = pre.read_series_json(tmp_path)
+    assert malformed and len(rows) == 2  # study_refusal_count counts them
+    (tmp_path / conv.SERIES_NAME).write_text('{"file": "a"}', encoding='utf-8')
+    assert pre.read_series_json(tmp_path) == ([], True)
+
+
+def test_read_series_json_lets_an_os_error_through(tmp_path):
+    with pytest.raises(OSError):
+        pre.read_series_json(tmp_path)
+
+
+def test_write_series_json_orders_the_keys_and_round_trips(tmp_path):
+    scrambled = dict(reversed(series_row('a.nii.gz', 'ct', roi_name='é "q"').items()))
+    rows = [scrambled | {'zzz': '1', 'retained': '1.0'}, series_row('b.nii.gz', 'mask') | {'zzz': '', 'retained': ''}]
+    conv.write_series_json(rows, tmp_path / conv.SERIES_NAME)
+    text = (tmp_path / conv.SERIES_NAME).read_bytes().decode('utf-8')
+    assert text.startswith('[\n {\n  "file": "a.nii.gz",\n  "kind": "ct",\n') and text.endswith('\n }\n]\n') and 'é' in text
+    got = sf.read(tmp_path)
+    assert [list(item) for item in got] == [[*conv.SERIES_COLUMNS, 'zzz', 'retained']] * 2
+    assert got == rows  # dict equality ignores order
+    conv.write_series_json([], tmp_path / conv.SERIES_NAME)
+    assert (tmp_path / conv.SERIES_NAME).read_bytes() == b'[]\n'
+
+
+def test_write_series_json_failure_is_the_fixed_write_reason_and_leaves_no_temp(tmp_path):
+    with pytest.raises(OSError) as caught:
+        conv.write_series_json([series_row('a', 'ct')], tmp_path / 'missing' / conv.SERIES_NAME)
+    assert str(caught.value) == conv.REASON_WRITE and list(tmp_path.iterdir()) == []
+
+
+def test_series_name_is_series_json_and_the_legacy_name_is_defined_once():
+    assert conv.SERIES_NAME == 'series.json' and pre.LEGACY_SERIES_NAME == 'series.csv'
+    assert pre.REASON_LEGACY_SERIES == 'converted by an older version (series.csv); reconvert with --overwrite'
+    for reason in (pre.REASON_NO_CASES, pre.REASON_NO_CT, pre.REASON_DOSE_COUNT, pre.REASON_KIND, pre.REASON_FILE_MISSING,
+                   pre.REASON_STUDY_MODALITY, pre.REASON_STUDY_NAME, pre.REASON_SERIES_CSV):
+        assert 'series.json' in reason and 'series.csv' not in reason
+    assert 'column' not in pre.REASON_SERIES_CSV and 'row length' not in pre.REASON_SERIES_CSV
+
+
+def make_legacy(folder):
+    """What a v0.1.x convert left: a series.csv and no series.json."""
+    (folder / conv.SERIES_NAME).unlink(missing_ok=True)
+    (folder / pre.LEGACY_SERIES_NAME).write_text('file,kind\nplanning_ct.nii.gz,ct\n', encoding='utf-8')
+
+
+def test_a_legacy_plan_next_to_a_good_plan_is_refused_with_its_reason(tmp_path):
+    refuse(tmp_path, pre.REASON_LEGACY_SERIES, lambda folder, rows: make_legacy(folder))  # refuse() also asserts no patient-level row (no REASON_IO_ERROR)
+
+
+def test_a_legacy_study_is_refused_as_one_row_and_a_good_study_is_preprocessed(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_study_tree(converted)
+    write_study_tree(converted, study='study_2')
+    make_legacy(converted / 'SYNTHETICPTA' / 'study_1')
+    report = pre.preprocess(converted, out, SMALL)
+    assert [(r.folder, r.outcome, r.reason) for r in report.rows] == [
+        ('study_1', 'refused', pre.REASON_LEGACY_SERIES),
+        ('study_2/series_CT_1', 'preprocessed', ''), ('study_2/series_MR_1', 'preprocessed', '')]
+    assert not (out / 'SYNTHETICPTA' / 'study_1').exists()
+
+
+def test_a_patient_with_only_legacy_folders_gets_refused_rows_not_no_cases(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, _ = write_plan(converted)
+    study = write_study_tree(converted)
+    make_legacy(folder)
+    make_legacy(study)
+    report = pre.preprocess(converted, out, SMALL)
+    assert [(r.patient, r.folder, r.outcome, r.reason) for r in report.rows] == [
+        ('SYNTHETICPTA', 'plan_1', 'refused', pre.REASON_LEGACY_SERIES), ('SYNTHETICPTA', 'study_1', 'refused', pre.REASON_LEGACY_SERIES)]
+
+
+def test_series_json_wins_over_a_stray_series_csv(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, _ = write_plan(converted)
+    (folder / pre.LEGACY_SERIES_NAME).write_text('not read', encoding='utf-8')
+    assert plan_row(pre.preprocess(converted, out, SMALL)).outcome == 'preprocessed'
+
+
+def test_images_and_misc_files_stay_ignored_even_with_a_series_csv_or_json(tmp_path):
+    converted = tmp_path / 'converted'
+    for name in ('images', 'misc_files'):
+        (converted / 'SYNTHETICPTA' / name).mkdir(parents=True)
+        (converted / 'SYNTHETICPTA' / name / pre.LEGACY_SERIES_NAME).write_text('file,kind\n', encoding='utf-8')
+        (converted / 'SYNTHETICPTA' / name / conv.SERIES_NAME).write_text('[]', encoding='utf-8')
+    report = pre.preprocess(converted, tmp_path / 'out', SMALL)
+    assert [(r.folder, r.outcome, r.reason) for r in report.rows] == [('', 'skipped', pre.REASON_NO_CASES)]
+
+
+def test_the_legacy_check_comes_before_any_read(tmp_path, monkeypatch):
+    folder, _ = write_plan(tmp_path / 'a')
+    study = write_study_tree(tmp_path / 'b')
+    make_legacy(folder)
+    make_legacy(study)
+    monkeypatch.setattr(pre, 'read_series_json', lambda *a: pytest.fail('series.json was read'))
+    for check, path in ((pre.check_rows, folder), (pre.check_study_rows, study)):
+        with pytest.raises(CaseRefused) as caught:
+            check(path)
+        assert str(caught.value) == pre.REASON_LEGACY_SERIES

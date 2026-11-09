@@ -4,12 +4,12 @@ Turn an organized tree (<patient>/plan_<n>/) into NIfTI on the native CT grid, o
 Per plan: RTPLAN -> RTSTRUCT -> the one CT series it references -> planning_ct.nii.gz (float32 HU), and the plan's RTDOSE
 as dose.nii.gz (Gy, linearly resampled onto the CT grid). Masks and applicators (masks.py) are written into the same
 folder. Every other CT/MR/PT series of the patient (series.py) is read once and written into the plan folders it is registered
-to and into its study folder <patient>/study_<n>/ (numbered by StudyDate, StudyTime, StudyInstanceUID). series.csv is written last, one row per file. The organized tree is only read. Log lines and exception messages
+to and into its study folder <patient>/study_<n>/ (numbered by StudyDate, StudyTime, StudyInstanceUID). series.json (an indented JSON array, one object per file) is written last. The organized tree is only read. Log lines and exception messages
 carry counts and the fixed REASON_ constants only, never a PatientID, folder name, date, path or UID. convert_report.csv in
-the output root is the one place the folder names appear; the series.csv files hold the UIDs, dates and descriptions. Every third-party read runs inside dicom_io's quiet wrapper.
+the output root is the one place the folder names appear; the series.json files hold the UIDs, dates and descriptions. Every third-party read runs inside dicom_io's quiet wrapper.
 """
 import contextlib
-import csv
+import json
 import logging
 import os
 import re
@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 
 PLAN_FOLDER = r'(plan|fx)_\d+'  # organize writes plan_<n>; a legacy tree (OSC raw/) has fx_<n>, kept as named
 REPORT_NAME = 'convert_report.csv'
-CT_NAME, DOSE_NAME, SERIES_NAME = 'planning_ct.nii.gz', 'dose.nii.gz', 'series.csv'
+CT_NAME, DOSE_NAME, SERIES_NAME = 'planning_ct.nii.gz', 'dose.nii.gz', 'series.json'
 SERIES_COLUMNS = ['file', 'kind', 'modality', 'series_description', 'series_instance_uid', 'study_instance_uid',
                   'frame_of_reference_uid', 'series_date', 'roi_name', 'dose_summation_type', 'reg_matrix', 'rtplan_uid',
                   'rtplan_label', 'rtplan_date', 'fractions_planned']
@@ -93,9 +93,9 @@ class ConvertReport:
 
 @dataclass
 class PlanResult:
-    files: list  # the data files written into the case folder, in write order; series.csv, written last, is not in it
+    files: list  # the data files written into the case folder, in write order; series.json, written last, is not in it
     ct_series_uid: str
-    series_rows: list  # dicts of SERIES_COLUMNS for the plan's series.csv, which the patient level writes last
+    series_rows: list  # dicts of SERIES_COLUMNS for the plan's series.json, which the patient level writes last
 
 
 def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwrite=False, _patient_fn=None):
@@ -270,9 +270,9 @@ def _convert_patient(folder, out_root, exclude_models, overwrite):
         # A planning CT that ITK already failed to read is skipped, not read again as another series (#216).
         unread = {_assemble(found)[3] for (found, _), (row, _) in zip(plan_headers, outcomes, strict=True) if row.reason == REASON_CT_UNREADABLE}
         rows += _place_series(folder.name, ordered, exclude_models, outcomes, partial, short, lost | unread, misc_taint, misc_dir)
-        for row, result in outcomes:  # series.csv of each converted plan folder goes in last
+        for row, result in outcomes:  # series.json of each converted plan folder goes in last
             if result is not None:
-                write_series_csv(result.series_rows, partial / row.folder / SERIES_NAME)
+                write_series_json(result.series_rows, partial / row.folder / SERIES_NAME)
         # An empty partial (every plan refused) is renamed too when there is no old folder: the patient has its outcome.
         status = dicom_io.publish(out_root, folder.name, overwrite=overwrite,
                                   success=any(row.outcome == OUTCOME_CONVERTED for row in rows))
@@ -309,7 +309,7 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
     """
     Write every other series of the patient into the converted plan folders it is registered to and into its study folder,
     each series read once (the study volume is the image already read). Adds the series files and rows to the plan rows and
-    results; writes each study_<n>/series.csv. Returns the ConvertRows to append after the plan rows: the `studies` summary row
+    results; writes each study_<n>/series.json. Returns the ConvertRows to append after the plan rows: the `studies` summary row
     and one row per written series; [] when the patient has no candidate series. Nothing here catches: a bad header is a None
     from series.py, anything else is the patient's REASON_INTERNAL. A series with a kept file in a folder of `short` (refused
     plan folders that may have lost a slice) or whose SeriesInstanceUID is in `lost` (known short) is skipped and counted,
@@ -335,7 +335,7 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
                for uid, slices in found]
     skipped = checked.count(None)
     order = lambda ordered: tuple(_tag(ordered[0][1], tag) for tag in ('SeriesDate', 'SeriesTime', 'SeriesInstanceUID'))  # noqa: E731
-    counts, written = {}, {}  # (folder, modality) -> last k; folder -> [(modality, k, series.csv row)]
+    counts, written = {}, {}  # (folder, modality) -> last k; folder -> [(modality, k, series.json row)]
     study_folders, study_dates = {}, {}  # StudyInstanceUID -> hidden folder name; -> (StudyDate, StudyTime) of each series written to it
     for ordered in sorted((o for o in checked if o is not None), key=order):
         first = ordered[0][1]
@@ -378,7 +378,7 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
     for n, uid in enumerate(sorted(study_folders, key=rank), 1):
         (partial / study_folders[uid]).rename(partial / f'study_{n}')
         series_rows = [item[2] for item in written[study_folders[uid]]]
-        write_series_csv(series_rows, partial / f'study_{n}' / SERIES_NAME)
+        write_series_json(series_rows, partial / f'study_{n}' / SERIES_NAME)
         rows += [ConvertRow(patient, f'study_{n}/{r["file"].removesuffix(".nii.gz")}', OUTCOME_CONVERTED,
                             files=[r['file'], *([SERIES_NAME] if i == 0 else [])]) for i, r in enumerate(series_rows)]
     return rows
@@ -402,7 +402,7 @@ def convert_plan(headers, unreadable, case_dir):
     Convert one plan folder into `case_dir`, which must not exist; returns a PlanResult.
 
     `headers` is the plan folder's own [(path, Dataset)] list (not deduplicated by SOP) and `unreadable` says whether any
-    file in it could not be read (see read_folder_headers); this function reads no headers and writes no series.csv: the
+    file in it could not be read (see read_folder_headers); this function reads no headers and writes no series.json: the
     rows are in the PlanResult. An unreadable file refuses the plan (it may be a CT slice). A refusal raises CaseRefused(fixed reason) and leaves no `case_dir` behind. A header that lacks a tag the path reads
     refuses with REASON_MISSING_TAG (_header_call). Any other error, an OSError on the output side included, propagates:
     it is the patient's, not the plan's.
@@ -704,7 +704,7 @@ def _joined(values):
 
 
 def _series_rows(plan, struct, ct_head, dose_heads, rois, files):
-    """One dict per mask, applicator, CT and dose file in `files` (series.csv itself has none), from headers already read."""
+    """One dict per mask, applicator, CT and dose file in `files` (series.json itself has none), from headers already read."""
     groups = plan.get('FractionGroupSequence', [])
     plan_columns = dict(rtplan_uid=str(plan.SOPInstanceUID), rtplan_label=_tag(plan, 'RTPlanLabel'),
                         rtplan_date=_tag(plan, 'RTPlanDate'),
@@ -729,13 +729,15 @@ def _series_rows(plan, struct, ct_head, dose_heads, rois, files):
     return rows
 
 
-def write_series_csv(rows, path, columns=SERIES_COLUMNS):
-    """`rows` (dicts of `columns`) at `path`, written atomically; a failure raises OSError(REASON_WRITE)."""
+def write_series_json(rows, path):
+    """`rows` (dicts of strings) as a JSON array at `path`, written atomically; a failure raises OSError(REASON_WRITE).
+    Keys: SERIES_COLUMNS first, then the row's other keys in insertion order."""
+    items = [{column: row[column] for column in SERIES_COLUMNS} | row for row in rows]
+
     def write(temp):
-        with open(temp, 'w', newline='', encoding='utf-8') as handle:  # a description the locale cannot encode
-            writer = csv.DictWriter(handle, columns)
-            writer.writeheader()
-            writer.writerows(rows)
+        with open(temp, 'w', newline='\n', encoding='utf-8') as handle:  # a description the locale cannot encode
+            json.dump(items, handle, indent=1, ensure_ascii=False)
+            handle.write('\n')
     _atomic(write, path)
 
 

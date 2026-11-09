@@ -1,9 +1,9 @@
-"""split: splits.json from a hand-written manifest.csv, whole patients per split (task-02); patient names are SYNTHETIC-prefixed except the bare '00123'."""
+"""split: splits.json from a hand-written manifest.jsonl, whole patients per split (task-02); patient names are SYNTHETIC-prefixed except the bare '00123'."""
 import ast
-import csv
 import hashlib
 import inspect
 import json
+import operator
 import os
 import threading
 import time
@@ -19,20 +19,19 @@ SEED_A, SEED_B = 0, 1
 TEN = [f'SYNTHETIC_P{i:02d}' for i in range(9)] + ['00123']
 
 
-def write_manifest(folder, patients, name='manifest.csv', two_plans=('SYNTHETIC_P00',), imaging=()):
+def write_manifest(folder, patients, name='manifest.jsonl', two_plans=('SYNTHETIC_P00',), imaging=()):
     """One plan per patient, two for those in `two_plans`; a patient in `imaging` also gets two study series rows (a patient
-    only in `imaging` has no plan). Only the case_dir and patient columns matter to split."""
+    only in `imaging` has no plan). Only the case_dir and patient keys matter to split."""
     folder.mkdir(exist_ok=True)
     path = folder / name
-    with open(path, 'w', newline='') as handle:
-        writer = csv.writer(handle)
-        writer.writerow(COLUMNS)
-        for patient in patients:
-            for fx in (['plan_1', 'plan_2'] if patient in two_plans else ['plan_1']):
-                writer.writerow([f'{patient}/{fx}', patient, fx, '', '', '1', '', '', '', '', 'plan', 'CT', ''])
-        for patient in imaging:
-            for study, series in (('study_1', 'series_CT_1'), ('study_2', 'series_MR_1')):
-                writer.writerow([f'{patient}/{study}/{series}', patient, '', '', '', '0', '[]', '', '', '', 'imaging', series.split('_')[1], f'{series}.nii.gz'])
+    rows = []
+    for patient in patients:
+        for fx in (['plan_1', 'plan_2'] if patient in two_plans else ['plan_1']):
+            rows.append([f'{patient}/{fx}', patient, fx, '', '', '1', [], '', '', '', 'plan', 'CT', '', []])
+    for patient in imaging:
+        for study, series in (('study_1', 'series_CT_1'), ('study_2', 'series_MR_1')):
+            rows.append([f'{patient}/{study}/{series}', patient, '', '', '', '0', [], '', '', '', 'imaging', series.split('_')[1], f'{series}.nii.gz', []])
+    path.write_text(''.join(json.dumps(dict(zip(COLUMNS, row, strict=True))) + '\n' for row in rows), encoding='utf-8')
     return path
 
 
@@ -122,7 +121,7 @@ def test_same_seed_is_byte_identical_and_two_seeds_differ_as_assignments(tmp_pat
     assert (tmp_path / 'splits.json').read_bytes() == first
     other = tmp_path / 'other'
     write_manifest(other, TEN)
-    assert assignment(run(other / 'manifest.csv', seed=SEED_B)) != assignment(json.loads(first))
+    assert assignment(run(other / 'manifest.jsonl', seed=SEED_B)) != assignment(json.loads(first))
 
 
 def test_file_format_and_case_id_hash(tmp_path):
@@ -191,10 +190,10 @@ def test_the_write_is_atomic_a_failed_replace_leaves_no_splits_json_and_no_temp_
     monkeypatch.setattr(os, 'replace', fail)
     with pytest.raises(OSError, match=conv.REASON_WRITE):
         sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv']
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.jsonl']
     monkeypatch.undo()
     run(path)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv', 'splits.json']
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.jsonl', 'splits.json']
 
 
 def test_without_hard_links_a_ctrl_c_during_the_replace_leaves_no_splits_json(tmp_path, monkeypatch):
@@ -210,7 +209,7 @@ def test_without_hard_links_a_ctrl_c_during_the_replace_leaves_no_splits_json(tm
     monkeypatch.setattr(os, 'replace', interrupt)
     with pytest.raises(KeyboardInterrupt):
         sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv']  # no empty reservation blocks a rerun
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.jsonl']  # no empty reservation blocks a rerun
 
 
 def test_a_concurrent_run_that_writes_first_wins_and_this_one_is_refused(tmp_path, monkeypatch):
@@ -226,7 +225,7 @@ def test_a_concurrent_run_that_writes_first_wins_and_this_one_is_refused(tmp_pat
     with pytest.raises(ValueError, match=sp.REASON_EXISTS):
         sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
     assert (tmp_path / 'splits.json').read_text() == other
-    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv', 'splits.json']
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.jsonl', 'splits.json']
 
 
 def test_without_hard_links_a_concurrent_run_that_writes_first_is_kept_and_this_one_is_refused(tmp_path, monkeypatch):
@@ -241,7 +240,7 @@ def test_without_hard_links_a_concurrent_run_that_writes_first_is_kept_and_this_
     with pytest.raises(ValueError, match=sp.REASON_EXISTS):
         sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
     assert (tmp_path / 'splits.json').read_text() == other
-    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv', 'splits.json']
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.jsonl', 'splits.json']
 
 
 def test_an_identical_split_is_not_refused_by_another_runs_empty_reservation(tmp_path):
@@ -296,7 +295,7 @@ def test_without_hard_links_the_write_falls_back_to_a_rename(tmp_path, monkeypat
     monkeypatch.setattr(os, 'link', unsupported)
     obj = run(path)
     assert sum(map(len, (obj[name] for name in ('train', 'val', 'test')))) == len(TEN)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.csv', 'splits.json']
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['manifest.jsonl', 'splits.json']
 
 
 def test_the_order_is_the_documented_hash_so_no_library_version_moves_it(tmp_path):
@@ -310,11 +309,11 @@ def test_a_manifest_without_patient_or_case_dir_is_refused(tmp_path, dropped):
     columns = [c for c in COLUMNS if c != dropped]
     bad = tmp_path / 'bad'
     bad.mkdir()
-    (bad / 'manifest.csv').write_text(','.join(columns) + '\n' + ','.join('SYNTHETIC_X' for _ in columns) + '\n')
+    (bad / 'manifest.jsonl').write_text(json.dumps({c: 'SYNTHETIC_X' for c in columns}) + '\n')
     with pytest.raises(ValueError, match=sp.REASON_COLUMNS):
-        sp.split(bad / 'manifest.csv', test_size=0.2, val_size=0.2, seed=SEED_A)
+        sp.split(bad / 'manifest.jsonl', test_size=0.2, val_size=0.2, seed=SEED_A)
     with pytest.raises(ValueError, match=sp.REASON_COLUMNS):
-        sp.split(write_manifest(tmp_path, TEN), test_size=0.2, val_size=0.2, seed=SEED_A, external=bad / 'manifest.csv')
+        sp.split(write_manifest(tmp_path, TEN), test_size=0.2, val_size=0.2, seed=SEED_A, external=bad / 'manifest.jsonl')
     assert not (bad / 'splits.json').exists() and not (tmp_path / 'splits.json').exists()
 
 
@@ -328,14 +327,14 @@ def test_split_and_manifest_import_no_pandas_sklearn_and_split_no_numpy(module):
 
 
 @pytest.mark.parametrize('body', [
-    'SYNTHETIC_P00/plan_1\n',  # a short row: patient reads None
-    'SYNTHETIC_P00/plan_1,\n',  # an empty patient
-    'SYNTHETIC_P00/plan_1,  \n',  # a whitespace-only patient
-    'SYNTHETIC_P00/plan_1,SYNTHETIC_\xe9\n',  # not UTF-8 once written as latin-1
+    '{"case_dir": "SYNTHETIC_P00/plan_1", "patient": null}\n',  # no patient value
+    '{"case_dir": "SYNTHETIC_P00/plan_1", "patient": ""}\n',  # an empty patient
+    '{"case_dir": "SYNTHETIC_P00/plan_1", "patient": "  "}\n',  # a whitespace-only patient
+    '{"case_dir": "SYNTHETIC_P00/plan_1", "patient": "SYNTHETIC_\xe9"}\n',  # not UTF-8 once written as latin-1
 ])
 def test_a_malformed_row_or_a_non_utf8_manifest_is_refused(tmp_path, capfd, body):
-    path = tmp_path / 'manifest.csv'
-    path.write_bytes(('case_dir,patient\n' + body).encode('latin-1'))
+    path = tmp_path / 'manifest.jsonl'
+    path.write_bytes(body.encode('latin-1'))
     with pytest.raises(ValueError) as excinfo:
         sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
     assert str(excinfo.value) == sp.REASON_ROWS
@@ -362,3 +361,68 @@ def test_a_manifest_with_a_utf8_bom_is_read(tmp_path):
     path.write_bytes(b'\xef\xbb\xbf' + path.read_bytes())
     obj = run(path)
     assert sum(len(obj[name]) for name in ('train', 'val', 'test')) == len(TEN)
+
+
+# ---------------------------------------------------------------- json-outputs task-02: manifest.jsonl is what split reads
+
+def raw_manifest(folder, body: bytes):
+    folder.mkdir(exist_ok=True)
+    path = folder / 'manifest.jsonl'
+    path.write_bytes(body)
+    return path
+
+
+_chain = operator.attrgetter('__cause__', '__context__')  # (cause, context) of an exception
+GOOD = b'{"case_dir": "SYNTHETIC_P0/plan_1", "patient": "SYNTHETIC_P0"}\n'
+ROWS_BREAKS = {
+    'invalid json': b'{"case_dir": "SYNTHETIC_P0/plan_1", "patient"\n',
+    'not utf-8': b'{"case_dir": "SYNTHETIC_P0/plan_1", "patient": "SYNTHETIC_\xe9"}\n',
+    'array line': b'["SYNTHETIC_P0/plan_1", "SYNTHETIC_P0"]\n',
+    'string line': b'"SYNTHETIC_P0"\n',
+    'null line': b'null\n',
+    'deep nesting': b'[' * 100000 + b']' * 100000 + b'\n',
+    'duplicate key': b'{"case_dir": "SYNTHETIC_P0/plan_1", "patient": "SYNTHETIC_P0", "patient": "SYNTHETIC_P1"}\n',
+    'number patient': b'{"case_dir": "SYNTHETIC_P0/plan_1", "patient": 123}\n',
+    'null case_dir': b'{"case_dir": null, "patient": "SYNTHETIC_P0"}\n',
+    'empty patient': b'{"case_dir": "SYNTHETIC_P0/plan_1", "patient": ""}\n',
+    'whitespace case_dir': b'{"case_dir": "  ", "patient": "SYNTHETIC_P0"}\n',
+    'bad line after a good one': GOOD + b'{oops\n',
+}
+
+
+@pytest.mark.parametrize('body', ROWS_BREAKS.values(), ids=ROWS_BREAKS)
+def test_a_bad_manifest_line_is_refused_with_the_rows_reason_and_nothing_chained(tmp_path, capfd, body):
+    path = raw_manifest(tmp_path, body)
+    with pytest.raises(ValueError) as excinfo:
+        sp.split(path, test_size=0.2, val_size=0.2, seed=SEED_A)
+    assert str(excinfo.value) == sp.REASON_ROWS and _chain(excinfo.value) == (None, None)
+    external = raw_manifest(tmp_path / 'ext', body)
+    with pytest.raises(ValueError, match=sp.REASON_ROWS):
+        sp.split(write_manifest(tmp_path / 'main', TEN), test_size=0.2, val_size=0.2, seed=SEED_A, external=external)
+    assert not (tmp_path / 'splits.json').exists() and not (tmp_path / 'main' / 'splits.json').exists()
+    out, err = capfd.readouterr()
+    assert 'SYNTHETIC' not in out + err
+
+
+@pytest.mark.parametrize('line', [b'{"case_dir": "SYNTHETIC_P0/plan_1"}\n', b'{"patient": "SYNTHETIC_P0"}\n', b'{}\n'])
+def test_a_line_without_patient_or_case_dir_is_refused_with_the_columns_reason(tmp_path, line):
+    with pytest.raises(ValueError) as excinfo:
+        sp.split(raw_manifest(tmp_path, line), test_size=0.2, val_size=0.2, seed=SEED_A)
+    assert str(excinfo.value) == sp.REASON_COLUMNS and _chain(excinfo.value) == (None, None)
+    with pytest.raises(ValueError, match=sp.REASON_COLUMNS):
+        sp.split(write_manifest(tmp_path / 'main', TEN), test_size=0.2, val_size=0.2, seed=SEED_A, external=tmp_path / 'manifest.jsonl')
+
+
+def test_a_zero_byte_manifest_leaves_no_patient_for_train(tmp_path):
+    with pytest.raises(ValueError, match=sp.REASON_NO_TRAIN):
+        sp.split(raw_manifest(tmp_path, b''), test_size=0.0, val_size=0.0, seed=SEED_A)
+
+
+def test_blank_lines_a_bom_and_crlf_are_read(tmp_path):
+    path = raw_manifest(tmp_path, b'\xef\xbb\xbf' + GOOD.replace(b'\n', b'\r\n') + b'\n  \n' + GOOD.replace(b'P0', b'P1') + b'\n')
+    obj = run(path, test_size=0.0, val_size=0.0)
+    assert sorted(obj['train']) == ['SYNTHETIC_P0', 'SYNTHETIC_P1']
+
+
+def test_a_manifest_reasons_do_not_say_column():
+    assert 'column' not in sp.REASON_COLUMNS and 'column' not in sp.REASON_ROWS

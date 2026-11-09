@@ -173,7 +173,7 @@ def _is_rigid(matrix):
 
 
 def reg_matrix_array(text):
-    """The 4x4 matrix of a series.csv reg_matrix text: np.eye(4) for 'identity', else its 16 numbers when rigid, or None."""
+    """The 4x4 matrix of a series.json reg_matrix text: np.eye(4) for 'identity', else its 16 numbers when rigid, or None."""
     if text == IDENTITY:
         return np.eye(4)
     values = [_or_none(float, token) for token in text.split()]

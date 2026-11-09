@@ -1,6 +1,6 @@
 """Synthetic AHE correctness and image-support regressions (#154, #147)."""
 import dataclasses
-import csv
+import json
 import logging
 import subprocess
 import sys
@@ -139,14 +139,14 @@ def test_study_mask_propagates_both_resamples_and_marks_only_real_support(tmp_pa
     report = pre.preprocess(converted, out, steps)
     folder = out / 'SYNTHETICPTA' / 'study_1'
     name = pre.output_name(f'series_{modality}_1.nii.gz', steps, ct=modality == 'CT', image=True)
-    assert report.rows[0].files == [name, f'fovmask_{name}', 'series.csv']
+    assert report.rows[0].files == [name, f'fovmask_{name}', 'series.json']
     mask, image = [sitk.ReadImage(str(folder / file)) for file in (f'fovmask_{name}', name)]
     assert header(mask) == header(image) and mask.GetPixelID() == sitk.sitkUInt8
     # 5^3 -> 3^3 at 1.5 mm -> 3^3 at 1.25 mm -> 9^3, with 3 padded voxels at each end.
     expected = np.zeros((9, 9, 9), np.uint8)
     expected[3:6, 3:6, 3:6] = 1
     np.testing.assert_array_equal(sitk.GetArrayFromImage(mask), expected)
-    assert [row['file'] for row in conv_rows(folder)] == [name]  # auxiliary masks never change series.csv kinds
+    assert [row['file'] for row in conv_rows(folder)] == [name]  # auxiliary masks never change series.json kinds
 
 
 @pytest.mark.parametrize('context', ['plan', 'study'])
@@ -180,10 +180,8 @@ def test_primary_masks_are_optional_manifest_columns_on_their_own_image_grid(tmp
     report = pre.preprocess(converted, out, dataclasses.replace(AHE, series_fov_mask=True))
     assert len(report.rows) == 3
     assert man.manifest(out) == (3, 0)
-    with open(out / 'manifest.csv', newline='') as handle:
-        reader = csv.DictReader(handle)
-        assert reader.fieldnames == man.FOV_COLUMNS
-        rows = list(reader)
+    rows = [json.loads(line) for line in (out / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]
+    assert all(list(row) == man.FOV_COLUMNS for row in rows)
     for row in rows:
         folder = out / row['patient'] / row['case_dir'].split('/')[1]
         image = row['image'] or f'ahe_{conv.CT_NAME}'
@@ -210,7 +208,5 @@ def test_invalid_primary_support_masks_do_not_remove_images_or_add_a_manifest_co
         mask.rename(target)
         mask.symlink_to(target)
     assert man.manifest(out) == (1, 0)
-    with open(out / 'manifest.csv', newline='') as handle:
-        reader = csv.DictReader(handle)
-        assert reader.fieldnames == man.COLUMNS
-        assert len(list(reader)) == 1
+    rows = [json.loads(line) for line in (out / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]
+    assert [list(row) for row in rows] == [man.COLUMNS]

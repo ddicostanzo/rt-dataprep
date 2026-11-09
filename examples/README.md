@@ -26,9 +26,11 @@ The new workspace contains `export/`, `organized/`, `converted/`, and `preproces
 - `export/` contains independent CT/MR/PT image series. CT and MR share one study; PT belongs to another.
 - `organized/` contains `misc_files/` because this example has no RTPLAN.
 - `converted/` contains `study_1/series_CT_1.nii.gz`, `study_1/series_MR_1.nii.gz`, and
-  `study_2/series_PT_1.nii.gz`, with one `series.csv` per study.
+  `study_2/series_PT_1.nii.gz`, with one `series.json` per study.
 - `preprocessed/` contains the same cases on compact 16 × 16 × 8 grids. MR/PT skip the CT HU rescale.
-- Both result roots contain manifests and whole-patient splits. Each split contains two patients and six imaging cases.
+- Both result roots contain a `manifest.jsonl` and whole-patient splits. Each split contains two patients and six imaging cases.
+
+Read a manifest with `pd.read_json(path, lines=True, dtype=False)` (`dtype=False` keeps zero-padded patient IDs and dates as text) and a `series.json` with `json.load(open(path))`.
 
 The script checks aggregate outcomes and refuses unexpected skips. Inputs, voxel values, dates, IDs, and UIDs are generated
 for demonstration. These phantoms are not a clinical validation dataset, PET SUV example, or RTPLAN/RTSTRUCT example.
@@ -57,8 +59,8 @@ a grid for real data. Cropping a plan's nonzero dose or masks can refuse that pl
 or registered series are refused/skipped, or the input yields no cases, so that subsequent automation can stop for review.
 
 Add `--series-fov-mask` to write support masks for the planning CT, study images, and registered plan series. It works
-with the synthetic imaging cohort too. The manifest then exposes primary masks through an optional trailing `fov_mask`
-column; aligned-series masks stay in the `series` JSON. `--help` describes each script's accepted arguments.
+with the synthetic imaging cohort too. The manifest then exposes primary masks through an optional `fov_mask`
+key; aligned-series masks stay in the `series` list. `--help` describes each script's accepted arguments.
 
 Add `--ahe` to the custom example to include adaptive histogram equalization. To try only AHE through the CLI, without
 resampling to the large `--reshape` grid:

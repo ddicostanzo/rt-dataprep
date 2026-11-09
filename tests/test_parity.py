@@ -15,7 +15,7 @@ spec = importlib.util.spec_from_file_location('parity', Path(__file__).resolve()
 parity = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(parity)
 
-# The plan's step set on the synthetic CT's own grid: every name gets the step prefixes, resolved through series.csv
+# The plan's step set on the synthetic CT's own grid: every name gets the step prefixes, resolved through series.json
 STEPS = pre.PreprocessSteps(resample=True, rescale=True, harmonize_spacing=True, reshape=True, legacy_linear_masks=True,
                             new_spacing=tc.SPACING, final_spacing=tc.SPACING, new_shape=tc.SHAPE[::-1])
 ROIS = [dict(tc.BOX, number=1, name='HR-CTV'), dict(tc.BOX, number=2, name='Bladder', box=((1, 3), (1, 3), (1, 3)))]
