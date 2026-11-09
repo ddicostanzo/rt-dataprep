@@ -38,3 +38,6 @@ Gotchas:
 - A patient with a lone surrogate escape (`"\ud800"`) parses as JSON but fails `.encode()` in split's ordering hash (UnicodeEncodeError, not mapped). Deferred: hardening.
 - split.py's module docstring and `check_disjoint` docstring, manifest.py's module docstring still say CSV: task-03.
 - test_manifest `read(root)` now returns parsed JSONL dicts, so comparisons use native lists.
+
+## review-2
+PASS, no BLOCKING; splits.json byte-identical old vs new on a 37-patient synthetic cohort. Deferred: W1 lone-surrogate patient/case_dir passes _read then UnicodeEncodeError in the hash (CLI shows fixed unexpected-error line, no content); N5 a root with only an old manifest.csv gives a generic file-system error from split (no rerun hint).
