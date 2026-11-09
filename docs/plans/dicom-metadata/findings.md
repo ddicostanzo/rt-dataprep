@@ -75,3 +75,18 @@ Gotchas:
 
 ## review-group-3
 PASS (no BLOCKING). Plan/spec bug corrected: "two-file RTDOSE with different DoseType" is unreachable (REASON_DOSE_TYPE refuses non-PHYSICAL); spec and plan AC5 now name a tag that can differ; tests already cover both. N2 README wording fixed (REG keys only on non-identity registered rows). Notes: nested min/max/distinct dicts are shared across folders (never mutated after merge); the refused-plan caplog case is refused before metadata runs.
+
+## task-04
+
+Files: src/rt_dataprep/manifest.py, src/rt_dataprep/dicom_io.py, tests/test_manifest.py, tests/test_dicom_io.py, tests/test_split.py, README.md.
+
+Decisions:
+- write_report's jsonl branch writes a row that is a dict as is (`row if isinstance(row, dict) else dict(zip(header, row, strict=True))`). List rows and CSV are untouched, so convert/preprocess/organize callers are unchanged; the header is not used for a dict row. The smallest change that avoids padding.
+- manifest keeps its positional lists; each pending row is a `(list, optional dict)` pair. At the end it builds `dict(zip(header, row, strict=True)) | optional`, so the optional keys follow the fixed keys and `fov_mask` (when the tree has one), in OPTIONAL_KEYS order. `_optional(row)` reads `row.get('dicom', {})`; a value of `None` or `''` is left out (0 for patient_age is kept).
+- Plan lines read `kept[0]` (the ct row; check_rows sorts it first and carries `dicom`); study lines read their own series row.
+- test_manifest.read() now asserts the optional-key order and strips them, so its older full-row equality asserts keep comparing the fixed part; the new tests read the lines raw.
+
+Gotchas:
+- A `{'distinct'}` list is first-seen order over the slices, so a differing slice 0 comes first.
+- Full suite: 1566 passed, 4 skipped (5 min); ruff and compileall clean.
+- Split needed no change (it only requires patient and case_dir); the split test pins it.

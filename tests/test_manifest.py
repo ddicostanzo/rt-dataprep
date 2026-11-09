@@ -21,6 +21,7 @@ from rt_dataprep import split as sp
 
 COLUMNS = ['case_dir', 'patient', 'fx', 'ct_size', 'ct_spacing', 'dose', 'masks', 'rtplan_uid', 'ct_series_uid', 'study_uid',
            'case_type', 'modality', 'image', 'series']
+OPTIONAL = ['patient_age', 'patient_sex', 'patient_weight', 'study_date', 'series_date', 'manufacturer', 'model', 'institution_name']
 PATIENT_A, PATIENT_B = 'SYNTHETIC_PTA_2', 'SYNTHETICPTB'
 ONE_MASK = {'ptv': box((4, 4, 4), (8, 8, 8))}
 
@@ -43,8 +44,10 @@ def tree(root):
 
 def read(root):
     rows = [json.loads(line) for line in (root / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]
-    assert all(list(row) in (COLUMNS, [*COLUMNS, 'fov_mask']) for row in rows)
-    return rows
+    for row in rows:  # the optional keys (task-04) follow the fixed ones, in order; this helper's callers compare the fixed part
+        base = [*COLUMNS, 'fov_mask'] if 'fov_mask' in row else COLUMNS
+        assert list(row) == [*base, *(key for key in OPTIONAL if key in row)]
+    return [{key: value for key, value in row.items() if key not in OPTIONAL} for row in rows]
 
 
 def test_rows_columns_and_values_on_a_converted_tree(tmp_path):
@@ -508,3 +511,61 @@ def test_an_roi_name_with_u2028_stays_on_its_line_and_splits(tmp_path):
     assert [json.loads(line)['masks'] for line in raw_lines(root)] == [['bladder', 'ptv'], [name]]  # B first: 'P' sorts before '_'
     obj = sp.split(root / 'manifest.jsonl', test_size=0.0, val_size=0.0, seed=0)
     assert sorted(obj['train']) == [PATIENT_B, PATIENT_A]
+
+
+# task-04: the 8 optional keys, from the primary image's `dicom` (series_date from its own field)
+FULL_TAGS = dict(PatientAge='063Y', PatientSex='F', PatientWeight='70.5', Manufacturer='SYNTHETIC_MAKER',
+                 ManufacturerModelName='SYNTHETIC_MODEL', InstitutionName='SYNTHETIC_SITE')
+
+
+@pytest.fixture(scope='module')
+def meta_master(tmp_path_factory):
+    """A converted tree: a plan whose CT carries every optional tag, a study CT carrying only two (and no series date), and a study
+    PT whose slices differ in Manufacturer (a {'distinct'} value)."""
+    base = tmp_path_factory.mktemp('manifest_meta')
+    org, out = base / 'org', base / 'out'
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10)], rois=[BOX],
+              ct_meta=dict(study_date=STUDY_D1, series_date=STUDY_D1, tags=FULL_TAGS))
+    misc = org / PID / 'misc_files'
+    put(misc, 'ct', 'CT', study_date=STUDY_D2, tags=dict(PatientSex='M', Manufacturer='SYNTHETIC_MAKER'))
+    put(misc, 'pt', 'PT', study_date=STUDY_D2, series_date=STUDY_D2,
+        tags=dict(Manufacturer='SYNTHETIC_A'), per_slice=[{'Manufacturer': 'SYNTHETIC_B'}, None, None, None])
+    conv.convert(org, out)
+    return out
+
+
+def meta_lines(out, tmp_path):
+    shutil.copytree(out, tmp_path / 'out')
+    root = tmp_path / 'out'
+    man.manifest(root)
+    return root, {row['case_dir']: row for row in [json.loads(line) for line in (root / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]}
+
+
+def test_the_optional_keys_follow_the_fixed_keys_in_order_and_come_from_the_primary_image(meta_master, tmp_path):
+    root, lines = meta_lines(meta_master, tmp_path)
+    plan_line = lines[f'{PID}/plan_1']
+    assert list(plan_line) == [*COLUMNS, *OPTIONAL]
+    assert (plan_line['patient_age'], plan_line['patient_sex'], plan_line['patient_weight']) == (63, 'F', '70.5')
+    assert (plan_line['study_date'], plan_line['series_date']) == (STUDY_D1, STUDY_D1)
+    assert (plan_line['manufacturer'], plan_line['model'], plan_line['institution_name']) == ('SYNTHETIC_MAKER', 'SYNTHETIC_MODEL', 'SYNTHETIC_SITE')
+    ct_line = next(row for row in lines.values() if row['modality'] == 'CT' and row['case_type'] == 'imaging')
+    assert list(ct_line) == [*COLUMNS, 'patient_sex', 'study_date', 'manufacturer']  # absent tags and an empty series_date: no key, no null
+    assert (ct_line['patient_sex'], ct_line['study_date'], ct_line['manufacturer']) == ('M', STUDY_D2, 'SYNTHETIC_MAKER')
+    pt_line = next(row for row in lines.values() if row['modality'] == 'PT')
+    assert pt_line['manufacturer'] == {'distinct': ['SYNTHETIC_B', 'SYNTHETIC_A']} and pt_line['series_date'] == STUDY_D2  # copied as is
+
+
+def test_a_series_json_without_dicom_still_gives_lines_with_only_series_date(meta_master, tmp_path):
+    root = tmp_path / 'out'
+    shutil.copytree(meta_master, root)
+    for folder in (p for patient in root.iterdir() if patient.is_dir() for p in patient.iterdir() if p.is_dir()):
+        rows = sf.read(folder)
+        for row in rows:
+            row.pop('dicom')
+        (folder / conv.SERIES_NAME).write_text(json.dumps(rows), encoding='utf-8')
+    assert man.manifest(root)[1] == 0
+    lines = [json.loads(line) for line in (root / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]
+    assert len(lines) == 3
+    for line in lines:
+        assert not set(line) & (set(OPTIONAL) - {'series_date'}) and set(line) - {'series_date'} <= {*COLUMNS}
+    assert {line['case_dir'].split('/')[1]: line.get('series_date') for line in lines}['plan_1'] == STUDY_D1

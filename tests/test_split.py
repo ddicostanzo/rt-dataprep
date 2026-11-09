@@ -426,3 +426,14 @@ def test_blank_lines_a_bom_and_crlf_are_read(tmp_path):
 
 def test_a_manifest_reasons_do_not_say_column():
     assert 'column' not in sp.REASON_COLUMNS and 'column' not in sp.REASON_ROWS
+
+
+def test_optional_manifest_keys_and_lines_that_differ_in_them_do_not_change_the_splits(tmp_path):
+    plain = write_manifest(tmp_path / 'plain', TEN)
+    rows = [json.loads(line) for line in plain.read_text(encoding='utf-8').splitlines()]
+    optional = [{'patient_age': 63, 'patient_sex': 'F', 'series_date': '20240110'}, {}, {'manufacturer': {'distinct': ['SYNTHETIC_A', 'SYNTHETIC_B']}},
+                {'study_date': '20240110', 'patient_weight': {'min': '60', 'max': '70'}}]
+    rich = tmp_path / 'rich' / 'manifest.jsonl'
+    rich.parent.mkdir()
+    rich.write_text(''.join(json.dumps(row | optional[i % len(optional)]) + '\n' for i, row in enumerate(rows)), encoding='utf-8')
+    assert run(rich) == run(plain)

@@ -774,3 +774,11 @@ def test_write_report_picks_the_format_from_the_suffix_and_the_dated_copy_keeps_
     assert (tmp_path / 'r.csv').read_bytes() == b'a,b\r\n1,2\r\n'
     dicom_io.write_report(tmp_path, 'm.jsonl', ['a'], [])
     assert (tmp_path / 'm.jsonl').read_bytes() == b''
+
+
+def test_write_report_jsonl_writes_a_dict_row_as_is_without_padding_and_csv_is_unchanged(tmp_path):
+    dicom_io.write_report(tmp_path, 'm.jsonl', ['a', 'b'], [{'a': 'x', 'k': 1}, ['y', 2], {'a': 'z', 'b': 'é', 'k': {'min': '1', 'max': '2'}}])
+    assert (tmp_path / 'm.jsonl').read_bytes() == (b'{"a": "x", "k": 1}\n{"a": "y", "b": 2}\n'
+                                                   b'{"a": "z", "b": "\\u00e9", "k": {"min": "1", "max": "2"}}\n')
+    dicom_io.write_report(tmp_path, 'r.csv', ['a', 'b'], [['1', '2']])
+    assert (tmp_path / 'r.csv').read_bytes() == b'a,b\r\n1,2\r\n'
