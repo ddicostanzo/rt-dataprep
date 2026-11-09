@@ -19,3 +19,11 @@ Decisions:
 Gotchas:
 - `zipfile.writestr` resets `flag_bits`, so encrypted/method-9 test zips are made by patching both the central and local headers.
 - Writing duplicate member names warns (UserWarning); the traversal test filters it.
+
+## review-1
+No BLOCKING. Deferred (file as hardening in 2.9):
+- W1: corrupt central dir with negative header_offset passes the allow-list; zf.open raises OSError (Errno 22) → REASON_IO_ERROR instead of unreadable/skip. Fix: `or i.header_offset < 0` in the allow-list.
+- N2: _unzip re-reads infolist() instead of the scanned list (TOCTOU on a changing source).
+- N3: bzip2/lzma decompress output caps are a recent CPython fix; early 3.12.x may balloon memory on a bzip2 bomb. Document min patch or allow only 0/8.
+- N4: no test pins "stream larger than declared file_size → unreadable, nothing staged" (verified by hand).
+Task-02 must: wrap _stage_zips in task A's try/except BaseException (an OSError leaves staged files); fold the double _has_preamble read.
