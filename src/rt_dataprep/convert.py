@@ -474,7 +474,7 @@ def _convert_plan(headers, unreadable, case_dir):
     for name, image in mask_images.items():
         write_atomic(image, case_dir / name)
         files.append(name)
-    for name, points, _ in rois.applicators + rois.lines:
+    for _, name, points, _ in rois.applicators + rois.lines:
         _atomic(lambda temp, points=points: np.savetxt(temp, points, fmt='%.4f'), case_dir / name)  # gzip text: the name ends .nii.gz
         files.append(name)
     series_rows = _header_call(_series_rows, plan, struct, ct_slices[0][1], dose_heads, rois, files)
@@ -722,8 +722,8 @@ def _series_rows(plan, struct, ct_head, dose_heads, rois, files):
     if dose_heads:
         rows.append(row(DOSE_NAME, 'dose', dose_heads, 'RTDOSE', _joined(_tag(ds, 'FrameOfReferenceUID') for ds in dose_heads),
                         summation=_joined(_tag(ds, 'DoseSummationType').strip() for ds in dose_heads)))
-    roi_names = {file: ('mask', name) for _, name, file, _ in rois.kept} | {file: ('applicator', name) for file, _, name in rois.applicators}
-    roi_names |= {file: ('line', name) for file, _, name in rois.lines}
+    roi_names = {file: ('mask', name) for _, name, file, _ in rois.kept} | {file: ('applicator', name) for _, file, _, name in rois.applicators}
+    roi_names |= {file: ('line', name) for _, file, _, name in rois.lines}
     rows += [row(file, roi_names[file][0], [struct], 'RTSTRUCT', struct_frame, roi_name=roi_names[file][1])
              for file in files if file in roi_names]
     return rows

@@ -39,3 +39,15 @@ PASS (no BLOCKING). Deferred, to file as `hardening` at 2.9:
 - W3: _roi_lookup: one item with an empty/non-integer ROI number drops the key even when another item matches.
 - N1: DS 'NaN'/'inf' order unpredictably in min/max (spec Deferred already notes NaN).
 - N2: TM string order is wrong across mixed precision ('0900' vs '090000.5'); spec rule.
+
+## task-02
+
+Files: src/rt_dataprep/masks.py, src/rt_dataprep/series.py, src/rt_dataprep/convert.py, tests/test_masks.py, tests/test_series.py.
+
+Decisions:
+- RoiPlan.applicators / .lines entries are now (ROINumber, file, points, ROIName). Unpacking sites: masks.py (lines append, applicator append, name list, the internal `apps` tuple gained the number as a 5th element) and convert.py (the write loop, the roi_names dicts). No other site in src, tests or scripts.
+- series.registration_reg returns (registered, text, reg header or None); registration() is `registration_reg(...)[:2]`, so its tests and its one caller (convert.py) are unchanged. The returned header is the object from `regs`, not a copy.
+- The classify record test goes through convert_plan with a spy on masks.classify (no direct classify fixture exists in test_masks).
+
+Gotchas:
+- A REG whose items cover both frames qualifies whatever frame the REG itself names; the "none qualifies" test needs an item list that omits the CT item and a REG in neither frame.

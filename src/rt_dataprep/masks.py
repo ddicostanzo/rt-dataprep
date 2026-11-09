@@ -33,8 +33,8 @@ REASON_MASK_SLICES = 'a mask does not lie on exactly the CT slices its contours 
 @dataclass
 class RoiPlan:
     kept: list = field(default_factory=list)  # [(ROINumber, ROIName, '<format_name>.nii.gz', [(N, 3) non-POINT contours in patient mm])] in RTSTRUCT order
-    applicators: list = field(default_factory=list)  # [('<name>.nii.gz', (N, 3) points in patient mm, ROIName)] in RTSTRUCT order
-    lines: list = field(default_factory=list)  # [('<format_name>.nii.gz', (N, 3) points in patient mm, ROIName)] in RTSTRUCT order
+    applicators: list = field(default_factory=list)  # [(ROINumber, '<name>.nii.gz', (N, 3) points in patient mm, ROIName)] in RTSTRUCT order
+    lines: list = field(default_factory=list)  # [(ROINumber, '<format_name>.nii.gz', (N, 3) points in patient mm, ROIName)] in RTSTRUCT order
 
 
 def format_name(text):
@@ -78,24 +78,24 @@ def classify(struct, plan, frame_uid, taken=(), ct=None):
             raise CaseRefused(REASON_ROI_FRAME)
         if 'OPEN_NONPLANAR' in types or interpreted.get(number) == 'BRACHY_CHANNEL':
             stem = ''.join(c for c in channel_ids.get(number, name) if c.isalnum())
-            apps.append((stem, np.concatenate(points), name, number in referenced_rois))
+            apps.append((stem, np.concatenate(points), name, number in referenced_rois, number))
         else:
             planar = [p for p, item in zip(points, items, strict=True) if str(item.ContourGeometricType) != 'POINT']
             # A span of at least 2 slices: a contour halfway between two slices can round to both and must stay a mask
             if ct is not None and planar and all(np.ptp(_slice_indices(p, ct)) >= 2 for p in planar):
-                result.lines.append((format_name(name) + SUFFIX, np.concatenate(planar), name))
+                result.lines.append((number, format_name(name) + SUFFIX, np.concatenate(planar), name))
             else:
                 result.kept.append((number, name, format_name(name) + SUFFIX, planar))
-    referenced = {(stem.lower(), len(points)) for stem, points, _, ref in apps if ref}
+    referenced = {(stem.lower(), len(points)) for stem, points, _, ref, _ in apps if ref}
     mask_files = {file.lower() for _, _, file, _ in result.kept}
-    for stem, points, name, ref in apps:
+    for stem, points, name, ref, number in apps:
         if not ref and (stem.lower(), len(points)) in referenced:
             continue
         if (stem + SUFFIX).lower() in mask_files:
             stem += '_channel'
-        result.applicators.append((stem + SUFFIX, points, name))
+        result.applicators.append((number, stem + SUFFIX, points, name))
     names = [str(n).lower() for n in taken] + [file.lower() for _, _, file, _ in result.kept]
-    names += [file.lower() for file, _, _ in result.applicators + result.lines]
+    names += [file.lower() for _, file, _, _ in result.applicators + result.lines]
     if any(name == SUFFIX for name in names) or len(set(names)) != len(names):
         raise CaseRefused(REASON_ROI_NAMES)
     return result

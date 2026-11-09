@@ -1825,3 +1825,26 @@ def test_the_parser_and_the_reg_item_reader_share_one_rigidity_helper(world, mon
     monkeypatch.setattr(ser, '_is_rigid', lambda matrix: False)
     assert ser.reg_matrix_array(matrix_text(np.eye(4))) is None
     assert world.registration([world.reg(world.items(rigid(), rigid(translation=(10, 0, 0))))]) == (True, '')
+
+
+def test_registration_reg_returns_the_chosen_reg_header(world):
+    good, other = world.reg(world.items(rigid(), rigid(translation=(10, 0, 0)))), world.reg(world.items(rigid(), rigid()))
+    registered, text, chosen = ser.registration_reg(world.ct_frame, world.mr_frame, [good, other], world.lookup)
+    assert (registered, text) == world.registration([good, other])
+    assert text != '' and chosen is min([good, other], key=lambda r: str(r.SOPInstanceUID))
+
+
+def test_registration_reg_identity_has_no_reg(world):
+    assert ser.registration_reg(world.ct_frame, world.ct_frame, [world.reg(world.items(rigid(), rigid()))], {}) == (True, 'identity', None)
+
+
+def test_registration_reg_returns_a_qualifying_reg_with_no_usable_matrix(world):
+    bad = world.reg(world.items(rigid(), rigid(translation=(10, 0, 0)) + rigid()))  # two matrices on one item: no usable matrix
+    assert world.registration([bad]) == (True, '')
+    assert ser.registration_reg(world.ct_frame, world.mr_frame, [bad], world.lookup) == (True, '', bad)
+
+
+def test_registration_reg_none_qualifies(world):
+    sequence = [dict(frame_uid=world.mr_frame, matrices=rigid())]  # omits the CT item, REG in neither frame
+    assert ser.registration_reg(world.ct_frame, world.mr_frame, [world.reg(sequence, frame_uid='1.9.9')], world.lookup) == (False, '', None)
+    assert ser.registration_reg(world.ct_frame, world.mr_frame, [], world.lookup) == (False, '', None)
