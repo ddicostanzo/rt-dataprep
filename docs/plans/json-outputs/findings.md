@@ -20,3 +20,6 @@ Gotchas:
 - Key order is not compared by the reader (key sets only), so a file with `retained` first reads fine.
 - series.py's docstring and the module docstrings of convert/preprocess/manifest still say series.csv: task-03's files.
 - Test helper names: `series_at`/`csv_at` in test_series became `sf.read`; `conv.write_series_json` is called directly only in the writer's own tests, other tests write through `sf.write`.
+
+## review-1
+PASS, no BLOCKING. Deferred NOTE: study_refusal_count counts non-object items of a corrupt series.json (count inflation only). Docstring/README leftovers are task-03.
