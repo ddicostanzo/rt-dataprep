@@ -94,7 +94,7 @@ pipeline, so reading it must not open a path-traversal, zip-bomb, PHI-leak or da
 - Existing tests pass unchanged except the updated seam fakes.
 
 ## Release check (manual)
-- Release v0.1.1; rerun the 20-folder OSC subset (`/fs/ess/PDE0046/raw_subset`): 20 of 20 organized, and the 17 folders
+- Release v0.1.1; rerun the 20-folder OSC subset: 20 of 20 organized, and the 17 folders
   that organized in v0.1.0 give the same `organize_report.csv` rows.
 
 ## Deferred
