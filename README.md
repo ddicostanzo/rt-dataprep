@@ -168,7 +168,24 @@ Plan numbering reflects the organized plan order. Study folders are numbered by 
 their written series, with blank dates/times last and StudyInstanceUID as a tie breaker. Series numbers are per modality
 within each destination. `series.json` records the actual output files and metadata; inspect it instead of inferring
 relationships from filenames. It is a JSON array with one object per output file, holding the same fields the earlier
-`series.csv` held (every value a string). Read it with `json.load(open(path))`.
+`series.csv` held (every value a string), then a `dicom` object (below). Read it with `json.load(open(path))`.
+
+Every object has a `dicom` key whose value is an object of DICOM metadata; it is `{}` when the headers hold none of it.
+A key appears only when its value is present, so a missing key means the tag was absent or unusable, never a default.
+Values are the DICOM values as written: strings (raw DA/TM/DT text such as `20240105`), a list of strings for a
+multi-valued element (`pixel_spacing`, `image_type`), and two numbers, `patient_age` (years, from `PatientAge` or from the
+birth date and study date; the birth date itself is not written) and `slices` (the count of slice headers). When the
+headers of a row (every slice of a series, every file of a multi-file dose) disagree, the value is
+`{"min": a, "max": b}` for a single numeric element or a DA/TM/DT (the first-seen texts of the extremes), and
+`{"distinct": [v1, v2, ...]}` otherwise (first-seen order); equal numbers such as `3` and `3.0` are one value.
+Which keys a row carries depends on its kind: patient, study, device and acquisition keys (`manufacturer`, `model`,
+`institution_name`, `study_date`, ...) on every row; image, CT, MR and PET keys (`rows`, `kvp`, `echo_time`,
+`injected_dose`, ...) on `ct` and `series` rows; RTSTRUCT keys, including `roi_interpreted_type` and
+`roi_generation_algorithm` of that row's ROI, on `mask`, `applicator` and `line` rows; `dose_units` and `dose_type` on
+`dose` rows. Plan keys (`plan_intent`, `prescription_dose`, `treatment_machine`, `source_isotope`, ...) are on every row
+of a plan folder, and the registration keys (`reg_type`, `reg_date`, `reg_time`, `reg_manufacturer`) on the registered
+`series` rows of a plan folder; study folders carry neither. Patient name, birth date and ethnic group are never written.
+These values are patient data: they appear only in `series.json` and `manifest.jsonl`, never in a log line or a report.
 
 Trees created with the old `images/` conversion layout must be re-converted. Current manifest and preprocessing walkers
 use `study_<n>/` and ignore the old `images/` layout.

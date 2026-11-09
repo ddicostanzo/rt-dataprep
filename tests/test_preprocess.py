@@ -2453,6 +2453,50 @@ def test_read_series_json_accepts_exactly_the_two_key_sets(tmp_path, columns, ma
     assert pre.read_series_json(tmp_path)[1] is malformed
 
 
+DICOM = {'manufacturer': 'SYNTHETIC_MAKER', 'min_max': {'min': '1', 'max': '2'}, 'distinct': {'distinct': [['A', 'B'], ['C']]}, 'slices': 3}
+
+
+@pytest.mark.parametrize('columns', [conv.SERIES_COLUMNS, pre.PREPROCESSED_SERIES_COLUMNS])
+def test_read_series_json_accepts_a_dicom_object_on_every_item_in_both_key_sets_and_returns_it_as_written(tmp_path, columns):
+    rows = [dict.fromkeys(columns, 'x') | {'dicom': DICOM}, dict.fromkeys(columns, 'y') | {'dicom': {}}]  # the values are not strings: exempt
+    sf.write(rows, tmp_path / conv.SERIES_NAME)
+    assert pre.read_series_json(tmp_path) == (rows, False)
+
+
+def test_read_series_json_reads_a_file_without_dicom_as_before(tmp_path):
+    rows = [dict.fromkeys(conv.SERIES_COLUMNS, 'x'), dict.fromkeys(conv.SERIES_COLUMNS, 'y')]
+    sf.write(rows, tmp_path / conv.SERIES_NAME)
+    assert pre.read_series_json(tmp_path) == (rows, False)
+
+
+@pytest.mark.parametrize('dicom', ['x', 1, [], None, [{}]])
+def test_read_series_json_calls_a_dicom_that_is_not_an_object_malformed(tmp_path, dicom):
+    (tmp_path / conv.SERIES_NAME).write_text(json.dumps([dict.fromkeys(conv.SERIES_COLUMNS, 'x') | {'dicom': dicom}]), encoding='utf-8')
+    assert pre.read_series_json(tmp_path)[1] is True
+
+
+def test_read_series_json_calls_dicom_on_some_items_only_malformed(tmp_path):
+    rows = [dict.fromkeys(conv.SERIES_COLUMNS, 'x') | {'dicom': {}}, dict.fromkeys(conv.SERIES_COLUMNS, 'y')]
+    for ordered in (rows, rows[::-1]):
+        (tmp_path / conv.SERIES_NAME).write_text(json.dumps(ordered), encoding='utf-8')
+        rows_read, malformed = pre.read_series_json(tmp_path)
+        assert malformed is True and len(rows_read) == 2
+
+
+def test_preprocess_keeps_the_dicom_object_of_every_row_unchanged_between_the_series_columns_and_retained(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    plan, _ = write_plan(converted)
+    study = write_study_tree(converted)
+    who = lambda r: {'who': [r['kind'], r['modality'], r['roi_name']], 'nested': DICOM}  # noqa: E731 (names change; these fields do not)
+    for folder in (plan, study):
+        sf.write([r | {'dicom': who(r)} for r in sf.read(folder)], folder / conv.SERIES_NAME)
+    pre.preprocess(converted, out, SMALL)
+    for folder in ('plan_1', 'study_1'):
+        got = sf.read(out / 'SYNTHETICPTA' / folder)
+        assert got and {tuple(item) for item in got} == {(*conv.SERIES_COLUMNS, 'dicom', 'retained')}
+        assert all(item['dicom'] == who(item) for item in got)
+
+
 @pytest.mark.parametrize('columns', [conv.SERIES_COLUMNS, pre.PREPROCESSED_SERIES_COLUMNS])
 def test_read_series_json_still_refuses_a_missing_or_extra_key(tmp_path, columns):
     for keys in (columns[1:], [*columns, 'extra']):
@@ -2702,6 +2746,12 @@ SERIES_JSON_BREAKS = {
     'number value': lambda good: ('[' + full_row_json(fractions_planned=5) + ']').encode(),
     'null value': lambda good: ('[' + full_row_json(roi_name=None) + ']').encode(),
     'list value': lambda good: ('[' + full_row_json(roi_name=['x']) + ']').encode(),
+    'dicom a string': lambda good: ('[' + full_row_json(dicom='x') + ']').encode(),
+    'dicom a list': lambda good: ('[' + full_row_json(dicom=[]) + ']').encode(),
+    'dicom null': lambda good: ('[' + full_row_json(dicom=None) + ']').encode(),
+    'dicom on one item only': lambda good: ('[' + full_row_json(dicom={}) + ',' + full_row_json() + ']').encode(),
+    'dicom on the second item only': lambda good: ('[' + full_row_json() + ',' + full_row_json(dicom={}) + ']').encode(),
+    'dicom and another extra key': lambda good: ('[' + full_row_json(dicom={}, extra='') + ']').encode(),
 }
 
 

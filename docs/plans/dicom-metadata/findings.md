@@ -54,3 +54,21 @@ Gotchas:
 
 ## review-group-2
 PASS (no BLOCKING, no deferred). Notes only: test_series picks the expected REG by min SOP UID; AC1 test spies on classify via convert_plan.
+
+## task-03
+
+Files: src/rt_dataprep/convert.py, src/rt_dataprep/preprocess.py, tests/test_dicom_metadata_convert.py (new), tests/test_convert.py, tests/test_preprocess.py, tests/series_files.py, tests/test_plan_regression.py, README.md. tests/synthetic_dicom.py and tests/test_synthetic_dicom.py needed no change (`tags=` / `per_slice=` / ROI `algorithm` from task-01 covered every fixture).
+
+Decisions:
+- `_series_rows(plan, struct, ct_slices, ...)`: `row()` keeps `heads` for the SERIES_COLUMNS (the ct row still passes `[ct_slices[0][1]]`, so `_joined` cannot change series_description/series_date) and takes a separate `dicom_heads` for the ct row's aggregation. `dicom = metadata.collect(own groups) | plan_keys`, `plan_keys = collect([plan], (RTPLAN,))` computed once. The roi map gained the ROI number (kept: first element; applicators/lines: first element), passed as `roi_number`.
+- `_place_series`: `ser.registration_reg` replaces `ser.registration`; each target tuple carries `plan_keys | reg_keys(reg)` (RTPLAN keys filtered from the ct row's `dicom`, REG keys only when a REG was chosen, so identity rows and `reg_matrix == ''` rows both follow the spec); the study tuple carries `{}`. `series_keys = collect(every slice of ordered, (ALL, IMAGES))` once per series after the image read succeeds; each folder gets `series_keys | extra_keys`, a new dict.
+- preprocess.read_series_json: the key set minus `dicom` must be one of the two column sets, the value check is `dict` for `dicom` and `str` otherwise; all-or-none comes from the existing `set(row) == first`. Nothing else changed: `row | {...}` carries `dicom` and write_series_json puts it after SERIES_COLUMNS and before `retained` (insertion order).
+- Existing exact-key-set assertions: test_convert.series_rows now asserts `[*SERIES_COLUMNS, 'dicom']` and returns the SERIES_COLUMNS projection (so the older equality asserts stay as they were); series_files.columns(row) does the same for test_plan_regression (pinned text unchanged).
+- AC5 "two-file RTDOSE with different DoseType -> distinct" cannot be reached end to end: convert refuses any DoseType but PHYSICAL (REASON_DOSE_TYPE) before the row is built. The test lets one EFFECTIVE file past `conv._check_dose_header` (a wrapper that checks a PHYSICAL copy; the row reads the real header). A second test shows the two-file aggregation end to end through Manufacturer (distinct) and SeriesNumber (numeric min/max).
+- AC5 "PixelSpacing differing -> distinct" on the CT: the volume check allows 1e-3 mm, so the fixture uses 1.5 vs 1.5004.
+- AC9 values: `PatientAge` '073Y', size '1.8765', weight '70.321' and the SYNTHETIC_ site strings; PatientSex is one letter and cannot be searched for in a log, so it is not in the substring list.
+
+Gotchas:
+- `make_plan` had no way to tag the RTSTRUCT; it gained `struct_meta=`.
+- Study folders are numbered by StudyDate then UID, and the synthetic series share a StudyDate, so tests find study rows by series_instance_uid, not by folder number.
+- Full suite: 1562 passed, 4 skipped (5 min); ruff and compileall clean.

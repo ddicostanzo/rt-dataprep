@@ -25,7 +25,7 @@ import pydicom
 import SimpleITK as sitk
 from pydicom.datadict import tag_for_keyword
 
-from rt_dataprep import dicom_io, masks, pool
+from rt_dataprep import dicom_io, masks, metadata, pool
 from rt_dataprep import series as ser
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
 from rt_dataprep.series import DIRECTION_ATOL
@@ -342,24 +342,26 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
         modality, frame = str(first.Modality), str(first.FrameOfReferenceUID)
         targets = []
         for row, _, ct_row in converted:
-            registered, text = ser.registration(ct_row['frame_of_reference_uid'], frame, regs, by_sop)
-            if registered:
-                targets.append((row.folder, text, {c: ct_row[c] for c in PLAN_COLUMNS}))
+            registered, text, reg = ser.registration_reg(ct_row['frame_of_reference_uid'], frame, regs, by_sop)
+            if registered:  # the plan's RTPLAN keys come from its ct row's dicom; the chosen REG's (none for the same frame) are added after
+                plan_keys = {k: v for k, v in ct_row['dicom'].items() if k in metadata.keys(metadata.RTPLAN)}
+                targets.append((row.folder, text, {c: ct_row[c] for c in PLAN_COLUMNS}, plan_keys | (metadata.reg_keys(reg) if reg is not None else {})))
         image = ser.read_series(ordered)
         if image is None:
             skipped += 1
             continue
+        series_keys = metadata.collect([ds for _, ds in ordered], (metadata.ALL, metadata.IMAGES))  # once per series: every slice
         study_uid = _tag(first, 'StudyInstanceUID')  # one study per series: at_risk skipped the rest
         hidden = study_folders.setdefault(study_uid, f'.study_{len(study_folders)}')  # an index, never the UID
         study_dates.setdefault(study_uid, []).append(tuple(_tag(first, tag).strip() for tag in ('StudyDate', 'StudyTime')))
-        for folder_name, text, plan_columns in [*targets, (hidden, '', dict.fromkeys(PLAN_COLUMNS, ''))]:
+        for folder_name, text, plan_columns, extra_keys in [*targets, (hidden, '', dict.fromkeys(PLAN_COLUMNS, ''), {})]:
             k = counts[folder_name, modality] = counts.get((folder_name, modality), 0) + 1
             name = f'series_{modality}_{k}.nii.gz'
             (partial / folder_name).mkdir(exist_ok=True)
             write_atomic(image, partial / folder_name / name)
             written.setdefault(folder_name, []).append((modality, k, dict(
                 file=name, kind='series', modality=modality, roi_name='', dose_summation_type='', reg_matrix=text,
-                frame_of_reference_uid=frame, **plan_columns,
+                frame_of_reference_uid=frame, **plan_columns, dicom=series_keys | extra_keys,  # a new dict per folder
                 **{column: _tag(first, tag) for column, tag in (
                     ('series_description', 'SeriesDescription'), ('series_instance_uid', 'SeriesInstanceUID'),
                     ('study_instance_uid', 'StudyInstanceUID'), ('series_date', 'SeriesDate'))})))
@@ -477,7 +479,7 @@ def _convert_plan(headers, unreadable, case_dir):
     for _, name, points, _ in rois.applicators + rois.lines:
         _atomic(lambda temp, points=points: np.savetxt(temp, points, fmt='%.4f'), case_dir / name)  # gzip text: the name ends .nii.gz
         files.append(name)
-    series_rows = _header_call(_series_rows, plan, struct, ct_slices[0][1], dose_heads, rois, files)
+    series_rows = _header_call(_series_rows, plan, struct, ct_slices, dose_heads, rois, files)
     return PlanResult(files, series_uid, series_rows)
 
 
@@ -703,8 +705,10 @@ def _joined(values):
     return ';'.join(dict.fromkeys(values))
 
 
-def _series_rows(plan, struct, ct_head, dose_heads, rois, files):
-    """One dict per mask, applicator, CT and dose file in `files` (series.json itself has none), from headers already read."""
+def _series_rows(plan, struct, ct_slices, dose_heads, rois, files):
+    """One dict per mask, applicator, CT and dose file in `files` (series.json itself has none), from headers already read.
+    SERIES_COLUMNS come from the first CT slice; `dicom` aggregates every planning-CT slice, every RTDOSE file and the RTSTRUCT's ROI."""
+    ct_head = ct_slices[0][1]
     groups = plan.get('FractionGroupSequence', [])
     plan_columns = dict(rtplan_uid=str(plan.SOPInstanceUID), rtplan_label=_tag(plan, 'RTPlanLabel'),
                         rtplan_date=_tag(plan, 'RTPlanDate'),
@@ -712,19 +716,25 @@ def _series_rows(plan, struct, ct_head, dose_heads, rois, files):
     frames = struct.get('ReferencedFrameOfReferenceSequence', [])
     struct_frame = _tag(struct, 'FrameOfReferenceUID') or (_tag(frames[0], 'FrameOfReferenceUID') if frames else '')
 
-    def row(file, kind, heads, modality, frame, roi_name='', summation='', reg_matrix=''):
+    plan_keys = metadata.collect([plan], (metadata.RTPLAN,))
+
+    def row(file, kind, heads, modality, frame, metadata_groups, roi_name='', summation='', reg_matrix='', roi_number=None, dicom_heads=None):
+        own = metadata.collect(dicom_heads or heads, metadata_groups, roi_number=roi_number)
         return dict(file=file, kind=kind, modality=modality, roi_name=roi_name, dose_summation_type=summation,
-                    reg_matrix=reg_matrix, frame_of_reference_uid=frame, **plan_columns,
+                    reg_matrix=reg_matrix, frame_of_reference_uid=frame, **plan_columns, dicom=own | plan_keys,
                     **{column: _joined(_tag(ds, tag) for ds in heads) for column, tag in (
                         ('series_description', 'SeriesDescription'), ('series_instance_uid', 'SeriesInstanceUID'),
                         ('study_instance_uid', 'StudyInstanceUID'), ('series_date', 'SeriesDate'))})
-    rows = [row(CT_NAME, 'ct', [ct_head], 'CT', _tag(ct_head, 'FrameOfReferenceUID'), reg_matrix='identity')]
+    rows = [row(CT_NAME, 'ct', [ct_head], 'CT', _tag(ct_head, 'FrameOfReferenceUID'), (metadata.ALL, metadata.IMAGES),
+                reg_matrix='identity', dicom_heads=[ds for _, ds in ct_slices])]
     if dose_heads:
         rows.append(row(DOSE_NAME, 'dose', dose_heads, 'RTDOSE', _joined(_tag(ds, 'FrameOfReferenceUID') for ds in dose_heads),
-                        summation=_joined(_tag(ds, 'DoseSummationType').strip() for ds in dose_heads)))
-    roi_names = {file: ('mask', name) for _, name, file, _ in rois.kept} | {file: ('applicator', name) for _, file, _, name in rois.applicators}
-    roi_names |= {file: ('line', name) for _, file, _, name in rois.lines}
-    rows += [row(file, roi_names[file][0], [struct], 'RTSTRUCT', struct_frame, roi_name=roi_names[file][1])
+                        (metadata.ALL, metadata.RTDOSE), summation=_joined(_tag(ds, 'DoseSummationType').strip() for ds in dose_heads)))
+    roi_names = {file: ('mask', name, number) for number, name, file, _ in rois.kept}
+    roi_names |= {file: ('applicator', name, number) for number, file, _, name in rois.applicators}
+    roi_names |= {file: ('line', name, number) for number, file, _, name in rois.lines}
+    rows += [row(file, roi_names[file][0], [struct], 'RTSTRUCT', struct_frame, (metadata.ALL, metadata.RTSTRUCT),
+                 roi_name=roi_names[file][1], roi_number=roi_names[file][2])
              for file in files if file in roi_names]
     return rows
 
