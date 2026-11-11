@@ -152,6 +152,7 @@ converted/
       series_MR_1.nii.gz
       plan.parquet
       beam_mu.nii.gz
+      fluence_mu.nii.gz
       series.json
     study_1/
       series_CT_1.nii.gz
@@ -185,7 +186,7 @@ Which keys a row carries depends on its kind: patient, study, device and acquisi
 `injected_dose`, ...) on `ct` and `series` rows; RTSTRUCT keys, including `roi_interpreted_type` and
 `roi_generation_algorithm` of that row's ROI, on `mask`, `applicator` and `line` rows; `dose_units` and `dose_type` on
 `dose` rows. Plan keys (`plan_intent`, `prescription_dose`, `treatment_machine`, `source_isotope`, ...) are on every row
-of a plan folder, and the registration keys (`reg_type`, `reg_date`, `reg_time`, `reg_manufacturer`) on the
+of a plan folder, and `beam_numbers` (the `;`-joined BeamNumbers in slice order) on the `fluence` row after them, and the registration keys (`reg_type`, `reg_date`, `reg_time`, `reg_manufacturer`) on the
 `series` rows of a plan folder registered through a REG (not same-frame rows); study folders carry neither. Patient name, birth date and ethnic group are never written.
 These values are patient data: they appear only in `series.json` and `manifest.jsonl`, never in a log line or a report.
 
@@ -237,6 +238,38 @@ Trees converted before this version gain `beam_mu.nii.gz` only on a run with `co
 `preprocess` resamples `beam_mu.nii.gz` onto the final CT like the dose (float32, 0 outside the native grid, the same output-name
 prefixes; copied unchanged on a run with no geometric step), but a beam volume the final grid cuts never refuses the plan, is not
 counted in `cropped`, and has a blank `retained`.
+
+### fluence_mu.nii.gz
+
+A photon plan that gets a `plan.parquet` also gets `fluence_mu.nii.gz` (after `beam_mu.nii.gz`, before `series.json`), with a
+`series.json` row of `kind` `fluence` and `modality` `RTPLAN` (the plan's columns and metadata, and the plan's own
+`frame_of_reference_uid`), whose `dicom` is the plan row's `dicom` plus a last key `beam_numbers`: the `;`-joined DICOM
+BeamNumbers in slice order (a plan numbered 7, 2, 5 gives `"7;2;5"`). It is a float32 image of shape (beams, 400, 400) as
+`sitk.GetArrayFromImage` returns it (`[k, row, column]`), one slice per treatment beam in the order of `plan.parquet`, holding the
+beam's fluence in MU per fraction on the isocenter plane in the beam-limiting-device (collimator) frame, seen from the source:
+1 mm pixels, centres at -199.5 ... 199.5 mm on both axes (pixel `j` covers `j - 200` to `j - 199` mm). The collimator angle is not
+applied, and gantry, couch, SAD and `PatientPosition` play no part. The column index increases toward IEC +X (the X2 jaw and leaf
+bank), the row index toward IEC +Y (the Y2 jaw; leaf pair n+1 lies at larger Y than pair n). Each pixel holds the exact
+area fraction of the open region (one rectangle per open leaf pair inside the jaws, or the jaws alone without an MLC) times the
+control-point weights, which follow `beam_mu`'s rule (half the MU of the segment before and half of the segment after each
+control point); a pixel fully inside a static open field reads the beam's MU. Pure geometry: open is 1 and closed is 0, with no
+leaf transmission, tongue-and-groove or rounded leaf ends.
+
+- **Not on the CT grid.** The file's geometry is its own: never resample it with the masks or the dose, and do not use it with the
+  CT's origin or spacing. Axis 0 is the beam index, not a distance in mm.
+- **Orientation.** SimpleITK reads the NIfTI with origin (-199.5, -199.5, 0), spacing 1 and identity direction. nibabel shows the same
+  data as (column, row, k) with affine diag(-1, -1, 1) and origin (199.5, 199.5, 0) (NIfTI stores LPS): index the array, and do not
+  take the +X/+Y directions from the nibabel affine. To plot the view from the source, use `plt.imshow(fluence[k], origin='lower')`.
+- **Not modelled.** A plan gets no `fluence_mu.nii.gz` and no `fluence` row, and logs one warning (the plan still converts, with its
+  `plan.parquet` and any `beam_mu.nii.gz`), when `beam_mu`'s aperture rules refuse it (blocks, an MLC that is not `MLCX`, an `MLCX`
+  without strictly increasing leaf boundaries, a control point with no jaw or MLC bounding an axis), when an open rectangle of a
+  control point with weight reaches beyond +-200 mm (an edge at exactly 200 is inside; nothing is clipped), or when two treatment
+  beams share a BeamNumber. The SAD, `PatientPosition` and table-top-angle rules of `beam_mu` do not apply to it. Plans without a
+  `plan.parquet` get none either.
+- Trees converted before this version gain `fluence_mu.nii.gz` only on a run with `convert --overwrite`.
+
+`preprocess` copies `fluence_mu.nii.gz` unchanged under its own name on every run (it is not on the CT grid, so it is never
+resampled, cropped or counted in `retained`), and `manifest` lists it in the plan line's `fluence` key.
 
 ## Conversion behavior
 
@@ -373,7 +406,7 @@ these keys:
 | `fov_mask` (optional) | Planning-CT or study-image support-mask filename, relative to its case folder; blank when absent. |
 | `patient_age`, `patient_sex`, `patient_weight`, `study_date`, `series_date`, `manufacturer`, `model`, `institution_name` (all optional) | From the `dicom` object of the case's primary image (a plan's planning CT; an imaging line's own series), `series_date` from that image's `series_date` field. A key the image has no value for is left out of that line, so lines can differ in which of these they carry. A value that varied over the series is the `{"min": ..., "max": ...}` or `{"distinct": [...]}` object, copied as is. They follow the fixed keys (and `fov_mask`) in the order listed; a `series.json` without `dicom` gives only `series_date`. `split` ignores them. |
 | `retained` (optional, plans only) | The lowest dose/mask `retained` of a preprocessed plan (the fraction kept by `--allow-crop`), after the metadata keys; left out on a converted tree or a run without a geometric step. |
-| `plan`, `beam` (optional, plans only) | The file name of the plan's `plan` series.json row (`plan.parquet`) and of its `beam` row (`beam_mu.nii.gz`, or its prefixed name after a geometric `preprocess` run); each is left out when the plan has no such row. They follow `retained`, `plan` then `beam`. |
+| `plan`, `beam`, `fluence` (optional, plans only) | The file name of the plan's `plan` series.json row (`plan.parquet`), of its `beam` row (`beam_mu.nii.gz`, or its prefixed name after a geometric `preprocess` run) and of its `fluence` row (`fluence_mu.nii.gz`, never renamed); each is left out when the plan has no such row. They follow `retained`, in the order `plan`, `beam`, `fluence`. |
 
 `masks` and `series` are native JSON lists, `patient_age` and `retained` are numbers, and the optional metadata values may be objects; every other value is a string. The `fov_mask` key appears on every line only
 when at least one usable primary-image mask is present in the tree. Without those masks, the original fourteen keys are
@@ -655,7 +688,7 @@ def load(case_dir):
 train = [load(case) for cases in splits['train'].values() for case in cases]
 ```
 
-In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, `plan`, or `beam`.
+In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, `plan`, `beam`, or `fluence`.
 Applicator and line files are gzip-compressed coordinate text, not NIfTI; see [Conversion behavior](#conversion-behavior).
 After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (summed dose) and mask (volume)
 kept on the final grid. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should

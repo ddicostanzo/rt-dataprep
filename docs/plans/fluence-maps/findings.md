@@ -55,3 +55,20 @@ Files: src/rt_dataprep/fluence.py, tests/test_fluence.py (+ this file).
 - AC14 (2 arcs x 178 control points): 1.45 s wall in `pytest -m slow tests/test_fluence.py` (budget 10 s; other agents' jobs were
   sharing the machine, so not strictly idle).
 - Full suite 1735 passed, 4 skipped, 2 deselected (slow); ruff clean.
+
+## task-04
+Files: src/rt_dataprep/convert.py, tests/test_convert.py, tests/test_manifest.py, tests/test_preprocess.py, README.md (+ this file).
+- convert: `FLUENCE_NAME = 'fluence_mu.nii.gz'`; `fluence.fluence_mu(plan, rows)` in its own `try/except CaseRefused` (third catch, inside `if rows is not None`,
+  after beam_mu, before `case_dir.mkdir`), `log.warning('convert: %s', fluence.REASON_FLUENCE)`; written with `write_atomic` after beam_mu.
+  `_series_rows(..., files, beam_numbers)`; the `fluence` row (frame = the plan's, unlike `beam`, which has the CT's) is appended after `beam` only when
+  `FLUENCE_NAME in files`. Implemented with a new `row(..., extra_dicom=None)` argument so `beam_numbers` is the last `dicom` key.
+- test_convert: existing exact file lists / row kinds / indices ([-2] -> [-3] for the plan row, beam row now [-3:-1]) updated on purpose; NOT_MODELLED test
+  split by `NO_FLUENCE` (blocks, mlcy, null-boundaries, unbounded-axis, two-conditions: 2 WARNINGs, no fluence; the rest: fluence written, 1 WARNING).
+  New: fluence refusal test (aperture, off-grid via jaw 200.01 on an MLC-less 3d beam, duplicate numbers) with assert_no_leak; table-top-pitch plan still
+  gets fluence; beam numbers 7;2;5 + row dicom; brachy no log line; bug in fluence_mu propagates.
+- test_manifest: photon-line assertions now `[-3:] == plan, beam, fluence` and `[-4:] == retained, plan, beam, fluence`; the task-03 key test now drops the
+  converted fluence row first (convert writes it) instead of injecting a placeholder.
+- test_preprocess: no existing assertion changed; `FLUENCE_NAME` is now `conv.FLUENCE_NAME`; added a test that a really converted fluence map is copied
+  byte-identical (geometric and non-geometric).
+- README: new `### fluence_mu.nii.gz` section, folder tree, per-kind dicom keys paragraph, manifest key table, kind values.
+- Gotcha: `test_a_fluence_refusal...[aperture]` overlaps the NOT_MODELLED blocks case on purpose (explicit AC13 leak check).
