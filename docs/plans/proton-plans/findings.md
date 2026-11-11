@@ -13,3 +13,14 @@ Carry-over gotchas:
 - `uv run --group dev ...` only; no bare python. Full suite ~4 min.
 - Synthetic DICOM via save_as/dcmread; SYNTHETIC_ identifiers; no UIDs/values in log assertions.
 - Temp files only in your own scratchpad (tmp-guard blocks elsewhere).
+
+## task-01
+- Files: `src/rt_dataprep/metadata.py` (RTPLAN `radiation_type`, `beam_type` now `(BeamSequence[*].X, IonBeamSequence[*].X)`;
+  `treatment_machine` is BeamSequence, IonBeamSequence, TreatmentMachineSequence in that order); `tests/test_metadata.py`
+  (two new tests: ion fallback incl. IonBeamSequence ranking above TreatmentMachineSequence; photon/brachy values and the
+  full `keys(RTPLAN)` tuple pinned).
+- `metadata._compute` already takes the first path with samples, so no logic change. `keys(RTPLAN)` is a tuple of names in
+  table order; the pin test compares the whole tuple.
+- RED was only the ion test (KeyError radiation_type); the photon/brachy pin passes before and after, as intended.
+- The fallback is per whole path: a plan with BeamSequence yielding nothing but IonBeamSequence present uses the ion path.
+  A mixed plan (both sequences) reports only BeamSequence values; spec premise 3 accepts this.
