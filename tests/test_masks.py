@@ -450,15 +450,28 @@ def test_mask_and_applicator_files_are_listed_masks_first_in_rtstruct_order(tmp_
     assert result.files == ['planning_ct.nii.gz', 'zed.nii.gz', 'alpha.nii.gz', 'Ring.nii.gz', 'Needle.nii.gz']
 
 
+@pytest.mark.parametrize('rois,channels,files', [
+    ([dict(number=1, name='Ring', kind='channel', points=channel_points(3)),
+      dict(number=2, name='RING', kind='channel', points=channel_points(3)),
+      dict(number=3, name='ring', kind='channel', points=channel_points(3))], None,
+     ['Ring.nii.gz', 'RING_2.nii.gz', 'ring_3.nii.gz']),  # applicators whose names differ only in case
+    ([dict(number=1, name='Ring', kind='channel', points=channel_points(3)),
+      dict(number=2, name='x', kind='channel', points=channel_points(4))],
+     [dict(applicator_id='Ring', dwells_mm=np.zeros((2, 3)), roi=2)],
+     ['Ring.nii.gz', 'Ring_2.nii.gz']),  # an unreferenced twin with another point count is kept, the later one numbered
+    ([dict(number=1, name='x', kind='channel', points=channel_points(3)),
+      dict(number=2, name='y', kind='channel', points=channel_points(3))],
+     [dict(applicator_id='Same', dwells_mm=np.zeros((2, 3)), roi=1), dict(applicator_id='same', dwells_mm=np.zeros((2, 3)), roi=2)],
+     ['Same.nii.gz', 'same_2.nii.gz']),  # two channels sharing an applicator id
+])
+def test_applicators_whose_names_clash_ignoring_case_are_numbered_in_rtstruct_order(tmp_path, rois, channels, files):
+    result, case = run(tmp_path, make_plan(tmp_path, rois, channels))
+    assert result.files == ['planning_ct.nii.gz', *files]
+    for roi, file in zip(rois, files, strict=True):
+        assert np.allclose(np.loadtxt(case / file), roi['points'], atol=1e-3)
+
+
 @pytest.mark.parametrize('rois,channels', [
-    ([dict(number=1, name='Ring', kind='channel', points=np.zeros((3, 3))),
-      dict(number=2, name='RING', kind='channel', points=np.zeros((3, 3)))], None),  # two applicators, case differs
-    ([dict(number=1, name='Ring', kind='channel', points=np.zeros((3, 3))),
-      dict(number=2, name='x', kind='channel', points=np.zeros((4, 3)))],
-     [dict(applicator_id='Ring', dwells_mm=np.zeros((2, 3)), roi=2)]),  # an unreferenced twin with another point count
-    ([dict(number=1, name='x', kind='channel', points=np.zeros((3, 3))),
-      dict(number=2, name='y', kind='channel', points=np.zeros((3, 3)))],
-     [dict(applicator_id='Same', dwells_mm=np.zeros((2, 3)), roi=1), dict(applicator_id='same', dwells_mm=np.zeros((2, 3)), roi=2)]),
     ([dict(number=1, name='x', kind='channel', points=np.zeros((3, 3)))],
      [dict(applicator_id='--', dwells_mm=np.zeros((2, 3)), roi=1)]),  # the channel id reduces to nothing
     ([dict(number=1, name='x', kind='channel', points=np.zeros((3, 3)))],
@@ -481,7 +494,9 @@ def test_a_channel_without_an_applicator_id_still_counts_as_referenced(tmp_path)
     rois = [dict(number=1, name='Ch 1', kind='channel', points=channel_points(6)),
             dict(number=2, name='Ring4', kind='channel', points=channel_points(6) + 1)]  # referenced, by a channel with no id
     channels = [dict(applicator_id='Ring 4', dwells_mm=np.zeros((2, 3)), roi=1), dict(dwells_mm=np.zeros((2, 3)), roi=2)]
-    assert refused(tmp_path, make_plan(tmp_path, rois, channels)) == masks.REASON_ROI_NAMES
+    result, case = run(tmp_path, make_plan(tmp_path, rois, channels))
+    assert result.files == ['planning_ct.nii.gz', 'Ring4.nii.gz', 'Ring4_2.nii.gz']  # kept, so numbered, not dropped
+    assert np.allclose(np.loadtxt(case / 'Ring4_2.nii.gz'), channel_points(6) + 1, atol=1e-3)
 
 
 def test_an_applicator_named_like_a_mask_gets_the_channel_suffix(tmp_path):
@@ -509,12 +524,14 @@ def test_an_unreferenced_applicator_named_like_a_mask_gets_the_channel_suffix(tm
     assert np.allclose(np.loadtxt(case / 'Ring_channel.nii.gz'), channel_points(3), atol=1e-3)
 
 
-def test_two_applicators_that_both_take_one_masks_channel_suffix_refuse(tmp_path):
+def test_two_applicators_that_both_take_one_masks_channel_suffix_are_numbered(tmp_path):
     rois = [box(1, 'ring', (1, 2), (1, 2), (1, 2)),
             dict(number=2, name='x', kind='channel', points=channel_points(3)),
             dict(number=3, name='RING', kind='channel', points=channel_points(4))]  # another point count: not a dropped twin
     channels = [dict(applicator_id='Ring', dwells_mm=np.zeros((2, 3)), roi=2)]
-    assert refused(tmp_path, make_plan(tmp_path, rois, channels)) == masks.REASON_ROI_NAMES
+    result, case = run(tmp_path, make_plan(tmp_path, rois, channels))
+    assert result.files == ['planning_ct.nii.gz', 'ring.nii.gz', 'Ring_channel.nii.gz', 'RING_channel_2.nii.gz']
+    assert np.allclose(np.loadtxt(case / 'RING_channel_2.nii.gz'), channel_points(4), atol=1e-3)
 
 # A reference line: one contour across the CT's slices (z 7..17 mm here), drawn on a reformatted plane.
 SPANNING = np.array([[-1.0, 8.0, 7.0], [-1.0, 8.0, 12.0], [-1.0, 8.0, 17.0]])

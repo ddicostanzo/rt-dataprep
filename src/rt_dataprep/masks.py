@@ -50,7 +50,8 @@ def classify(struct, plan, frame_uid, taken=(), ct=None):
     with an OPEN_NONPLANAR contour or RTROIInterpretedType BRACHY_CHANNEL are applicators, the others masks. An
     applicator ROI no plan channel references is dropped when a referenced one has its file name (ignoring case) and its
     point count: the RTSTRUCT's library copy of that channel. An applicator named like a mask is written as
-    '<name>_channel.nii.gz'. With `ct` (the planning CT image), a would-be mask ROI whose every non-POINT contour crosses
+    '<name>_channel.nii.gz'. An applicator whose file name an earlier applicator already has (ignoring case) gets
+    '_2', '_3', ... appended. With `ct` (the planning CT image), a would-be mask ROI whose every non-POINT contour crosses
     CT slices (a reference line drawn on a reformatted plane) is a line instead: its points go to a text file like an
     applicator's (crossing: its points span at least 2 slices). A mix of axial and crossing contours stays a mask (and build_masks refuses it). Then an empty output name, or two names equal ignoring case (also with `taken`, names
     already used in the plan folder), refuse, as does a mask or applicator ROI whose ReferencedFrameOfReferenceUID is
@@ -87,12 +88,17 @@ def classify(struct, plan, frame_uid, taken=(), ct=None):
             else:
                 result.kept.append((number, name, format_name(name) + SUFFIX, planar))
     referenced = {(stem.lower(), len(points)) for stem, points, _, ref, _ in apps if ref}
-    mask_files = {file.lower() for _, _, file, _ in result.kept}
+    mask_files, app_files = {file.lower() for _, _, file, _ in result.kept}, set()
     for stem, points, name, ref, number in apps:
         if not ref and (stem.lower(), len(points)) in referenced:
             continue
         if (stem + SUFFIX).lower() in mask_files:
             stem += '_channel'
+        base, count = stem, 1
+        while (stem + SUFFIX).lower() in app_files:  # an earlier applicator has this name (ignoring case): number it (#239)
+            count += 1
+            stem = f'{base}_{count}'
+        app_files.add((stem + SUFFIX).lower())
         result.applicators.append((number, stem + SUFFIX, points, name))
     names = [str(n).lower() for n in taken] + [file.lower() for _, _, file, _ in result.kept]
     names += [file.lower() for _, file, _, _ in result.applicators + result.lines]
