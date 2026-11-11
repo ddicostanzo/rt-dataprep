@@ -4,6 +4,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from pydicom.dataset import Dataset
+from pydicom.sequence import Sequence
 
 import synthetic_dicom as sd
 from rt_dataprep import metadata
@@ -306,11 +308,27 @@ def test_malformed_patient_age_omits_only_patient_age(tmp_path):
     assert got == {'manufacturer': 'SYNTHETIC_MAKER'}
 
 
-def test_an_empty_sequence_on_one_slice_omits_the_key_for_the_row(tmp_path):
-    # A structural failure (IndexError on [0]) omits the key for the whole row; a merely missing tag is ignored instead.
-    slices = [dict(RadiopharmaceuticalInformationSequence=PT_SEQUENCE), dict(RadiopharmaceuticalInformationSequence=[])]
-    got = collect(ct_heads(tmp_path, 2, modality='PT', per_slice=slices), (IMAGES,))
-    assert 'radiopharmaceutical' not in got and 'slices' in got
+def test_an_empty_sequence_on_one_slice_is_skipped_like_a_missing_tag(tmp_path):
+    slices = [dict(RadiopharmaceuticalInformationSequence=[]), dict(RadiopharmaceuticalInformationSequence=PT_SEQUENCE)]
+    alone = collect(ct_heads(tmp_path / 'one', 1, modality='PT', per_slice=slices[1:]), (IMAGES,))
+    got = collect(ct_heads(tmp_path / 'two', 2, modality='PT', per_slice=slices), (IMAGES,))
+    assert got['radiopharmaceutical'] == alone['radiopharmaceutical'] and got['slices'] == 2
+
+
+def test_roi_lookup_skips_an_item_with_an_odd_roi_number():
+    items = [Dataset(), Dataset()]
+    items[0].ROINumber, items[1].ROINumber = '', 4  # the empty one: int('') raised and hid the match
+    for item, algorithm in zip(items, ('AUTOMATIC', 'MANUAL'), strict=True):
+        item.ROIGenerationAlgorithm = algorithm
+    head = Dataset()
+    head.StructureSetROISequence = Sequence(items)
+    lookup = metadata._roi_lookup('StructureSetROISequence', 'ROINumber', 'ROIGenerationAlgorithm')
+    assert lookup([head], 4) == 'MANUAL'
+
+
+def test_tm_extremes_compare_as_times_across_precision():
+    samples = [('090000.5', 'TM'), ('0900', 'TM'), ('10', 'TM'), ('0830', 'TM')]
+    assert metadata._aggregate(samples, True) == {'min': '0830', 'max': '10'}
 
 
 # ---- quiet ----------------------------------------------------------------------------------------------------------
