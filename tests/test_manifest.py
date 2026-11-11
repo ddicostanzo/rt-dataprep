@@ -2,6 +2,7 @@
 import dataclasses
 import json
 import logging
+import os
 import re
 import shutil
 
@@ -592,3 +593,12 @@ def test_a_plan_whose_retained_cell_is_not_a_finite_number_is_refused(tmp_path, 
     next(row for row in rows if row['retained'])['retained'] = cell
     path.write_text(json.dumps(rows), encoding='utf-8')
     assert man.manifest(out) == (0, 1)
+
+
+def test_a_patient_folder_whose_name_is_not_utf8_is_refused_and_the_rest_still_splits(tmp_path):
+    root = tree(tmp_path / 'converted')
+    write_plan(root, 'SYNTHETIC_C')
+    (root / 'SYNTHETIC_C').rename(root / os.fsdecode(b'SYNTHETIC_\xff'))  # a surrogate escape; SimpleITK aborts on such a path
+    assert man.manifest(root) == (3, 1)
+    assert {row['patient'] for row in read(root)} == {PATIENT_A, PATIENT_B}
+    sp.split(root / 'manifest.jsonl', test_size=0.5, val_size=0.0, seed=0)  # #249 would refuse the whole manifest

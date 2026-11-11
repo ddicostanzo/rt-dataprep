@@ -36,8 +36,9 @@ records `{split: {mrn: [sorted fraction ids]}}` in its run's `splits.json`, with
 
 Walks `<root>/<patient>/<plan folder>/` (non-hidden patient folders; plan folders matching `PLAN_FOLDER` that hold
 `series.csv`; `images/` and `.partial` folders are not cases). For each plan it reuses `preprocess.check_rows`, which
-validates `series.csv` and reads the CT header only. A plan it refuses is left out and counted; the count goes to
-the log, nothing else.
+validates `series.csv` and reads the CT header only. A plan it refuses is left out and counted, and so is a patient
+folder whose name is not UTF-8 (one per folder, #260: its surrogate escape would make `split` refuse the whole
+manifest); the count goes to the log, nothing else.
 
 Writes `<root>/manifest.csv` with `dicom_io.write_report` (dated copy plus latest), one row per case, sorted by
 `case_dir`. Columns:
