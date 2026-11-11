@@ -3,7 +3,7 @@ manifest.jsonl of a converted or preprocessed tree (spec: f3-manifest-split; JSO
 and one per series of each <patient>/study_<n>/ that holds one (imaging-cases spec D9, D14-D16).
 
 Each plan goes through preprocess.check_rows, which validates series.json and reads the CT header only; the `series` key (a list of objects) then
-reads the header of each identity series; an entry gains `fov_mask` when fovmask_<file> beside it is on the CT grid. A plan check_rows refuses is left out and counted. A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.json items, and a
+reads the header of each identity series; an entry gains `fov_mask` when fovmask_<file> beside it is on the CT grid. A plan line ends with `retained`, the lowest dose/mask `retained` of its series.json, when a preprocess run set one (#225). A plan check_rows refuses is left out and counted. A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.json items, and a
 series whose header cannot be read is left out and counted on its own. The tree is only read; manifest.jsonl (and its dated copy, manifest_<UTC time>.jsonl) in the root is the one place the patient folder names
 appear. The log line carries counts only.
 """
@@ -15,7 +15,7 @@ import numpy as np
 
 from rt_dataprep import convert as conv
 from rt_dataprep.dicom_io import CaseRefused, write_report
-from rt_dataprep.preprocess import STUDY_FOLDER, check_rows, check_study_rows, holds_series, is_legacy, read_info, read_series_json, same_grid, series_id, study_refusal_count
+from rt_dataprep.preprocess import REASON_SERIES_CSV, STUDY_FOLDER, check_rows, check_study_rows, holds_series, is_legacy, read_info, read_series_json, same_grid, series_id, study_refusal_count
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +32,17 @@ def _optional(row):
     dicom = row.get('dicom', {})
     values = {key: row['series_date'] if key == 'series_date' else dicom.get(key) for key in OPTIONAL_KEYS}
     return {key: value for key, value in values.items() if value not in (None, '')}
+
+
+def _retained(kept):
+    """{'retained': the lowest dose/mask `retained` of a plan as a float} (#225), or {} when no row has one (a converted tree, a non-geometric run)."""
+    try:
+        values = [float(row['retained']) for row in kept if row['kind'] in ('dose', 'mask') and row.get('retained')]
+    except ValueError:
+        values = [float('nan')]
+    if not all(np.isfinite(values)):  # a hand-edited cell: the plan is refused like any other malformed series.json
+        raise CaseRefused(REASON_SERIES_CSV)
+    return {'retained': min(values)} if values else {}
 
 
 def _geometry(size, spacing):
@@ -106,6 +117,7 @@ def manifest(root):
         for plan in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(conv.PLAN_FOLDER, p.name) and holds_series(p)):
             try:
                 kept, ct, series = check_rows(plan)
+                retained = _retained(kept)
             except (CaseRefused, OSError):  # an unreadable series.json is one refused plan, not the end of the run (#74)
                 refused += 1
                 continue
@@ -113,7 +125,7 @@ def manifest(root):
             rows.append(([f'{patient.name}/{plan.name}', patient.name, plan.name, *_geometry(ct[0], ct[2]),
                           str(int(any(row['kind'] == 'dose' for row in kept))), masks,
                           kept[0]['rtplan_uid'], kept[0]['series_instance_uid'], kept[0]['study_instance_uid'],  # kept[0] is the ct row
-                          'plan', 'CT', '', _aligned(plan, series, ct), image_fov_mask(plan, kept[0]['file'], ct)], _optional(kept[0])))
+                          'plan', 'CT', '', _aligned(plan, series, ct), image_fov_mask(plan, kept[0]['file'], ct)], _optional(kept[0]) | retained))
         for study in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(STUDY_FOLDER, p.name) and holds_series(p)):
             study_rows, study_refused = _study_rows(patient, study)
             rows += study_rows

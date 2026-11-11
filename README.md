@@ -327,8 +327,9 @@ these keys:
 | `series` | List of aligned plan series (objects with `file`, `modality`, optional `fov_mask`); `[]` for imaging. |
 | `fov_mask` (optional) | Planning-CT or study-image support-mask filename, relative to its case folder; blank when absent. |
 | `patient_age`, `patient_sex`, `patient_weight`, `study_date`, `series_date`, `manufacturer`, `model`, `institution_name` (all optional) | From the `dicom` object of the case's primary image (a plan's planning CT; an imaging line's own series), `series_date` from that image's `series_date` field. A key the image has no value for is left out of that line, so lines can differ in which of these they carry. A value that varied over the series is the `{"min": ..., "max": ...}` or `{"distinct": [...]}` object, copied as is. They follow the fixed keys (and `fov_mask`) in the order listed; a `series.json` without `dicom` gives only `series_date`. `split` ignores them. |
+| `retained` (optional, plans only) | The lowest dose/mask `retained` of a preprocessed plan (the fraction kept by `--allow-crop`), the last key; left out on a converted tree or a run without a geometric step. |
 
-`masks` and `series` are native JSON lists, `patient_age` is a number, and the optional metadata values may be objects; every other value is a string. The `fov_mask` key appears on every line only
+`masks` and `series` are native JSON lists, `patient_age` and `retained` are numbers, and the optional metadata values may be objects; every other value is a string. The `fov_mask` key appears on every line only
 when at least one usable primary-image mask is present in the tree. Without those masks, the original fourteen keys are
 written. Aligned-series masks remain in their `series` entries. A dated copy `manifest_<UTC timestamp>.jsonl` is kept next
 to it.
