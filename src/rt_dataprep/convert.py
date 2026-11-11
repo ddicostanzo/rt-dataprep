@@ -25,7 +25,7 @@ import pydicom
 import SimpleITK as sitk
 from pydicom.datadict import tag_for_keyword
 
-from rt_dataprep import beam_volume, dicom_io, masks, metadata, plan_table, pool
+from rt_dataprep import beam_volume, dicom_io, fluence, masks, metadata, plan_table, pool
 from rt_dataprep import series as ser
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
 from rt_dataprep.series import DIRECTION_ATOL
@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 PLAN_FOLDER = r'(plan|fx)_\d+'  # organize writes plan_<n>; a legacy tree (OSC raw/) has fx_<n>, kept as named
 REPORT_NAME = 'convert_report.csv'
 CT_NAME, DOSE_NAME, SERIES_NAME = 'planning_ct.nii.gz', 'dose.nii.gz', 'series.json'
-PLAN_NAME, BEAM_NAME = 'plan.parquet', 'beam_mu.nii.gz'
+PLAN_NAME, BEAM_NAME, FLUENCE_NAME = 'plan.parquet', 'beam_mu.nii.gz', 'fluence_mu.nii.gz'
 SERIES_COLUMNS = ['file', 'kind', 'modality', 'series_description', 'series_instance_uid', 'study_instance_uid',
                   'frame_of_reference_uid', 'series_date', 'roi_name', 'dose_summation_type', 'reg_matrix', 'rtplan_uid',
                   'rtplan_label', 'rtplan_date', 'fractions_planned']
@@ -473,12 +473,17 @@ def _convert_plan(headers, unreadable, case_dir):
         log.warning('convert: %s', plan_table.REASON_PLAN_TABLE)
         rows = None
     table = None if rows is None else plan_table.to_table(rows)
-    beam = None
+    beam = fluence_image = None
+    beam_numbers = []
     if rows is not None:
         try:  # the second catch: a plan the beam volume does not model only loses beam_mu (beam_mu refuses nothing but REASON_BEAM_VOLUME)
             beam = beam_volume.beam_mu(plan, rows, ct, ct_slices[0][1].get('PatientPosition'))
         except CaseRefused:
             log.warning('convert: %s', beam_volume.REASON_BEAM_VOLUME)
+        try:  # the third catch: fluence_mu refuses nothing but REASON_FLUENCE, and its own aperture rules are independent of beam_mu's
+            fluence_image, beam_numbers = fluence.fluence_mu(plan, rows)
+        except CaseRefused:
+            log.warning('convert: %s', fluence.REASON_FLUENCE)
     # Everything that can refuse has run: only now does the plan folder appear.
     case_dir.mkdir(parents=True)
     write_atomic(ct, case_dir / CT_NAME)
@@ -498,7 +503,10 @@ def _convert_plan(headers, unreadable, case_dir):
     if beam is not None:
         write_atomic(beam, case_dir / BEAM_NAME)
         files.append(BEAM_NAME)
-    series_rows = _header_call(_series_rows, plan, struct, ct_slices, dose_heads, rois, files)
+    if fluence_image is not None:
+        write_atomic(fluence_image, case_dir / FLUENCE_NAME)
+        files.append(FLUENCE_NAME)
+    series_rows = _header_call(_series_rows, plan, struct, ct_slices, dose_heads, rois, files, beam_numbers)
     return PlanResult(files, series_uid, series_rows)
 
 
@@ -724,8 +732,8 @@ def _joined(values):
     return ';'.join(dict.fromkeys(values))
 
 
-def _series_rows(plan, struct, ct_slices, dose_heads, rois, files):
-    """One dict per mask, applicator, line, CT, dose, plan and beam file in `files` (series.json itself has none), from headers already read.
+def _series_rows(plan, struct, ct_slices, dose_heads, rois, files, beam_numbers):
+    """One dict per mask, applicator, line, CT, dose, plan, beam and fluence file in `files` (series.json itself has none), from headers already read.
     SERIES_COLUMNS come from the first CT slice; `dicom` aggregates every planning-CT slice, every RTDOSE file and the RTSTRUCT's ROI."""
     ct_head = ct_slices[0][1]
     groups = plan.get('FractionGroupSequence', [])
@@ -737,10 +745,10 @@ def _series_rows(plan, struct, ct_slices, dose_heads, rois, files):
 
     plan_keys = metadata.collect([plan], (metadata.RTPLAN,))
 
-    def row(file, kind, heads, modality, frame, metadata_groups, roi_name='', summation='', reg_matrix='', roi_number=None, dicom_heads=None):
+    def row(file, kind, heads, modality, frame, metadata_groups, roi_name='', summation='', reg_matrix='', roi_number=None, dicom_heads=None, extra_dicom=None):
         own = metadata.collect(dicom_heads or heads, metadata_groups, roi_number=roi_number)
         return dict(file=file, kind=kind, modality=modality, roi_name=roi_name, dose_summation_type=summation,
-                    reg_matrix=reg_matrix, frame_of_reference_uid=frame, **plan_columns, dicom=own | plan_keys,
+                    reg_matrix=reg_matrix, frame_of_reference_uid=frame, **plan_columns, dicom=own | plan_keys | (extra_dicom or {}),
                     **{column: _joined(_tag(ds, tag) for ds in heads) for column, tag in (
                         ('series_description', 'SeriesDescription'), ('series_instance_uid', 'SeriesInstanceUID'),
                         ('study_instance_uid', 'StudyInstanceUID'), ('series_date', 'SeriesDate'))})
@@ -759,6 +767,9 @@ def _series_rows(plan, struct, ct_slices, dose_heads, rois, files):
         rows.append(row(PLAN_NAME, 'plan', [plan], 'RTPLAN', _tag(plan, 'FrameOfReferenceUID'), (metadata.ALL, metadata.RTPLAN)))
     if BEAM_NAME in files:
         rows.append(row(BEAM_NAME, 'beam', [plan], 'RTPLAN', _tag(ct_head, 'FrameOfReferenceUID'), (metadata.ALL, metadata.RTPLAN)))
+    if FLUENCE_NAME in files:
+        rows.append(row(FLUENCE_NAME, 'fluence', [plan], 'RTPLAN', _tag(plan, 'FrameOfReferenceUID'), (metadata.ALL, metadata.RTPLAN),
+                        extra_dicom=dict(beam_numbers=';'.join(map(str, beam_numbers)))))
     return rows
 
 

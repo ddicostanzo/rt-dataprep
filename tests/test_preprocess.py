@@ -1654,7 +1654,7 @@ def test_a_beam_volume_is_copied_under_the_dose_name_rule_on_a_non_geometric_run
     assert (tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1' / name).read_bytes() == (folder / conv.BEAM_NAME).read_bytes()
 
 
-FLUENCE_NAME = 'fluence_mu.nii.gz'  # convert's name for it (a later task); preprocess only copies the file, so any bytes will do
+FLUENCE_NAME = conv.FLUENCE_NAME  # preprocess only copies the file, so any bytes will do
 FLUENCE_BYTES = b'SYNTHETIC fluence bytes'
 
 
@@ -1673,6 +1673,15 @@ def test_a_fluence_file_is_copied_unchanged_under_its_own_name_and_keeps_its_row
     assert plan_row(report).outcome == 'preprocessed'
     assert (done / FLUENCE_NAME).read_bytes() == FLUENCE_BYTES
     assert [(r['file'], r['retained']) for r in sf.read(done) if r['kind'] == 'fluence'] == [(FLUENCE_NAME, '')]
+
+
+@pytest.mark.parametrize('steps', [SMALL, PreprocessSteps(rescale=True)], ids=['geometric', 'non_geometric'])
+def test_a_converted_fluence_map_is_copied_byte_identical(tmp_path, steps):
+    converted, folder = photon_converted(tmp_path)
+    assert [r['kind'] for r in sf.read(folder)][-1] == 'fluence'
+    report = pre.preprocess(converted, tmp_path / 'out', steps)
+    done = tmp_path / 'out' / folder.parent.name / 'plan_1'
+    assert (done / FLUENCE_NAME).read_bytes() == (folder / FLUENCE_NAME).read_bytes() and FLUENCE_NAME in plan_row(report).files
 
 
 def test_a_tree_without_a_fluence_row_is_unaffected(tmp_path):

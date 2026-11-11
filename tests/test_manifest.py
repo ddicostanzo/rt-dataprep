@@ -615,8 +615,8 @@ def test_a_converted_photon_plan_line_has_plan_and_beam_keys_last(tmp_path):
     converted, _ = photon_converted(tmp_path)
     assert man.manifest(converted) == (1, 0)
     line = plan_line(converted)
-    assert list(line)[-2:] == ['plan', 'beam']
-    assert (line['plan'], line['beam']) == (conv.PLAN_NAME, conv.BEAM_NAME)
+    assert list(line)[-3:] == ['plan', 'beam', 'fluence']
+    assert (line['plan'], line['beam'], line['fluence']) == (conv.PLAN_NAME, conv.BEAM_NAME, conv.FLUENCE_NAME)
     assert 'retained' not in line
 
 
@@ -627,7 +627,7 @@ def test_a_geometric_run_lists_the_beam_under_its_output_name_after_retained(tmp
     pre.preprocess(converted, out, steps)
     assert man.manifest(out) == (1, 0)
     line = plan_line(out)
-    assert list(line)[-3:] == ['retained', 'plan', 'beam']
+    assert list(line)[-4:] == ['retained', 'plan', 'beam', 'fluence']
     assert line['plan'] == conv.PLAN_NAME
     assert line['beam'] == pre.output_name(conv.BEAM_NAME, steps) != conv.BEAM_NAME
     assert (out / folder.parent.name / 'plan_1' / line['beam']).is_file()
@@ -645,12 +645,11 @@ def test_each_key_is_present_only_with_its_series_row(tmp_path):
 
 def test_a_fluence_key_follows_plan_and_beam_exactly_when_its_row_exists(tmp_path):
     converted, folder = photon_converted(tmp_path)
+    rows = sf.read(folder)
+    sf.write([r for r in rows if r['kind'] != 'fluence'], folder / conv.SERIES_NAME)  # convert wrote the file and its row
     assert man.manifest(converted) == (1, 0)
     assert 'fluence' not in plan_line(converted)
-    (folder / 'fluence_mu.nii.gz').write_bytes(b'SYNTHETIC fluence bytes')
-    rows = sf.read(folder)  # a converted series.json carries `dicom` on every row or none
-    new = {key: {} if key == 'dicom' else '' for key in rows[0]} | dict(file='fluence_mu.nii.gz', kind='fluence', modality='RTPLAN')
-    sf.write([*rows, new], folder / conv.SERIES_NAME)
+    sf.write(rows, folder / conv.SERIES_NAME)
     assert man.manifest(converted) == (1, 0)
     line = plan_line(converted)
     assert list(line)[-3:] == ['plan', 'beam', 'fluence'] and line['fluence'] == 'fluence_mu.nii.gz'
