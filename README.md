@@ -199,7 +199,7 @@ them as refused. Reconvert them with `convert --overwrite`.
 ### plan.parquet
 
 A photon external-beam RTPLAN also writes `plan.parquet` in its plan folder (after the masks, before `series.json`), with a
-`series.json` row of `kind` `plan`; `preprocess` copies it byte-identical under the same name on every run, and `manifest`
+`series.json` row of `kind` `plan`; `preprocess` writes it under the same name (copied unchanged on a run with no geometric step), and `manifest`
 ignores it. Brachy and RT Ion plans, a plan mixing photon with other beams, and a photon plan with a missing or inconsistent
 value get no `plan.parquet` (the plan still converts; a malformed photon plan logs a warning). The file has one row per control point of each
 treatment beam (SETUP beams are dropped; a plan with a CONTINUATION, TRMT_PORTFILM or OPEN_PORTFILM beam gets no
@@ -213,7 +213,9 @@ beam-level fields repeat on every row. The columns and types are `rt_dataprep.pl
 - `mu` is the meterset between control point i-1 and control point i, attributed to row i; `mu_cumulative` is the running sum.
 - A null means the beam declares no such device (no MLC, no jaw pair, no wedge) or the optional tag is absent.
 - `isocenter_x/y/z` are patient coordinates in mm; `isocenter_i/j/k` are the same point as a continuous voxel index of
-  `planning_ct.nii.gz` (kept only in the converted tree), not of a preprocessed grid. A resampled or reshaped CT does not change them.
+  the CT in the same folder (invariant: `isocenter_i/j/k` always index the CT in the same folder). A preprocess run with `--initial-resample`, `--resample` or
+  `--reshape` rewrites them for the final CT (every other column is unchanged); a run without those steps copies the file unchanged. A
+  `plan.parquet` that cannot be read or is not the table schema is left out of the preprocessed plan (and its `plan` row), with one warning.
 - Converted trees made before this version gain `plan.parquet` only on a run with `--overwrite`.
 
 ### beam_mu.nii.gz
@@ -231,6 +233,10 @@ its `plan.parquet`): any beam with blocks, an MLC that is not `MLCX`, an `MLCX` 
 positive `SourceAxisDistance`, another or missing `PatientPosition`, or a control point with no jaw or MLC bounding an axis.
 Wedges are ignored. Plans without a `plan.parquet` (brachy, RT Ion, mixed, CONTINUATION or port-film, malformed) get none either.
 Trees converted before this version gain `beam_mu.nii.gz` only on a run with `convert --overwrite`.
+
+`preprocess` resamples `beam_mu.nii.gz` onto the final CT like the dose (float32, 0 outside the native grid, the same output-name
+prefixes; copied unchanged on a run with no geometric step), but a beam volume the final grid cuts never refuses the plan, is not
+counted in `cropped`, and has a blank `retained`.
 
 ## Conversion behavior
 
@@ -289,7 +295,7 @@ pad a large extent at native spacing.
 By default a plan whose dose or mask extends past the final CT grid is refused. `--allow-crop` (needs at least one of
 `--initial-resample`, `--resample`, `--reshape`) writes the plan anyway, with the dose and masks cut to the final grid. In
 `series.json`, the `retained` key of each dose and mask object is the fraction of that file's native-grid content (summed dose,
-mask volume) kept by the crop: exactly `1.0` when nothing is cut, and blank for CT, applicator, line and series entries and on runs
+mask volume) kept by the crop: exactly `1.0` when nothing is cut, and blank for CT, applicator, line, plan, beam and series entries and on runs
 without a geometric step. In `preprocess_report.csv`, the `cropped` column counts the dose and mask files the final grid cut; a
 negligible tail counts. The run's closing log line counts the cropped plans and how many of them have a
 lowest `retained` below 0.9. A dose or mask that the final grid empties entirely refuses the plan, with or without `--allow-crop`.

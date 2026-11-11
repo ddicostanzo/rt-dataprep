@@ -40,3 +40,21 @@ Append findings under `## <task-id>` (append only).
   task-01's tests' job, convert tests pin file/row/geometry/dtype only.
 - Not covered in convert tests: a CONTINUATION/port-film plan (plan_rows returns None there, same path as brachy/ion).
 - Full default suite: 1677 passed, 4 skipped, 1 deselected (slow); ruff and compileall clean.
+
+## task-03
+- `preprocess.py`: `KINDS` gains `beam`; `check_rows` same_grid-checks it (REASON_GRID now names the beam volume); `output_name` unchanged (beam gets
+  the dose's prefixes); a geometric run resamples it with `process_dose` but skips check_crop/crosses_final, `cropped`, `retained` (cell stays ''),
+  the has_voxels -> REASON_CROP check and (by kind) min_mask_retention. `manifest._retained` already counts only dose/mask; run-log counters read
+  `cropped`/`retained` only, so they needed no change.
+- `index_plan_table` (new): `pq.read_table`, catches only `pa.ArrowInvalid`; schema compared with `table.schema != plan_table.SCHEMA` -- pyarrow's `==`
+  ignores schema metadata but does compare field nullability, so parquet round-trips it (the tests pin `after.schema == SCHEMA`). An unreadable or
+  non-SCHEMA file is left out with its `plan` row and one WARNING `preprocess: <REASON_PLAN_INDEX>`; an OSError keeps the patient-level IO path.
+  Written through `conv._atomic` + `plan_table.write_plan_table`. A zero-row table is handled (`indices or [[]] * 3`).
+- Tests: `photon_converted` defaults the CT to HFS. The old parametrised byte-identical test now covers non-geometric runs only (rescale, ahe); new
+  tests pin AC11 (isocenter index vs. the final CT file, 1e-6, other columns equal, null_count == 0), AC10 (cut, cut out entirely, padded; with and
+  without allow_crop and min_mask_retention; float32, final grid, exact zeros outside the native CT) and the off-grid refusal. Beam tests use
+  `write_plan` + a synthetic `beam` row rather than a converted photon plan, because the converted fixture's beam volume is all zeros.
+  Mutation check by hand: dropping the beam exemption from the crop block, or from the has_voxels check, fails the AC10 tests.
+- Beyond the task: regression test for the unreadable / non-SCHEMA `plan.parquet` case was added (the plan deferred it); it also pins the log text.
+- `test_manifest_rows_are_unchanged_by_plan_parquet` still passes unchanged (both trees keep the beam row; task-04 owns the manifest `beam` key).
+- Not done / deferred: a null in a SCHEMA-valid isocenter_x/y/z column is not guarded (the schema marks them non-nullable).
