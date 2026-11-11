@@ -1,8 +1,8 @@
 """manifest: one row per plan folder or study series of a converted or preprocessed tree (task-01, task-04); patient folder names are SYNTHETIC-prefixed."""
 import dataclasses
 import json
-import os
 import logging
+import os
 import re
 import shutil
 
