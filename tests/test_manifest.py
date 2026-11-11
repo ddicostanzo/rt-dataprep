@@ -47,8 +47,8 @@ def read(root):
     rows = [json.loads(line) for line in (root / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]
     for row in rows:  # the optional keys (task-04) follow the fixed ones, in order; this helper's callers compare the fixed part
         base = [*COLUMNS, 'fov_mask'] if 'fov_mask' in row else COLUMNS
-        assert list(row) == [*base, *(key for key in [*OPTIONAL, 'retained', 'plan', 'beam'] if key in row)]
-    return [{key: value for key, value in row.items() if key not in [*OPTIONAL, 'retained', 'plan', 'beam']} for row in rows]
+        assert list(row) == [*base, *(key for key in [*OPTIONAL, 'retained', 'plan', 'beam', 'fluence'] if key in row)]
+    return [{key: value for key, value in row.items() if key not in [*OPTIONAL, 'retained', 'plan', 'beam', 'fluence']} for row in rows]
 
 
 def test_rows_columns_and_values_on_a_converted_tree(tmp_path):
@@ -615,8 +615,8 @@ def test_a_converted_photon_plan_line_has_plan_and_beam_keys_last(tmp_path):
     converted, _ = photon_converted(tmp_path)
     assert man.manifest(converted) == (1, 0)
     line = plan_line(converted)
-    assert list(line)[-2:] == ['plan', 'beam']
-    assert (line['plan'], line['beam']) == (conv.PLAN_NAME, conv.BEAM_NAME)
+    assert list(line)[-3:] == ['plan', 'beam', 'fluence']
+    assert (line['plan'], line['beam'], line['fluence']) == (conv.PLAN_NAME, conv.BEAM_NAME, conv.FLUENCE_NAME)
     assert 'retained' not in line
 
 
@@ -627,7 +627,7 @@ def test_a_geometric_run_lists_the_beam_under_its_output_name_after_retained(tmp
     pre.preprocess(converted, out, steps)
     assert man.manifest(out) == (1, 0)
     line = plan_line(out)
-    assert list(line)[-3:] == ['retained', 'plan', 'beam']
+    assert list(line)[-4:] == ['retained', 'plan', 'beam', 'fluence']
     assert line['plan'] == conv.PLAN_NAME
     assert line['beam'] == pre.output_name(conv.BEAM_NAME, steps) != conv.BEAM_NAME
     assert (out / folder.parent.name / 'plan_1' / line['beam']).is_file()
@@ -641,6 +641,18 @@ def test_each_key_is_present_only_with_its_series_row(tmp_path):
         assert man.manifest(converted) == (1, 0)
         line = plan_line(converted)
         assert dropped not in line and line[kept_key]
+
+
+def test_a_fluence_key_follows_plan_and_beam_exactly_when_its_row_exists(tmp_path):
+    converted, folder = photon_converted(tmp_path)
+    rows = sf.read(folder)
+    sf.write([r for r in rows if r['kind'] != 'fluence'], folder / conv.SERIES_NAME)  # convert wrote the file and its row
+    assert man.manifest(converted) == (1, 0)
+    assert 'fluence' not in plan_line(converted)
+    sf.write(rows, folder / conv.SERIES_NAME)
+    assert man.manifest(converted) == (1, 0)
+    line = plan_line(converted)
+    assert list(line)[-3:] == ['plan', 'beam', 'fluence'] and line['fluence'] == 'fluence_mu.nii.gz'
 
 
 def test_a_beam_row_leaves_retained_unchanged(tmp_path):

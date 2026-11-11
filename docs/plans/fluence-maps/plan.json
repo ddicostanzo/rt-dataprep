@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "metadata": {
+    "title": "convert: per-beam photon fluence maps (fluence_mu.nii.gz) (#279)",
+    "spec": "docs/specs/2026-11-11-fluence-maps.md",
+    "branch": "feat/fluence-maps",
+    "profile": "project-profile.yml",
+    "created": "2026-11-11"
+  },
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "beam_volume: public non-raising aperture(row) helper shared by beam_mu, plus the strictly-increasing leaf-boundary rule",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/beam_volume.py",
+        "tests/test_beam_volume.py",
+        "docs/specs/2026-11-11-beam-volumes.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/beam_volume.py": "modify",
+        "tests/test_beam_volume.py": "modify",
+        "docs/specs/2026-11-11-beam-volumes.md": "modify"
+      },
+      "test_approach": "TDD in tests/test_beam_volume.py with the existing static()/set_mlc()/written() fixtures and plan_table.plan_rows rows. Move the per-row aperture parsing and not-modelled checks out of _point into aperture(row) -> (jaws, leaves) | None that never raises (spec Decisions 'Aperture rules shared with beam_mu'); _point calls _check(aperture(row) is not None). Existing tests must pass unchanged.",
+      "criteria": [
+        "beam_volume.aperture(row) returns None, and raises nothing, for each row of the _blocks, _mlc_not_mlcx, _null_boundaries and _no_y_limit cases and for leaf boundaries that are not strictly increasing",
+        "beam_volume.aperture(row) returns (jaws, leaves) for a modelled row: jaws maps 'x'/'y' to a (low, high) pair or None; leaves is None without an MLC, else (boundaries, x1, x2, opening) as numpy arrays, as _point builds today",
+        "beam_mu refuses with REASON_BEAM_VOLUME a plan whose MLCX leaf boundaries are not strictly increasing",
+        "Every pre-existing test in tests/test_beam_volume.py passes with no change to what it asserts, including test_beam_volume_catches_and_quiets_nothing",
+        "docs/specs/2026-11-11-beam-volumes.md 'Not modelled' list names non-increasing leaf boundaries",
+        "The slow test's nested arc helper is lifted to a module-level vmat_arc(number, start, step) in tests/test_beam_volume.py, behaviour unchanged"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "fluence module: fluence_mu(plan, rows) -> (float32 (beams, 400, 400) image, beam_numbers), exact-area apertures, REASON_FLUENCE",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/fluence.py",
+        "tests/test_fluence.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/fluence.py": "create",
+        "tests/test_fluence.py": "create"
+      },
+      "test_approach": "TDD in tests/test_fluence.py, unit-level, reusing tests/test_beam_volume.py's static()/set_mlc()/written()/ct_image() fixtures (import them) to build plans and rows. Geometry, grid, weighting, refusals exactly per the spec's Decisions and Refusals sections: collimator frame, pixel j covers [j-200, j-199] mm, exact area fraction with max(0, ...) overlaps, rectangles of non-positive size dropped before the off-grid check, aperture(row) on every row, off-grid check only for non-zero weight, strict +-200 mm, duplicate int(BeamNumber) among non-SETUP beams of plan['BeamSequence'] refused, float64 accumulation cast to float32. Hint: per control point build pairs x 400 Y- and X-overlap matrices and add w * Y.T @ X. AC14's test is marked slow (pytest -m slow) and builds the 2 arcs x 178 control point plan as test_beam_volume's slow test does; record wall time in findings.md. Import fixtures explicitly by name from test_beam_volume (static, set_mlc, written, ct_image, vmat_arc, _blocks, ...; pythonpath includes tests), never test_* names or *. fluence.py uses no beam_volume name other than aperture. fluence_mu returns beam_numbers as a list of ints; the ';'-join happens only in convert's _series_rows.",
+      "criteria": [
+        "AC1: a static jaw-only field X [-50, 50], Y [-30, 30] mm, MU 100 gives shape (1, 400, 400) float32 via sitk.GetArrayFromImage, 100 (tolerance 1e-4) in fully-inside pixels, 0 in fully-outside pixels, origin (-199.5, -199.5, 0), spacing (1, 1, 1), identity direction",
+        "AC2: jaws X [10, 60], Y [-30, 30] light only columns >= 210; jaws Y [10, 40], X [-50, 50] light only rows >= 210; an MLCX whose only open pair is the highest-Y pair lights only rows inside that pair's boundaries; an open X2-side leaf opening at +X lights only X > 0 (vault: iec-61217-dicom-patient-position-beam-projection, one-sided fields)",
+        "AC3: one beam with the one-sided field jaws X [10, 60], Y [-30, 5] at (collimator, gantry, couch) = (0, 0, 0), (90, 0, 0) and (30, 270, 45) yields identical, non-zero maps",
+        "AC4: jaws X [-10.3, 20.7], Y [-5.25, 7.5], MU M give sum of pixels = M * 31.0 * 12.75 within 1e-3 relative, and an edge pixel holds M times its covered fraction",
+        "AC5: with leaf boundaries every 2.5 mm and 5 mm, sub-mm leaf ends, one closed pair (X1 = X2) and one crossed pair (X1 > X2), sum of pixels = sum over open pairs of MU * width * height clipped to the jaws; closed and crossed pairs add 0; a crossed jaw pair gives an all-zero slice; no pixel is negative",
+        "AC6: a two-segment step-and-shoot beam (MU a then b, different apertures) gives a where only segment 1 is open, b where only segment 2, a+b where both; a multi-control-point arc-like beam has sum of pixels = sum_i weight_i * open area_i with the half-segment weights",
+        "AC7 (module): a three-beam plan with BeamNumbers 7, 2, 5 in BeamSequence order and different one-sided apertures gives shape (3, 400, 400); slice k matches beam k in that order, and beam_numbers == [7, 2, 5]",
+        "AC8 (module): each not-modelled aperture case, an open edge at 200.01 mm, and duplicate BeamNumbers (including two adjacent beams sharing a number) raise CaseRefused(REASON_FLUENCE); an open edge at exactly 200 mm is accepted; a plan with a non-zero table-top angle, or a missing SAD, is accepted. Off-grid is checked on each pair's rectangle after jaw intersection and after dropping non-positive sizes: accepted are open leaves X1 = -250, X2 = +250 behind jaws X [-100, 100], a closed pair parked at X1 = X2 = -250, and outermost leaf boundaries beyond +-200 outside Y jaws [-100, 100]; refused is the same open pair with no X jaw. An aperture reaching 250 mm on a weight-0 control point is accepted; the same aperture with non-zero weight is refused",
+        "AC9: for _blocks, _mlc_not_mlcx, _null_boundaries, _no_y_limit and non-increasing leaf boundaries, both beam_volume.beam_mu and fluence.fluence_mu refuse",
+        "AC10: an AST test shows fluence.py raises only CaseRefused(REASON_FLUENCE), has no try/except and no quiet_call/_pydicom_quiet, and the only beam_volume name it uses is aperture; REASON_FLUENCE is a non-empty fixed string",
+        "AC14: the full-size synthetic VMAT plan (2 arcs x 178 control points, built with vmat_arc) produces its fluence map in under 10 s (slow test)"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "preprocess copies fluence unchanged and manifest gains the optional fluence key (before convert writes it)",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "src/rt_dataprep/manifest.py",
+        "tests/test_preprocess.py",
+        "tests/test_manifest.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "src/rt_dataprep/manifest.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "tests/test_manifest.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_preprocess.py and tests/test_manifest.py. Tests inject a fluence file and its series.json row into the photon_converted tree the way the beam test (~test_preprocess.py:1602) does, with series_row(..., 'fluence', modality='RTPLAN'). preprocess: add 'fluence' to KINDS, the keep-the-name tuple (~line 767) and the copy tuple (~line 775); not the same-grid tuple (~line 607). manifest: add 'fluence' to _files' tuple after 'plan', 'beam'. Update the stale kind lists in the preprocess.py module docstring and manifest._files docstring.",
+      "criteria": [
+        "AC11: a geometric preprocess run (resample + reshape) and a non-geometric run each copy fluence_mu.nii.gz byte-identical under the same name and keep its series.json row; a tree without one is unaffected",
+        "AC12: a manifest plan line has a fluence key (the file name) exactly when the fluence row exists, after plan and beam; existing photon-line assertions stay green because no converted tree has a fluence row yet"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "convert: write fluence_mu.nii.gz and its series.json fluence row with dicom.beam_numbers; README",
+      "depends_on": [
+        "task-02",
+        "task-03"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_convert.py",
+        "tests/test_manifest.py",
+        "tests/test_preprocess.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_convert.py": "modify",
+        "tests/test_manifest.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "TDD in tests/test_convert.py with the existing photon-plan convert tests and their NOT_MODELLED table (~line 2062). FLUENCE_NAME = 'fluence_mu.nii.gz'; fluence_mu runs in its own try/except CaseRefused (log.warning('convert: %s', fluence.REASON_FLUENCE)) outside _header_call, after beam_mu and before case_dir.mkdir; written with write_atomic after beam_mu; _series_rows gains beam_numbers and appends the fluence row after beam only when FLUENCE_NAME in files. Update on purpose the exact file lists, row kinds and WARNING counts of the existing photon tests (spec Decisions 'Existing convert tests change on purpose'). NOT_MODELLED split (test_convert.py ~2049): blocks, mlcy, null-boundaries, unbounded-axis, two-conditions -> no fluence, 2 WARNINGs (drop the all-WARNINGs-are-beam_mu assertion for these only); no-sad, position-unsupported, position-absent -> fluence written, 1 WARNING. Optional: mirror test_a_bug_in_beam_mu_propagates for fluence. Build convert-level plans with plan_meta=dict(beams=[...]) as _beam_edit does (duplicate BeamNumbers = two photon_beam dicts with the same number; off-grid and TableTopPitchAngle by editing the beam dict); no tests/synthetic_dicom.py change is expected. The commit gate allows 5 files per commit: if a sixth file is unavoidable, commit the task in two parts.",
+      "criteria": [
+        "A converted photon plan writes fluence_mu.nii.gz and a series.json row with kind 'fluence', modality 'RTPLAN', plan columns filled, frame_of_reference_uid = the plan's, after the beam row",
+        "That row's dicom equals the plan row's dicom plus a last key beam_numbers, the ';'-joined BeamNumbers in slice order (a plan numbered 7, 2, 5 gives '7;2;5')",
+        "Each NOT_MODELLED aperture case (blocks, mlcy, null-boundaries, unbounded-axis, two-conditions) writes no fluence_mu.nii.gz and no fluence row, logs exactly one REASON_FLUENCE WARNING (two WARNINGs in total with beam_mu's), and still writes plan.parquet; no-sad, position-unsupported and position-absent write fluence and log only beam_mu's WARNING",
+        "An off-grid plan (open edge at 200.01 mm) and a duplicate-BeamNumber plan each write plan.parquet and beam_mu.nii.gz but no fluence file or row, and log exactly one WARNING, REASON_FLUENCE. A plan whose beam_mu is refused for SAD, PatientPosition or a non-zero TableTopPitchAngle still gets fluence_mu.nii.gz and its row",
+        "AC13: assert_no_leak runs over the aperture, off-grid and duplicate fluence refusal cases with the patient identifiers and finds none",
+        "A plan with no plan rows (brachy) has no fluence file, no fluence row and no new log line",
+        "tests/test_manifest.py photon-line assertions updated on purpose: [-3:] == ['plan', 'beam', 'fluence'] and [-4:] == ['retained', 'plan', 'beam', 'fluence']; any test_preprocess.py photon test that pins file lists is updated likewise; the full suite is green after this task",
+        "README has a fluence section (frame, orientation, units, slice order, dicom.beam_numbers, the nibabel affine and imshow origin='lower' notes) and lists fluence in the folder tree, the per-kind dicom keys paragraph, the manifest key table and the kind values; it states the file is not on the CT grid (never resample it with the masks), axis 0 is the beam index not mm, and existing trees gain it only through convert --overwrite"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01",
+      "task-03"
+    ],
+    [
+      "task-02"
+    ],
+    [
+      "task-04"
+    ]
+  ],
+  "deferred": [
+    "Transmission, tongue-and-groove, rounded leaf ends, leaf-gap offsets",
+    "Per-control-point or gantry-frame maps; blocks, MLCY, apertures beyond +-200 mm",
+    "Negative BeamMeterset or decreasing CumulativeMetersetWeight (negative mu, in beam_mu too)",
+    "Real-data validation on the first photon cohort: #293"
+  ]
+}

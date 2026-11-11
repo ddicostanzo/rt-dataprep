@@ -66,20 +66,36 @@ def _table_top_flat(plan):
                 _check(value in (None, '') or (isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0))
 
 
-def _point(row, sad, weight, position, grid):
-    """What the chunk loop needs of one control point: linear map of the voxel index to the beam frame, and the aperture."""
+def aperture(row):
+    """
+    `(jaws, leaves)` of one plan_rows row, or None when the aperture is not modelled; never raises. `jaws` maps 'x'/'y' to a
+    (low, high) pair or None; `leaves` is None without an MLC, else (boundaries, x1, x2, opening) as numpy arrays.
+    Not modelled: blocks, a non-MLCX MLC, null, fewer than two or non-strictly-increasing leaf boundaries, an axis bounded by neither.
+    """
     mlc = row['mlc_type']
     jaws = {axis: None if row[f'jaw_{axis}1'] is None or row[f'jaw_{axis}2'] is None
             else (row[f'jaw_{axis}1'], row[f'jaw_{axis}2']) for axis in 'xy'}
-    _check(not row['number_of_blocks'] > 0)
-    _check(mlc in (None, 'MLCX'))
-    _check(mlc is None or (row['leaf_position_boundaries'] is not None and row['mlc_positions'] is not None))
-    _check(all(jaws[axis] is not None or mlc is not None for axis in 'xy'))  # an unbounded axis is not modelled
-    leaves = None
-    if mlc:
-        pairs = len(row['leaf_position_boundaries']) - 1
-        x1, x2 = np.array(row['mlc_positions'][:pairs]), np.array(row['mlc_positions'][pairs:])
-        leaves = (np.array(row['leaf_position_boundaries']), x1, x2, x1 < x2)  # X1 >= X2 is a closed pair
+    if row['number_of_blocks'] > 0 or mlc not in (None, 'MLCX'):
+        return None
+    if not all(jaws[axis] is not None or mlc is not None for axis in 'xy'):  # an unbounded axis is not modelled
+        return None
+    if mlc is None:
+        return jaws, None
+    if row['leaf_position_boundaries'] is None or row['mlc_positions'] is None:
+        return None
+    boundaries = np.array(row['leaf_position_boundaries'])
+    if len(boundaries) < 2 or not np.all(np.diff(boundaries) > 0):  # else leaves land on the wrong pair
+        return None
+    pairs = len(boundaries) - 1
+    x1, x2 = np.array(row['mlc_positions'][:pairs]), np.array(row['mlc_positions'][pairs:])
+    return jaws, (boundaries, x1, x2, x1 < x2)  # X1 >= X2 is a closed pair
+
+
+def _point(row, sad, weight, position, grid):
+    """What the chunk loop needs of one control point: linear map of the voxel index to the beam frame, and the aperture."""
+    modelled = aperture(row)
+    _check(modelled is not None)
+    jaws, leaves = modelled
     # b = M (p - c), p = origin + D diag(spacing) index  =>  b = t + A index
     to_beam = _rz(row['collimator_angle']).T @ _ry(row['gantry_angle']).T @ _rz(row['couch_angle']) @ position
     isocenter = np.array([row['isocenter_x'], row['isocenter_y'], row['isocenter_z']])
