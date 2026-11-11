@@ -25,7 +25,7 @@ import pydicom
 import SimpleITK as sitk
 from pydicom.datadict import tag_for_keyword
 
-from rt_dataprep import dicom_io, masks, metadata, pool
+from rt_dataprep import dicom_io, masks, metadata, plan_table, pool
 from rt_dataprep import series as ser
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
 from rt_dataprep.series import DIRECTION_ATOL
@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 PLAN_FOLDER = r'(plan|fx)_\d+'  # organize writes plan_<n>; a legacy tree (OSC raw/) has fx_<n>, kept as named
 REPORT_NAME = 'convert_report.csv'
 CT_NAME, DOSE_NAME, SERIES_NAME = 'planning_ct.nii.gz', 'dose.nii.gz', 'series.json'
+PLAN_NAME = 'plan.parquet'
 SERIES_COLUMNS = ['file', 'kind', 'modality', 'series_description', 'series_instance_uid', 'study_instance_uid',
                   'frame_of_reference_uid', 'series_date', 'roi_name', 'dose_summation_type', 'reg_matrix', 'rtplan_uid',
                   'rtplan_label', 'rtplan_date', 'fractions_planned']
@@ -466,6 +467,12 @@ def _convert_plan(headers, unreadable, case_dir):
     # The scratch folder of DicomRTTool goes in the patient's partial folder: a stale partial's cleanup removes it too.
     mask_images = masks.build_masks(rois.kept, [p for p, _ in ct_slices], struct_path, struct_series_uid,
                                     series_uid, ct, case_dir.parent, ORIGIN_ATOL_MM, DIRECTION_ATOL)
+    try:  # the one catch: a malformed photon plan only loses its parquet (to_table is ours to leave uncaught: ArrowInvalid is a ValueError)
+        rows = _header_call(plan_table.plan_rows, plan, ct)
+    except CaseRefused:
+        log.warning('convert: %s', plan_table.REASON_PLAN_TABLE)
+        rows = None
+    table = None if rows is None else plan_table.to_table(rows)
     # Everything that can refuse has run: only now does the plan folder appear.
     case_dir.mkdir(parents=True)
     write_atomic(ct, case_dir / CT_NAME)
@@ -479,6 +486,9 @@ def _convert_plan(headers, unreadable, case_dir):
     for _, name, points, _ in rois.applicators + rois.lines:
         _atomic(lambda temp, points=points: np.savetxt(temp, points, fmt='%.4f'), case_dir / name)  # gzip text: the name ends .nii.gz
         files.append(name)
+    if table is not None:
+        _atomic(lambda temp: plan_table.write_plan_table(table, temp), case_dir / PLAN_NAME)
+        files.append(PLAN_NAME)
     series_rows = _header_call(_series_rows, plan, struct, ct_slices, dose_heads, rois, files)
     return PlanResult(files, series_uid, series_rows)
 
@@ -736,6 +746,8 @@ def _series_rows(plan, struct, ct_slices, dose_heads, rois, files):
     rows += [row(file, roi_names[file][0], [struct], 'RTSTRUCT', struct_frame, (metadata.ALL, metadata.RTSTRUCT),
                  roi_name=roi_names[file][1], roi_number=roi_names[file][2])
              for file in files if file in roi_names]
+    if PLAN_NAME in files:
+        rows.append(row(PLAN_NAME, 'plan', [plan], 'RTPLAN', _tag(plan, 'FrameOfReferenceUID'), (metadata.ALL, metadata.RTPLAN)))
     return rows
 
 
