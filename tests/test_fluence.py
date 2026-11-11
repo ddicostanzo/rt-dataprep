@@ -198,9 +198,9 @@ def test_ac8_off_grid_is_checked_after_jaws_and_dropping(tmp_path):
     wide = mlc_beam([-250.0, 0.0, 250.0], [-10.0, 0.0], [10.0, 0.0], jaws=(-100.0, 100.0, -100.0, 100.0))
     assert array(tmp_path, wide).any()  # boundaries beyond 200 outside the Y jaws
     dropped = mlc_beam([-250.0, -150.0, 0.0], [-250.0, -10.0], [250.0, 10.0], jaws=(-100.0, 100.0, -100.0, 100.0))
-    for jaw in (0,):  # no X jaw: the pair wholly outside the Y jaws is dropped before the off-grid check
-        del dropped['BeamLimitingDeviceSequence'][jaw]
-        del dropped['ControlPointSequence'][0]['BeamLimitingDevicePositionSequence'][jaw]
+    # no X jaw: the pair wholly outside the Y jaws is dropped before the off-grid check
+    del dropped['BeamLimitingDeviceSequence'][0]
+    del dropped['ControlPointSequence'][0]['BeamLimitingDevicePositionSequence'][0]
     assert array(tmp_path, dropped).any()
     no_x_jaw = off_grid_mlc()
     del no_x_jaw['BeamLimitingDeviceSequence'][0]
@@ -230,7 +230,7 @@ def test_ac10_fluence_module_rules():
     assert not [n for n in ast.walk(tree) if isinstance(n, (ast.ExceptHandler, ast.Try))]
     assert [ast.unparse(n.exc) for n in ast.walk(tree) if isinstance(n, ast.Raise)] == ['CaseRefused(REASON_FLUENCE)']
     imported = [(n.module, [a.name for a in n.names]) for n in ast.walk(tree)
-                if isinstance(n, ast.ImportFrom) and n.module.startswith('rt_dataprep.beam_volume')]
+                if isinstance(n, ast.ImportFrom) and (n.module or '').startswith('rt_dataprep.beam_volume')]
     assert imported == [('rt_dataprep.beam_volume', ['aperture'])]
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.Import) and any('beam_volume' in a.name for a in n.names)]
 
