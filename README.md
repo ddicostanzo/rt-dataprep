@@ -201,16 +201,18 @@ A photon external-beam RTPLAN also writes `plan.parquet` in its plan folder (aft
 `series.json` row of `kind` `plan`; `preprocess` copies it byte-identical under the same name on every run, and `manifest`
 ignores it. Brachy and RT Ion plans, a plan mixing photon with other beams, and a photon plan with a missing or inconsistent
 value get no `plan.parquet` (the plan still converts; a malformed photon plan logs a warning). The file has one row per control point of each
-treatment beam (SETUP beams are dropped), values DICOM omits are filled forward from the earlier control point, and the
+treatment beam (only beams whose `TreatmentDeliveryType` is TREATMENT or absent are kept; SETUP and CONTINUATION beams are
+dropped), values DICOM omits are filled forward from the earlier control point, and the
 beam-level fields repeat on every row. The columns and types are `rt_dataprep.plan_table.SCHEMA`; read them with
 `pyarrow.parquet.read_table`.
 
 - `beam_meterset` is the beam's MU per fraction, while `dose.nii.gz` may be the plan total over all fractions.
-- `mlc_positions` is the leaf positions in mm, bank A then bank B.
+- `mlc_positions` is the leaf positions in mm in DICOM `LeafJawPositions` order: every leaf of the IEC X1-side bank
+  (leaf subscripts 1xx), then every leaf of the X2-side bank (2xx). DICOM does not fix vendor bank letters (A/B) to a side.
 - `mu` is the meterset between control point i-1 and control point i, attributed to row i; `mu_cumulative` is the running sum.
 - A null means the beam declares no such device (no MLC, no jaw pair, no wedge) or the optional tag is absent.
 - `isocenter_x/y/z` are patient coordinates in mm; `isocenter_i/j/k` are the same point as a continuous voxel index of
-  `planning_ct.nii.gz`, not of a preprocessed grid. A resampled or reshaped CT does not change them.
+  `planning_ct.nii.gz` (kept only in the converted tree), not of a preprocessed grid. A resampled or reshaped CT does not change them.
 - Converted trees made before this version gain `plan.parquet` only on a run with `--overwrite`.
 
 ## Conversion behavior

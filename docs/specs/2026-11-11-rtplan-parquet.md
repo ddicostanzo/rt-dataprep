@@ -65,7 +65,7 @@ Control-point (filled forward):
 | collimator_angle | float64 | `BeamLimitingDeviceAngle` |
 | couch_angle | float64 | `PatientSupportAngle` |
 | jaw_x1, jaw_x2, jaw_y1, jaw_y2 | float64 (n) | `BeamLimitingDevicePositionSequence` item of type ASYMX/X (x) and ASYMY/Y (y); null when the beam declares no such device (e.g. Elekta Agility has no X jaws) |
-| mlc_positions | list<float64> (n) | the MLC item's `LeafJawPositions` as stored (all bank A, then all bank B); null when the beam has no MLC |
+| mlc_positions | list<float64> (n) | the MLC item's `LeafJawPositions` as stored (IEC X1-side leaves 1xx, then X2-side leaves 2xx; DICOM fixes no vendor bank letter to a side); null when the beam has no MLC |
 | ssd | float64 (n) | `SourceToSurfaceDistance` (mm) |
 | wedge_position | string (n) | `WedgePositionSequence[*].WedgePosition` for the first wedge's `ReferencedWedgeNumber` |
 | isocenter_x, isocenter_y, isocenter_z | float64 | `IsocenterPosition` (patient mm) |
