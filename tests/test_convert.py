@@ -24,6 +24,7 @@ import SimpleITK as sitk
 import synthetic_dicom as sd
 from test_dicom_io import fail_python_open as fail_open  # workers=1 where used: a worker process would not see the patch
 
+from rt_dataprep import beam_volume
 from rt_dataprep import convert as conv
 from rt_dataprep import dicom_io
 from rt_dataprep import masks, plan_table
@@ -1877,6 +1878,7 @@ PHOTON = dict(plan_writer=sd.write_photon_rtplan)
 def photon_plan(tree, beams=None, **kwargs):
     """(plan, rows, out) of a converted tree whose plan is a photon RTPLAN of `beams` (default: one VMAT beam)."""
     plan_meta = dict(label='SYNTHETIC_PLAN', **({'beams': beams} if beams else {}), **kwargs.pop('plan_meta', {}))
+    kwargs.setdefault('ct_meta', dict(tags=dict(PatientPosition='HFS')))  # beam_mu models HFS/HFP/FFS/FFP only
     return one_plan(tree, plan_meta=plan_meta, **PHOTON, **kwargs)
 
 
@@ -1884,7 +1886,7 @@ def test_a_photon_plan_converts_with_plan_parquet_last_before_series_json(tree):
     plan, rows, out = photon_plan(tree, rois=[BOX, RING])
     row = row_of(rows)
     assert row.outcome == conv.OUTCOME_CONVERTED
-    assert row.files == ['planning_ct.nii.gz', 'liver.nii.gz', 'ROIA.nii.gz', 'plan.parquet', 'series.json']  # after the line point file
+    assert row.files == ['planning_ct.nii.gz', 'liver.nii.gz', 'ROIA.nii.gz', 'plan.parquet', 'beam_mu.nii.gz', 'series.json']  # after the line point file
     folder = out / PID / 'plan_1'
     assert sorted(p.name for p in folder.iterdir()) == sorted(row.files)  # no temp left
     with open(out / 'convert_report.csv', newline='') as handle:
@@ -1897,8 +1899,8 @@ def test_a_photon_plan_converts_with_plan_parquet_last_before_series_json(tree):
 def test_series_json_has_one_plan_row_last_with_the_plan_columns_and_string_values(tree):
     plan, _, out = photon_plan(tree, rois=[BOX], plan_meta=dict(plan_date=PLAN_DATE, fractions=5, frame_uid=sd.generate_uid()))
     rows = series_rows(out)
-    assert [r['file'] for r in rows] == ['planning_ct.nii.gz', 'liver.nii.gz', 'plan.parquet']
-    ct_row, plan_row = rows[0], rows[-1]
+    assert [r['file'] for r in rows] == ['planning_ct.nii.gz', 'liver.nii.gz', 'plan.parquet', 'beam_mu.nii.gz']
+    ct_row, plan_row = rows[0], rows[-2]
     assert plan_row == dict(file='plan.parquet', kind='plan', modality='RTPLAN', series_description='', series_instance_uid=
                             str(pydicom.dcmread(plan['folder'] / 'plan.dcm').SeriesInstanceUID),
                             study_instance_uid=str(pydicom.dcmread(plan['folder'] / 'plan.dcm').StudyInstanceUID),
@@ -1907,7 +1909,7 @@ def test_series_json_has_one_plan_row_last_with_the_plan_columns_and_string_valu
                             **{key: ct_row[key] for key in ('rtplan_uid', 'rtplan_label', 'rtplan_date', 'fractions_planned')})
     assert ct_row['rtplan_uid'] == plan['plan'] and ct_row['rtplan_label'] == 'SYNTHETIC_PLAN' and ct_row['fractions_planned'] == '5'
     assert all(isinstance(value, str) for value in plan_row.values())
-    full = sf.read(out / PID / 'plan_1')[-1]
+    full = sf.read(out / PID / 'plan_1')[-2]
     assert list(full) == [*SERIES_COLUMNS, 'dicom'] and isinstance(full['dicom'], dict)
     ds = pydicom.dcmread(plan['folder'] / 'plan.dcm')
     assert full['dicom'] == conv.metadata.collect([ds], (conv.metadata.ALL, conv.metadata.RTPLAN)) | conv.metadata.collect(
@@ -1916,7 +1918,7 @@ def test_series_json_has_one_plan_row_last_with_the_plan_columns_and_string_valu
 
 def test_plan_series_row_leaves_frame_of_reference_empty_when_the_plan_has_none(tree):
     _, _, out = photon_plan(tree)
-    assert series_rows(out)[-1]['frame_of_reference_uid'] == ''
+    assert series_rows(out)[-2]['frame_of_reference_uid'] == ''  # the plan row; the beam row carries the CT's
 
 
 ELECTRON = sd.photon_beam(2, tags=dict(RadiationType='ELECTRON'))
@@ -1929,6 +1931,7 @@ def test_brachy_ion_and_mixed_plans_get_no_plan_parquet_and_no_plan_row(tree, kw
     caplog.set_level(logging.DEBUG)
     _, rows, out = one_plan(tree, rois=[BOX], **kwargs)
     assert plan_table.REASON_PLAN_TABLE not in caplog.text  # not malformed: no warning
+    assert beam_volume.REASON_BEAM_VOLUME not in caplog.text and not (out / PID / 'plan_1' / 'beam_mu.nii.gz').exists()
     assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
     assert row_of(rows).files == ['planning_ct.nii.gz', 'liver.nii.gz', 'series.json']
     assert not (out / PID / 'plan_1' / 'plan.parquet').exists()
@@ -1961,6 +1964,126 @@ def test_a_bug_in_the_table_builder_propagates_and_leaves_no_plan_folder(tree, m
     def bug(plan, ct):
         raise RuntimeError('SYNTHETIC bug')
     monkeypatch.setattr(plan_table, 'plan_rows', bug)
+    case = org.parent / 'case'
+    with pytest.raises(RuntimeError):
+        run_plan(org / PID / 'plan_1', case)
+    assert not case.exists()
+
+
+# ---------------------------------------------------------------- beam_mu.nii.gz (beam-volumes task-02)
+
+def logged(caplog, reason):
+    return [r for r in caplog.records if r.levelno == logging.WARNING and r.getMessage() == f'convert: {reason}']
+
+
+def test_a_photon_plan_series_json_has_a_beam_row_after_the_plan_row_and_beam_mu_has_the_ct_geometry(tree):
+    plan, rows, out = photon_plan(tree, rois=[BOX])
+    row = row_of(rows)
+    assert row.files == ['planning_ct.nii.gz', 'liver.nii.gz', 'plan.parquet', 'beam_mu.nii.gz', 'series.json']
+    with open(out / 'convert_report.csv', newline='') as handle:
+        assert 'beam_mu.nii.gz' in next(csv.DictReader(handle))['files'].split(';')
+    folder = out / PID / 'plan_1'
+    assert sorted(p.name for p in folder.iterdir()) == sorted(row.files)
+    listed = series_rows(out)
+    assert [r['kind'] for r in listed] == ['ct', 'mask', 'plan', 'beam']
+    plan_row, beam = listed[-2:]
+    assert beam == plan_row | dict(file='beam_mu.nii.gz', kind='beam', frame_of_reference_uid=plan['ct']['frame_uid'])
+    assert beam['modality'] == 'RTPLAN' and beam['rtplan_uid'] == plan['plan'] and beam['fractions_planned'] == '1'
+    assert sf.read(folder)[-1]['dicom'] == sf.read(folder)[-2]['dicom']
+    ct, mu = read(folder / 'planning_ct.nii.gz'), read(folder / 'beam_mu.nii.gz')
+    for name in ('Size', 'Spacing', 'Origin', 'Direction'):
+        assert getattr(mu, f'Get{name}')() == getattr(ct, f'Get{name}')()
+    assert mu.GetPixelID() == sitk.sitkFloat32
+
+
+def test_beam_mu_holds_the_plan_mu_on_the_patients_left_of_a_one_sided_field(tree):
+    """End to end: convert passes the plan rows, the planning CT and its PatientPosition (HFS: G0 jaw X>0 = patient left, +x)."""
+    beam = sd.photon_beam(kind='3d', mlc=False, meterset=200.0)
+    first = beam['ControlPointSequence'][0]
+    first.update(BeamLimitingDeviceAngle=0.0, PatientSupportAngle=0.0, IsocenterPosition=[0.0, 8.0, 10.0])
+    first['BeamLimitingDevicePositionSequence'] = [dict(RTBeamLimitingDeviceType='ASYMX', LeafJawPositions=[0.0, 1000.0]),
+                                                   dict(RTBeamLimitingDeviceType='ASYMY', LeafJawPositions=[-1000.0, 1000.0])]
+    _, _, out = photon_plan(tree, beams=[beam], rois=[BOX])
+    mu = sitk.GetArrayFromImage(read(out / PID / 'plan_1' / 'beam_mu.nii.gz'))  # (z, y, x); x = ORIGIN[0] + i
+    x = ORIGIN[0] + np.arange(SHAPE[2]) * SPACING[0]
+    assert np.all(mu[..., x > 0] == 200.0) and np.all(mu[..., x < 0] == 0.0)  # 100 MU from each control point
+
+
+def test_an_roi_named_beam_converts_beside_beam_mu(tree):
+    _, rows, out = photon_plan(tree, rois=[dict(BOX, name='Beam')])
+    assert row_of(rows).files == ['planning_ct.nii.gz', 'beam.nii.gz', 'plan.parquet', 'beam_mu.nii.gz', 'series.json']
+    assert [(r['file'], r['kind']) for r in series_rows(out)] == [
+        ('planning_ct.nii.gz', 'ct'), ('beam.nii.gz', 'mask'), ('plan.parquet', 'plan'), ('beam_mu.nii.gz', 'beam')]
+
+
+def _beam_edit(edit):
+    beam = sd.photon_beam()
+    edit(beam)
+    return dict(beams=[beam])
+
+
+def _blocks(beam):
+    beam['NumberOfBlocks'] = 1
+
+
+def _mlcy(beam):
+    beam['BeamLimitingDeviceSequence'][2]['RTBeamLimitingDeviceType'] = 'MLCY'
+    beam['ControlPointSequence'][0]['BeamLimitingDevicePositionSequence'][2]['RTBeamLimitingDeviceType'] = 'MLCY'
+
+
+def _null_boundaries(beam):
+    del beam['BeamLimitingDeviceSequence'][2]['LeafPositionBoundaries']
+
+
+def _no_sad(beam):
+    del beam['SourceAxisDistance']
+
+
+def _no_y_limit(beam):  # with no MLC either, the Y axis is unbounded
+    del beam['BeamLimitingDeviceSequence'][1:]
+    del beam['ControlPointSequence'][0]['BeamLimitingDevicePositionSequence'][1:]
+    for point in beam['ControlPointSequence'][1:]:
+        point.pop('BeamLimitingDevicePositionSequence', None)
+
+
+NOT_MODELLED = {
+    'blocks': dict(plan_meta=_beam_edit(_blocks)),
+    'mlcy': dict(plan_meta=_beam_edit(_mlcy)),
+    'null-boundaries': dict(plan_meta=_beam_edit(_null_boundaries)),
+    'no-sad': dict(plan_meta=_beam_edit(_no_sad)),
+    'unbounded-axis': dict(plan_meta=_beam_edit(_no_y_limit)),
+    'position-unsupported': dict(ct_meta=dict(tags=dict(PatientPosition='HFDR'))),
+    'position-absent': dict(ct_meta=dict(tags=dict(PatientPosition=None))),
+    'two-conditions': dict(plan_meta=_beam_edit(lambda b: (_blocks(b), _no_sad(b))), ct_meta=dict(tags=dict(PatientPosition='HFDR'))),
+}
+
+
+@pytest.mark.parametrize('case', NOT_MODELLED)
+def test_a_not_modelled_photon_plan_converts_without_beam_mu_and_logs_one_fixed_warning(tree, caplog, case):
+    caplog.set_level(logging.DEBUG)
+    plan, rows, out = photon_plan(tree, rois=[BOX], **NOT_MODELLED[case])
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
+    assert row_of(rows).files == ['planning_ct.nii.gz', 'liver.nii.gz', 'plan.parquet', 'series.json']
+    assert not (out / PID / 'plan_1' / 'beam_mu.nii.gz').exists()
+    assert [r['kind'] for r in series_rows(out)] == ['ct', 'mask', 'plan']
+    assert len(logged(caplog, beam_volume.REASON_BEAM_VOLUME)) == 1
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == logged(caplog, beam_volume.REASON_BEAM_VOLUME)
+    assert_no_leak(caplog, out, [plan['plan'], 'SYNTHETIC_PLAN', 'SYNTHETIC_B1', plan['ct']['frame_uid'], PID, str(tree[0]), str(plan['folder'] / 'plan.dcm')])
+
+
+def test_a_malformed_plan_table_logs_no_beam_line(tree, caplog):
+    caplog.set_level(logging.DEBUG)
+    photon_plan(tree, beams=[sd.photon_beam(tags=dict(BeamMeterset=None))])
+    assert len(logged(caplog, plan_table.REASON_PLAN_TABLE)) == 1 and logged(caplog, beam_volume.REASON_BEAM_VOLUME) == []
+
+
+def test_a_bug_in_beam_mu_propagates_and_leaves_no_plan_folder(tree, monkeypatch):
+    org, _ = tree
+    make_plan(org / PID / 'plan_1', **PHOTON, ct_meta=dict(tags=dict(PatientPosition='HFS')))
+
+    def bug(*args):
+        raise RuntimeError('SYNTHETIC bug')
+    monkeypatch.setattr(beam_volume, 'beam_mu', bug)
     case = org.parent / 'case'
     with pytest.raises(RuntimeError):
         run_plan(org / PID / 'plan_1', case)

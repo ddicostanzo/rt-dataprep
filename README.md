@@ -151,6 +151,7 @@ converted/
       liver.nii.gz
       series_MR_1.nii.gz
       plan.parquet
+      beam_mu.nii.gz
       series.json
     study_1/
       series_CT_1.nii.gz
@@ -198,8 +199,8 @@ them as refused. Reconvert them with `convert --overwrite`.
 ### plan.parquet
 
 A photon external-beam RTPLAN also writes `plan.parquet` in its plan folder (after the masks, before `series.json`), with a
-`series.json` row of `kind` `plan`; `preprocess` copies it byte-identical under the same name on every run, and `manifest`
-ignores it. Brachy and RT Ion plans, a plan mixing photon with other beams, and a photon plan with a missing or inconsistent
+`series.json` row of `kind` `plan`; `preprocess` writes it under the same name (copied unchanged on a run with no geometric step), and `manifest`
+lists it in the plan line's `plan` key. Brachy and RT Ion plans, a plan mixing photon with other beams, and a photon plan with a missing or inconsistent
 value get no `plan.parquet` (the plan still converts; a malformed photon plan logs a warning). The file has one row per control point of each
 treatment beam (SETUP beams are dropped; a plan with a CONTINUATION, TRMT_PORTFILM or OPEN_PORTFILM beam gets no
 `plan.parquet`, since that beam's dose is in `dose.nii.gz`), values DICOM omits are filled forward from the earlier control point, and the
@@ -212,8 +213,30 @@ beam-level fields repeat on every row. The columns and types are `rt_dataprep.pl
 - `mu` is the meterset between control point i-1 and control point i, attributed to row i; `mu_cumulative` is the running sum.
 - A null means the beam declares no such device (no MLC, no jaw pair, no wedge) or the optional tag is absent.
 - `isocenter_x/y/z` are patient coordinates in mm; `isocenter_i/j/k` are the same point as a continuous voxel index of
-  `planning_ct.nii.gz` (kept only in the converted tree), not of a preprocessed grid. A resampled or reshaped CT does not change them.
+  the CT in the same folder (invariant: `isocenter_i/j/k` always index the CT in the same folder). A preprocess run with `--initial-resample`, `--resample` or
+  `--reshape` rewrites them for the final CT (every other column is unchanged); a run without those steps copies the file unchanged. A
+  `plan.parquet` that pyarrow cannot parse as Parquet, or that is not the table schema, is left out of the preprocessed plan (and its `plan` row), with one warning; any other read failure refuses the patient like other I/O errors.
 - Converted trees made before this version gain `plan.parquet` only on a run with `--overwrite`.
+
+### beam_mu.nii.gz
+
+A photon plan that gets a `plan.parquet` also gets `beam_mu.nii.gz` (after `plan.parquet`, before `series.json`), with a
+`series.json` row of `kind` `beam` and `modality` `RTPLAN` (the plan's columns and metadata, and the planning CT's
+`frame_of_reference_uid`). It is a float32 image on the planning-CT grid (same size, spacing, origin and direction) holding, in
+each voxel, the MU per fraction of every control point whose divergent jaw and MLC aperture covers it: each control point
+carries half the MU of the segment before it and half of the segment after it. It is pure geometry: no attenuation, no inverse
+square and no dependence on the CT values. The beam geometry follows IEC 61217 and the CT's `PatientPosition`, which must be
+`HFS`, `HFP`, `FFS` or `FFP`.
+
+A plan the volume does not model gets no `beam_mu.nii.gz` and no `beam` row, and logs one warning (the plan still converts, with
+its `plan.parquet`): any beam with blocks, an MLC that is not `MLCX`, an `MLCX` without leaf boundaries, a treatment beam without a
+positive `SourceAxisDistance`, another or missing `PatientPosition`, or a control point with no jaw or MLC bounding an axis.
+Wedges are ignored. Plans without a `plan.parquet` (brachy, RT Ion, mixed, CONTINUATION or port-film, malformed) get none either.
+Trees converted before this version gain `beam_mu.nii.gz` only on a run with `convert --overwrite`.
+
+`preprocess` resamples `beam_mu.nii.gz` onto the final CT like the dose (float32, 0 outside the native grid, the same output-name
+prefixes; copied unchanged on a run with no geometric step), but a beam volume the final grid cuts never refuses the plan, is not
+counted in `cropped`, and has a blank `retained`.
 
 ## Conversion behavior
 
@@ -272,7 +295,7 @@ pad a large extent at native spacing.
 By default a plan whose dose or mask extends past the final CT grid is refused. `--allow-crop` (needs at least one of
 `--initial-resample`, `--resample`, `--reshape`) writes the plan anyway, with the dose and masks cut to the final grid. In
 `series.json`, the `retained` key of each dose and mask object is the fraction of that file's native-grid content (summed dose,
-mask volume) kept by the crop: exactly `1.0` when nothing is cut, and blank for CT, applicator, line and series entries and on runs
+mask volume) kept by the crop: exactly `1.0` when nothing is cut, and blank for CT, applicator, line, plan, beam and series entries and on runs
 without a geometric step. In `preprocess_report.csv`, the `cropped` column counts the dose and mask files the final grid cut; a
 negligible tail counts. The run's closing log line counts the cropped plans and how many of them have a
 lowest `retained` below 0.9. A dose or mask that the final grid empties entirely refuses the plan, with or without `--allow-crop`.
@@ -349,7 +372,8 @@ these keys:
 | `series` | List of aligned plan series (objects with `file`, `modality`, optional `fov_mask`); `[]` for imaging. |
 | `fov_mask` (optional) | Planning-CT or study-image support-mask filename, relative to its case folder; blank when absent. |
 | `patient_age`, `patient_sex`, `patient_weight`, `study_date`, `series_date`, `manufacturer`, `model`, `institution_name` (all optional) | From the `dicom` object of the case's primary image (a plan's planning CT; an imaging line's own series), `series_date` from that image's `series_date` field. A key the image has no value for is left out of that line, so lines can differ in which of these they carry. A value that varied over the series is the `{"min": ..., "max": ...}` or `{"distinct": [...]}` object, copied as is. They follow the fixed keys (and `fov_mask`) in the order listed; a `series.json` without `dicom` gives only `series_date`. `split` ignores them. |
-| `retained` (optional, plans only) | The lowest dose/mask `retained` of a preprocessed plan (the fraction kept by `--allow-crop`), the last key; left out on a converted tree or a run without a geometric step. |
+| `retained` (optional, plans only) | The lowest dose/mask `retained` of a preprocessed plan (the fraction kept by `--allow-crop`), after the metadata keys; left out on a converted tree or a run without a geometric step. |
+| `plan`, `beam` (optional, plans only) | The file name of the plan's `plan` series.json row (`plan.parquet`) and of its `beam` row (`beam_mu.nii.gz`, or its prefixed name after a geometric `preprocess` run); each is left out when the plan has no such row. They follow `retained`, `plan` then `beam`. |
 
 `masks` and `series` are native JSON lists, `patient_age` and `retained` are numbers, and the optional metadata values may be objects; every other value is a string. The `fov_mask` key appears on every line only
 when at least one usable primary-image mask is present in the tree. Without those masks, the original fourteen keys are
@@ -631,7 +655,7 @@ def load(case_dir):
 train = [load(case) for cases in splits['train'].values() for case in cases]
 ```
 
-In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, or `plan`.
+In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, `plan`, or `beam`.
 Applicator and line files are gzip-compressed coordinate text, not NIfTI; see [Conversion behavior](#conversion-behavior).
 After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (summed dose) and mask (volume)
 kept on the final grid. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should

@@ -7,7 +7,7 @@ and the crop/pad follow torchio 1.2.1 (floor size, centre-preserving origin, cei
 CT image is the one reference grid: dose and masks are each resampled once onto it. Direction is never re-derived.
 Every compute call in the three process_* entry points runs inside dicom_io.quiet_call; a failure is one fixed REASON_.
 
-preprocess() reads each plan's series.json (kinds ct, dose, mask, applicator, line, plan, and the registered series, each resampled once onto the final CT) and each study folder's
+preprocess() reads each plan's series.json (kinds ct, dose, mask, applicator, line, plan, beam, and the registered series, each resampled once onto the final CT) and each study folder's
 (<patient>/study_<n>/, one case per series: a CT through every step that is on, an MR or PT through all but the HU rescale),
 and writes a separate tree plus preprocess_report.csv in the output root. Log lines and exceptions carry fixed REASON_ constants only; the report
 is the one place the patient folder names appear.
@@ -23,10 +23,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import SimpleITK as sitk
 
 from rt_dataprep import convert as conv
-from rt_dataprep import dicom_io, pool
+from rt_dataprep import dicom_io, plan_table, pool
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
 from rt_dataprep.series import DIRECTION_ATOL, IDENTITY, IMAGE_MODALITIES, reg_matrix_array
 
@@ -34,7 +36,7 @@ log = logging.getLogger(__name__)
 
 REPORT_NAME = 'preprocess_report.csv'
 OUTCOME_PREPROCESSED = 'preprocessed'
-KINDS = ('ct', 'dose', 'mask', 'applicator', 'line', 'plan')
+KINDS = ('ct', 'dose', 'mask', 'applicator', 'line', 'plan', 'beam')
 
 REASON_OUTSIDE_INPUT = 'output root is the converted root or inside it'
 REASON_NO_STEPS = 'no preprocessing step is on'
@@ -59,7 +61,8 @@ REASON_AHE_OPTIONS = 'AHE requires at least 2 bins, a finite clip limit from 0 t
 REASON_FILE_MISSING = 'a series.json row names a file that is not in the case folder'
 REASON_STUDY_MODALITY = 'a series.json series row has a modality other than CT, MR or PT, or one that differs from its file name'
 REASON_STUDY_NAME = 'a series.json series row names a file that is not a series volume'
-REASON_GRID = 'a dose or mask is not on the planning CT grid'
+REASON_GRID = 'a dose, mask or beam volume is not on the planning CT grid'
+REASON_PLAN_INDEX = 'plan.parquet is unreadable or not the plan table schema; left out of the output'
 REASON_CROP = 'a dose or mask would lose voxels to the final grid'
 REASON_MASK_RETENTION = 'a resampled mask retains less than the configured minimum physical volume'
 REASON_MASK_RETENTION_LIMIT = 'minimum mask retention must be finite, greater than 0 and at most 1'
@@ -579,7 +582,7 @@ def same_grid(a, b):
 
 
 def check_rows(plan_dir):
-    """(kept rows, ct first; the CT's read_info; the kind=series rows in input order). Every row is checked here, the CT and dose/mask headers only, before the plan's first write."""
+    """(kept rows, ct first; the CT's read_info; the kind=series rows in input order). Every row is checked here, the CT and dose/mask/beam headers only, before the plan's first write."""
     if is_legacy(plan_dir):
         raise CaseRefused(REASON_LEGACY_SERIES)
     rows, malformed = read_series_json(plan_dir)
@@ -601,7 +604,7 @@ def check_rows(plan_dir):
         raise CaseRefused(REASON_FILE_MISSING)
     kept.sort(key=lambda row: row['kind'] != 'ct')
     ct = read_info(plan_dir / kept[0]['file'])
-    if any(not same_grid(ct, read_info(plan_dir / row['file'])) for row in kept if row['kind'] in ('dose', 'mask')):
+    if any(not same_grid(ct, read_info(plan_dir / row['file'])) for row in kept if row['kind'] in ('dose', 'mask', 'beam')):
         raise CaseRefused(REASON_GRID)
     return kept, ct, series
 
@@ -733,6 +736,23 @@ def native_retained(native, final):
     return quiet_call(run, REASON_INTERNAL)
 
 
+def index_plan_table(source, path, final):
+    """Write `source` (plan.parquet) to `path` with isocenter_i/j/k replaced by the continuous index of isocenter_x/y/z on `final`; False, nothing written, when it is
+    unreadable or not plan_table.SCHEMA (compared as fields: file metadata is not part of it). An OSError propagates."""
+    try:
+        table = pq.read_table(source)
+    except pa.ArrowInvalid:
+        return False
+    if table.schema != plan_table.SCHEMA:
+        return False
+    points = zip(*(table[name].to_pylist() for name in ('isocenter_x', 'isocenter_y', 'isocenter_z')), strict=True)
+    indices = list(zip(*(final.TransformPhysicalPointToContinuousIndex(p) for p in points), strict=True))
+    for name, values in zip(('isocenter_i', 'isocenter_j', 'isocenter_k'), indices or [[]] * 3, strict=True):
+        table = table.set_column(table.schema.get_field_index(name), plan_table.SCHEMA.field(name), pa.array(values, pa.float64()))
+    conv._atomic(lambda temp: plan_table.write_plan_table(table, temp), path)
+    return True
+
+
 def preprocess_plan(plan_dir, out_dir, steps):
     """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run; the lowest dose/mask `retained`, None when none is set). CaseRefused on a refusal."""
     kept, ct, series = check_rows(plan_dir)
@@ -748,19 +768,24 @@ def preprocess_plan(plan_dir, out_dir, steps):
         if kind == 'ct':
             final = process_ct(read_image(source), steps)
             conv.write_atomic(final, out_dir / name)
-        elif kind in ('applicator', 'line', 'plan') or not geometric:  # point text and plan.parquet: copied unchanged
+        elif kind == 'plan' and geometric:  # isocenter_i/j/k always index the CT of the folder
+            if not index_plan_table(source, out_dir / name, final):
+                log.warning('preprocess: %s', REASON_PLAN_INDEX)
+                continue
+        elif kind in ('applicator', 'line', 'plan') or not geometric:  # point text and (non-geometric) plan.parquet: copied unchanged
             shutil.copyfile(source, out_dir / name)
         else:  # one image at a time: read, resampled, written, released
             native = read_image(source)
-            if steps.allow_crop:
-                crossed = crosses_final(native, final)
-            else:
-                check_crop(native, final)
-                crossed = False
-            cropped += crossed
-            cell = repr(native_retained(native, final) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
-            image = process_dose(native, final) if kind == 'dose' else process_mask(native, final, steps)
-            if has_voxels(native) and not has_voxels(image):
+            if kind != 'beam':  # a beam volume is a field footprint: a reshape that cuts it is neither refused nor counted, and it has no `retained`
+                if steps.allow_crop:
+                    crossed = crosses_final(native, final)
+                else:
+                    check_crop(native, final)
+                    crossed = False
+                cropped += crossed
+                cell = repr(native_retained(native, final) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
+            image = process_dose(native, final) if kind in ('dose', 'beam') else process_mask(native, final, steps)
+            if kind != 'beam' and has_voxels(native) and not has_voxels(image):
                 raise CaseRefused(REASON_CROP)
             if kind == 'mask' and steps.min_mask_retention is not None:
                 ratio = mask_retention(native, image, steps.legacy_linear_masks)

@@ -1523,23 +1523,23 @@ def test_manifest_lists_the_same_cases_on_the_converted_and_the_preprocessed_tre
     assert [r['image'] for r in after[2:]] == [pre.output_name(f'series_MR_{k}.nii.gz', steps) for k in (1, 2)]
 
 
-# ---- rtplan-parquet task-03: plan.parquet is carried through unchanged ----
+# ---- rtplan-parquet task-03: plan.parquet is carried through on a non-geometric run, its isocenter index rewritten on a geometric one ----
 
 def photon_converted(tmp_path):
     """A converted tree whose one plan folder is a photon plan (plan.parquet + its series.json row); returns (converted root, plan folder)."""
     import synthetic_dicom as sd
     from test_convert import BOX, PID, dose_spec, make_plan
     org, converted = tmp_path / 'org', tmp_path / 'converted'
-    make_plan(org / PID / 'plan_1', doses=[dose_spec(10)], rois=[BOX], plan_writer=sd.write_photon_rtplan)
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10)], rois=[BOX], plan_writer=sd.write_photon_rtplan,
+              ct_meta=dict(tags=dict(PatientPosition='HFS')))  # beam_mu models HFS/HFP/FFS/FFP only
     conv.convert(org, converted)
     folder = converted / PID / 'plan_1'
     assert (folder / conv.PLAN_NAME).is_file()
     return converted, folder
 
 
-@pytest.mark.parametrize('steps', [PreprocessSteps(rescale=True), SMALL, PreprocessSteps(resample=True), PreprocessSteps(reshape=True, new_shape=(8, 8, 8))],
-                         ids=['non_geometric', 'four_steps', 'resample', 'reshape'])
-def test_plan_parquet_is_copied_byte_identical_and_listed(tmp_path, steps):
+@pytest.mark.parametrize('steps', [PreprocessSteps(rescale=True), PreprocessSteps(ahe=True)], ids=['rescale', 'ahe'])
+def test_plan_parquet_is_copied_byte_identical_on_a_non_geometric_run(tmp_path, steps):
     converted, folder = photon_converted(tmp_path)
     out = tmp_path / 'out'
     report = pre.preprocess(converted, out, steps)
@@ -1548,6 +1548,110 @@ def test_plan_parquet_is_copied_byte_identical_and_listed(tmp_path, steps):
     assert (done / conv.PLAN_NAME).read_bytes() == (folder / conv.PLAN_NAME).read_bytes()
     assert conv.PLAN_NAME in plan_row(report).files
     assert [(r['file'], r['kind'], r['retained']) for r in sf.read(done) if r['kind'] == 'plan'] == [(conv.PLAN_NAME, 'plan', '')]
+
+
+GEOMETRIC = [SMALL, PreprocessSteps(resample=True), PreprocessSteps(reshape=True, new_shape=(8, 8, 8))]
+
+
+@pytest.mark.parametrize('steps', GEOMETRIC, ids=['four_steps', 'resample', 'reshape'])
+def test_a_geometric_run_rewrites_the_plan_parquet_isocenter_index_for_the_final_ct(tmp_path, steps):
+    import pyarrow.parquet as pq
+
+    from rt_dataprep import plan_table
+    converted, folder = photon_converted(tmp_path)
+    out = tmp_path / 'out'
+    report = pre.preprocess(converted, out, steps)
+    assert [(r.folder, r.outcome, r.reason) for r in report.rows] == [('plan_1', 'preprocessed', '')]
+    done = out / folder.parent.name / 'plan_1'
+    final = sitk.ReadImage(str(done / pre.output_name(conv.CT_NAME, steps, ct=True, image=True)))
+    before, after = pq.read_table(folder / conv.PLAN_NAME), pq.read_table(done / conv.PLAN_NAME)
+    assert after.schema == plan_table.SCHEMA and after.num_rows == before.num_rows > 0
+    index_columns = ('isocenter_i', 'isocenter_j', 'isocenter_k')
+    for name in before.column_names:
+        if name not in index_columns:
+            assert after[name].equals(before[name]), name
+    for name in index_columns:
+        assert after[name].null_count == 0  # a non-nullable schema field does not stop nulls: check the data
+    points = zip(*(after[name].to_pylist() for name in ('isocenter_x', 'isocenter_y', 'isocenter_z')), strict=True)
+    expected = np.array([final.TransformPhysicalPointToContinuousIndex(p) for p in points])
+    assert np.allclose(np.column_stack([after[name].to_numpy() for name in index_columns]), expected, rtol=0, atol=1e-6)
+    if steps.reshape:  # the final grid is not the native one: the index really moved
+        assert not np.allclose(np.column_stack([after[n].to_numpy() for n in index_columns]), np.column_stack([before[n].to_numpy() for n in index_columns]))
+    assert conv.PLAN_NAME in plan_row(report).files
+    assert sorted(p.name for p in done.iterdir() if p.name.startswith('.')) == []
+
+
+def test_a_geometric_run_leaves_out_an_unreadable_or_non_schema_plan_parquet(tmp_path, caplog):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    converted, folder = photon_converted(tmp_path)
+    for k, writer in enumerate([lambda path: path.write_bytes(b'not parquet'),
+                                lambda path: pq.write_table(pa.table({'isocenter_x': [1.0]}), path)]):
+        writer(folder / conv.PLAN_NAME)
+        out = tmp_path / f'out_{k}'
+        with caplog.at_level(logging.WARNING, logger='rt_dataprep.preprocess'):
+            caplog.clear()
+            report = pre.preprocess(converted, out, SMALL)
+        assert [(r.folder, r.outcome, r.reason) for r in report.rows] == [('plan_1', 'preprocessed', '')]
+        done = out / folder.parent.name / 'plan_1'
+        assert not (done / conv.PLAN_NAME).exists() and conv.PLAN_NAME not in plan_row(report).files
+        assert [r for r in sf.read(done) if r['kind'] == 'plan'] == []
+        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+
+
+BEAM_FILE = pre.output_name(conv.BEAM_NAME, SMALL)
+
+
+def add_beam(folder, array, n=12, **geometry):
+    """A beam_mu volume (float32) and its series.json row beside the plan's other rows."""
+    sitk.WriteImage(make_image(array, **(grid(n) | geometry)), str(folder / conv.BEAM_NAME))
+    save_rows(folder, [*sf.read(folder), series_row(conv.BEAM_NAME, 'beam', modality='RTPLAN')])
+
+
+@pytest.mark.parametrize(('shape', 'array'), [((4, 4, 4), np.ones((12, 12, 12))), ((4, 4, 4), box((9, 9, 9), (12, 12, 12))),
+                                              ((16, 16, 16), np.ones((12, 12, 12)))], ids=['cut', 'cut_out_entirely', 'padded'])
+@pytest.mark.parametrize('allow_crop', [False, True])
+def test_a_beam_volume_cut_by_the_shape_is_resampled_and_neither_refuses_nor_counts_as_cropped(tmp_path, shape, array, allow_crop):
+    steps = dataclasses.replace(PreprocessSteps(reshape=True, new_shape=shape), allow_crop=allow_crop, min_mask_retention=0.5)
+    folder, _ = write_plan(tmp_path / 'converted', dose=box((5, 5, 5), (7, 7, 7), value=2.0), masks={'ptv': box((5, 5, 5), (7, 7, 7))})  # inside every final grid
+    add_beam(folder, array)
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    row = plan_row(report)
+    assert (row.outcome, row.reason, row.cropped) == ('preprocessed', '', 0)
+    assert row.retained == 1.0
+    done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
+    name = pre.output_name(conv.BEAM_NAME, steps)
+    assert name == f'reshape_{conv.BEAM_NAME}' and name in row.files
+    assert [(r['file'], r['retained']) for r in sf.read(done) if r['kind'] == 'beam'] == [(name, '')]
+    image = sitk.ReadImage(str(done / name))
+    final = sitk.ReadImage(str(done / pre.output_name(conv.CT_NAME, steps, ct=True, image=True)))
+    assert image.GetPixelID() == sitk.sitkFloat32 and image.GetSize() == shape
+    assert (image.GetOrigin(), image.GetSpacing(), image.GetDirection()) == (final.GetOrigin(), final.GetSpacing(), final.GetDirection())
+    values = sitk.GetArrayFromImage(image)
+    if shape[0] > 12:  # padded: the two voxels at each end lie outside the native CT
+        assert (values[:2] == 0).all() and (values[-2:] == 0).all() and (values[:, :2] == 0).all() and (values[:, :, -2:] == 0).all()
+        assert (values[2:-2, 2:-2, 2:-2] == 1).all()
+    if array.max() and shape[0] < 12:
+        assert (values == 1).all() or not values.any()  # a nearest/linear copy of a constant field or an empty one
+    assert report_rows(tmp_path / 'out')[0]['cropped'] == '0'
+
+
+def test_a_beam_volume_off_the_ct_grid_refuses_like_a_dose(tmp_path):
+    folder, _ = write_plan(tmp_path / 'converted')
+    add_beam(folder, np.ones((12, 12, 12)), origin=(-5.0, -5.5, -5.5))
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', SMALL)
+    assert (plan_row(report).outcome, plan_row(report).reason) == ('refused', pre.REASON_GRID)
+    assert not (tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1').exists()
+
+
+def test_a_beam_volume_is_copied_under_the_dose_name_rule_on_a_non_geometric_run(tmp_path):
+    folder, _ = write_plan(tmp_path / 'converted')
+    add_beam(folder, np.full((12, 12, 12), 3.0))
+    steps = PreprocessSteps(rescale=True)
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    name = pre.output_name(conv.BEAM_NAME, steps)
+    assert (plan_row(report).outcome, plan_row(report).cropped) == ('preprocessed', '')
+    assert (tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1' / name).read_bytes() == (folder / conv.BEAM_NAME).read_bytes()
 
 
 def test_manifest_rows_are_unchanged_by_plan_parquet(tmp_path):
@@ -1568,7 +1672,10 @@ def test_manifest_rows_are_unchanged_by_plan_parquet(tmp_path):
     assert (outs['with'] / folder.parent.name / 'plan_1' / conv.PLAN_NAME).is_file()
     assert not (outs['without'] / folder.parent.name / 'plan_1' / conv.PLAN_NAME).exists()
     assert man.manifest(outs['with']) == man.manifest(outs['without']) == (1, 0)
-    assert (outs['with'] / 'manifest.jsonl').read_bytes() == (outs['without'] / 'manifest.jsonl').read_bytes()
+    lines = {name: json.loads((root / 'manifest.jsonl').read_text(encoding='utf-8')) for name, root in outs.items()}
+    assert lines['with'].pop('plan') == conv.PLAN_NAME  # the beam row stays in both trees, so only `plan` differs
+    assert 'plan' not in lines['without']
+    assert lines['with'] == lines['without']
 
 
 # ---- task-03: registered series aligned onto the final CT grid (reg-resampling D1-D9, D13). SYNTHETIC volumes with one bright landmark voxel. ----
