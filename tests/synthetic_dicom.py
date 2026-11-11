@@ -306,7 +306,7 @@ def photon_beam(number=1, kind='vmat', meterset=200.0, pairs=4, mlc=True, wedge=
         RadiationType='PHOTON', TreatmentDeliveryType='SETUP' if setup else 'TREATMENT',
         TreatmentMachineName='SYNTHETIC_LINAC', BeamLimitingDeviceSequence=devices,
         NumberOfWedges=int(wedge), NumberOfBlocks=0, NumberOfBoli=0, FinalCumulativeMetersetWeight=weights[-1],
-        NumberOfControlPoints=len(weights), ControlPointSequence=points,
+        NumberOfControlPoints=len(weights), ControlPointSequence=points, SourceAxisDistance=1000.0,
         BeamMeterset=None if setup else meterset)
     if kind == 'vmat':
         beam['PrimaryFluenceModeSequence'] = [dict(FluenceMode='NON_STANDARD', FluenceModeID='FFF')]

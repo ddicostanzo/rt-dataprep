@@ -39,6 +39,8 @@ packages = ["src/rt_dataprep"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]
+markers = ["slow: full-size runs, excluded by default (run with -m slow)"]
+addopts = "-m 'not slow'"
 
 [tool.ruff.lint]
 # Pinned: ruff 0.17's built-in default is far wider than the old one. Correctness rules, not style.
