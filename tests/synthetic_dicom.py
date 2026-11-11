@@ -267,7 +267,7 @@ def photon_beam(number=1, kind='vmat', meterset=200.0, pairs=4, mlc=True, wedge=
     The extra key BeamMeterset is not a beam tag: the builder moves it into the fraction group (None writes no reference).
     kind: 'vmat' (7 control points; CP 1+ carry only gantry, weight and the MLC), 'sas' (step and shoot: weights
     0, .5, .5, 1), '3d' (2 control points, weight only on CP 1), 'setup' (a SETUP beam: no meterset, no MLC).
-    Jaws are ASYMX and ASYMY (CP 0 only); mlc adds an MLCX with `pairs` leaf pairs (positions all bank A, then bank B);
+    Jaws are ASYMX and ASYMY (CP 0 only); mlc adds an MLCX with `pairs` leaf pairs (positions all X1-side leaves, then all X2-side leaves);
     wedge adds one wedge and its position on CP 0. Edit the returned dict (and its ControlPointSequence) for other cases.
     """
     weights = dict(vmat=[i / 6 for i in range(7)], sas=[0.0, 0.5, 0.5, 1.0], **{'3d': [0.0, 1.0]}, setup=[0.0, 1.0])[kind]

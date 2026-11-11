@@ -1900,7 +1900,8 @@ def test_series_json_has_one_plan_row_last_with_the_plan_columns_and_string_valu
     assert [r['file'] for r in rows] == ['planning_ct.nii.gz', 'liver.nii.gz', 'plan.parquet']
     ct_row, plan_row = rows[0], rows[-1]
     assert plan_row == dict(file='plan.parquet', kind='plan', modality='RTPLAN', series_description='', series_instance_uid=
-                            plan_row['series_instance_uid'], study_instance_uid=plan_row['study_instance_uid'],
+                            str(pydicom.dcmread(plan['folder'] / 'plan.dcm').SeriesInstanceUID),
+                            study_instance_uid=str(pydicom.dcmread(plan['folder'] / 'plan.dcm').StudyInstanceUID),
                             frame_of_reference_uid=str(pydicom.dcmread(plan['folder'] / 'plan.dcm').FrameOfReferenceUID),
                             series_date='', roi_name='', dose_summation_type='', reg_matrix='',
                             **{key: ct_row[key] for key in ('rtplan_uid', 'rtplan_label', 'rtplan_date', 'fractions_planned')})
@@ -1924,8 +1925,10 @@ ELECTRON = sd.photon_beam(2, tags=dict(RadiationType='ELECTRON'))
 @pytest.mark.parametrize('kwargs', [dict(), dict(plan_writer=sd.write_ion_rtplan),
                                     dict(plan_writer=sd.write_photon_rtplan, plan_meta=dict(beams=[sd.photon_beam(1), ELECTRON]))],
                          ids=['brachy', 'ion', 'photon+electron'])
-def test_brachy_ion_and_mixed_plans_get_no_plan_parquet_and_no_plan_row(tree, kwargs):
+def test_brachy_ion_and_mixed_plans_get_no_plan_parquet_and_no_plan_row(tree, kwargs, caplog):
+    caplog.set_level(logging.DEBUG)
     _, rows, out = one_plan(tree, rois=[BOX], **kwargs)
+    assert plan_table.REASON_PLAN_TABLE not in caplog.text  # not malformed: no warning
     assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
     assert row_of(rows).files == ['planning_ct.nii.gz', 'liver.nii.gz', 'series.json']
     assert not (out / PID / 'plan_1' / 'plan.parquet').exists()
