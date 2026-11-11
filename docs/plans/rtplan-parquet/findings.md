@@ -28,3 +28,7 @@ empty RadiationType silently drops the parquet. Task-02 fixtures must call write
 - Commit 52b2aaf (squashed). convert.py: PLAN_NAME = 'plan.parquet'; _header_call(plan_rows) in try/except CaseRefused → log.warning REASON_PLAN_TABLE; to_table outside _header_call, before mkdir; parquet written last via _atomic; _series_rows has an explicit last branch for the plan row (series_description/UIDs/date from the plan header).
 - make_plan(plan_writer=sd.write_rtplan); only the default writer gets positions_mm. 8 new tests (1617 passed total).
 - write_photon_rtplan writes no FrameOfReferenceUID by default; tests pass frame_uid explicitly and cover the '' fallback.
+
+## review-2
+PASS (no BLOCKING). Notes: task-02 must not land without task-03 (preprocess KINDS refuses 'plan'); an ArrowInvalid from to_table stops the whole run (spec choice, hardening candidate);
+test_series_json_has_one_plan_row asserts series/study UIDs equal to themselves (trivial, fix in review round); no test that a ValueError from to_table propagates.
