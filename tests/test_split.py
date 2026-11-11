@@ -387,6 +387,8 @@ ROWS_BREAKS = {
     'empty patient': b'{"case_dir": "SYNTHETIC_P0/plan_1", "patient": ""}\n',
     'whitespace case_dir': b'{"case_dir": "  ", "patient": "SYNTHETIC_P0"}\n',
     'bad line after a good one': GOOD + b'{oops\n',
+    'lone surrogate patient': b'{"case_dir": "SYNTHETIC_P0/plan_1", "patient": "SYNTHETIC_\\ud800"}\n',
+    'lone surrogate case_dir': b'{"case_dir": "SYNTHETIC_\\udfff", "patient": "SYNTHETIC_P0"}\n',  # #249
 }
 
 

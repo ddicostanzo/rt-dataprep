@@ -51,6 +51,8 @@ def _read(manifest_path):
                     reason = REASON_COLUMNS
                 elif any(not isinstance(row[k], str) or not row[k].strip() for k in ('patient', 'case_dir')):
                     reason = REASON_ROWS
+                else:
+                    (row['patient'] + row['case_dir']).encode()  # a lone surrogate raises UnicodeEncodeError (a ValueError) here, not in the hash (#249)
                 if reason:
                     break
                 rows.append(row)

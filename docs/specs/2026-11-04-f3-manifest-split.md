@@ -67,7 +67,7 @@ Returns the number of cases written and refused.
    left as it is. The write is atomic and exclusive (temp file in the same folder, then `os.link`, which refuses an
    existing target, so of two concurrent runs only the first writes, #73; a plain rename where hard links are
    unsupported). A manifest without a `patient` or `case_dir` column is refused (#72). So is one that is not UTF-8 or holds a row without a
-   `patient` or `case_dir` value (#78).
+   `patient` or `case_dir` value (#78), or whose `patient` or `case_dir` holds a lone surrogate escape that cannot be encoded as UTF-8 (#249).
 
 ### `check_disjoint(splits, external_manifest)`
 
