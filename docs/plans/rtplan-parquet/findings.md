@@ -17,3 +17,9 @@ Append findings under `## <task-id>` (append only).
 - write_photon_rtplan(path, struct_sop_uid, sop_uid, frame_uid, *, beams=[photon_beam(...)], fractions, ...): call by keyword (write_rtplan's 3rd positional is positions_mm). BeamMeterset in a beam dict is moved into the fraction group.
 - nan gantry triggers a pydicom DS warning; filtered in those tests.
 - Not checked: NumberOfControlPoints vs ControlPointSequence length.
+
+## review-1
+PASS (no BLOCKING). Fixed in aeffd85: empty WedgeSequence item returned the Dataset as wedge_id (ArrowTypeError outside _header_call).
+Deferred (file in 2.9): NumberOfControlPoints/ControlPointIndex not checked; duplicate BeamNumber/ReferencedBeamNumber last-wins;
+wedge_orientation typed string though VR DS (spec choice); CONTINUATION beams dropped (MU under-count, owner question);
+empty RadiationType silently drops the parquet. Task-02 fixtures must call write_photon_rtplan by keyword.
