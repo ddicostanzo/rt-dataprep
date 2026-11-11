@@ -278,7 +278,7 @@ def test_ac8_unsupported_patient_position_is_refused(tmp_path, position):
     assert str(raised.value) == REASON_BEAM_VOLUME
 
 
-@pytest.mark.parametrize('sad', [float('nan'), float('inf'), '400', None, [400.0]])
+@pytest.mark.parametrize('sad', [float('nan'), float('inf'), '400', None, [400.0], True])
 def test_ac8_sad_must_be_a_finite_positive_number(tmp_path, sad):
     plan = written(tmp_path, [static()])
     ct = ct_image()

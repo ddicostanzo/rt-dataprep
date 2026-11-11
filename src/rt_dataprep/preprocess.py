@@ -7,7 +7,7 @@ and the crop/pad follow torchio 1.2.1 (floor size, centre-preserving origin, cei
 CT image is the one reference grid: dose and masks are each resampled once onto it. Direction is never re-derived.
 Every compute call in the three process_* entry points runs inside dicom_io.quiet_call; a failure is one fixed REASON_.
 
-preprocess() reads each plan's series.json (kinds ct, dose, mask, applicator, line, plan, and the registered series, each resampled once onto the final CT) and each study folder's
+preprocess() reads each plan's series.json (kinds ct, dose, mask, applicator, line, plan, beam, and the registered series, each resampled once onto the final CT) and each study folder's
 (<patient>/study_<n>/, one case per series: a CT through every step that is on, an MR or PT through all but the HU rescale),
 and writes a separate tree plus preprocess_report.csv in the output root. Log lines and exceptions carry fixed REASON_ constants only; the report
 is the one place the patient folder names appear.
@@ -582,7 +582,7 @@ def same_grid(a, b):
 
 
 def check_rows(plan_dir):
-    """(kept rows, ct first; the CT's read_info; the kind=series rows in input order). Every row is checked here, the CT and dose/mask headers only, before the plan's first write."""
+    """(kept rows, ct first; the CT's read_info; the kind=series rows in input order). Every row is checked here, the CT and dose/mask/beam headers only, before the plan's first write."""
     if is_legacy(plan_dir):
         raise CaseRefused(REASON_LEGACY_SERIES)
     rows, malformed = read_series_json(plan_dir)

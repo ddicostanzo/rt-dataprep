@@ -47,7 +47,7 @@ def _sads(plan):
     beams = plan.get('BeamSequence') or []
     sads = {int(b.get('BeamNumber')): b.get('SourceAxisDistance') for b in beams if b.get('TreatmentDeliveryType') != 'SETUP'}
     for value in sads.values():
-        _check(isinstance(value, (int, float)) and math.isfinite(value) and value > 0)
+        _check(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0)
     return sads
 
 

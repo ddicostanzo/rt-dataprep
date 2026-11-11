@@ -650,9 +650,9 @@ def test_a_beam_row_leaves_retained_unchanged(tmp_path):
     done = out / folder.parent.name / 'plan_1'
     man.manifest(out)
     with_beam = plan_line(out)['retained']
-    sf.write([r for r in sf.read(done) if r['kind'] != 'beam'], done / conv.SERIES_NAME)
-    man.manifest(out)
-    assert plan_line(out)['retained'] == with_beam is not None
+    sf.write([r | {'retained': '0.001'} if r['kind'] == 'beam' else r for r in sf.read(done)], done / conv.SERIES_NAME)
+    man.manifest(out)  # a beam `retained` below every dose/mask value must not become the line's
+    assert plan_line(out)['retained'] == with_beam is not None and with_beam != 0.001
 
 
 def test_a_non_photon_plan_line_has_neither_key(tmp_path):
