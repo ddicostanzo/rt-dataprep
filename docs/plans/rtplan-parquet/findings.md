@@ -36,3 +36,9 @@ test_series_json_has_one_plan_row asserts series/study UIDs equal to themselves 
 ## task-03
 - Commit 05a1e77 (squashed as 41becfb). preprocess: 'plan' in KINDS, output-name and copy tuples, docstring. 5 tests (AC1 parametrized over rescale/four-step/resample/reshape; AC2 manifest.jsonl byte-identical with and without plan.parquet). README section `### plan.parquet`; project-profile phi rule and .gitignore list plan.parquet. 1622 passed.
 - Not checked: a 'plan' row in a study folder's series.json (convert never writes one).
+
+## review-loop-pass-1
+/code-review (opus) + spec axis (opus): no BLOCKING code finding. Owner decision (plan bug, treatment data): a plan with a
+CONTINUATION/TRMT_PORTFILM/OPEN_PORTFILM beam gets no parquet → 8b0b034. Trivial fixes: AC9 on every fixture table (8b0b034);
+plan-row UID self-compare, no warning for non-photon plans, stale bank comment (6f7146c); README dropped-beam wording.
+Deferred: hardening #272-#278; follow-ups #279-#282.
