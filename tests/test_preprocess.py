@@ -1672,7 +1672,10 @@ def test_manifest_rows_are_unchanged_by_plan_parquet(tmp_path):
     assert (outs['with'] / folder.parent.name / 'plan_1' / conv.PLAN_NAME).is_file()
     assert not (outs['without'] / folder.parent.name / 'plan_1' / conv.PLAN_NAME).exists()
     assert man.manifest(outs['with']) == man.manifest(outs['without']) == (1, 0)
-    assert (outs['with'] / 'manifest.jsonl').read_bytes() == (outs['without'] / 'manifest.jsonl').read_bytes()
+    lines = {name: json.loads((root / 'manifest.jsonl').read_text(encoding='utf-8')) for name, root in outs.items()}
+    assert lines['with'].pop('plan') == conv.PLAN_NAME  # the beam row stays in both trees, so only `plan` differs
+    assert 'plan' not in lines['without']
+    assert lines['with'] == lines['without']
 
 
 # ---- task-03: registered series aligned onto the final CT grid (reg-resampling D1-D9, D13). SYNTHETIC volumes with one bright landmark voxel. ----

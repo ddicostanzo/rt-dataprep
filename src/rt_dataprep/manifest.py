@@ -3,7 +3,7 @@ manifest.jsonl of a converted or preprocessed tree (spec: f3-manifest-split; JSO
 and one per series of each <patient>/study_<n>/ that holds one (imaging-cases spec D9, D14-D16).
 
 Each plan goes through preprocess.check_rows, which validates series.json and reads the CT header only; the `series` key (a list of objects) then
-reads the header of each identity series; an entry gains `fov_mask` when fovmask_<file> beside it is on the CT grid. A plan line ends with `retained`, the lowest dose/mask `retained` of its series.json, when a preprocess run set one (#225). A plan check_rows refuses is left out and counted. A patient folder whose name is not UTF-8 is left out and counts 1 (#260). A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.json items, and a
+reads the header of each identity series; an entry gains `fov_mask` when fovmask_<file> beside it is on the CT grid. A plan line ends with `retained`, the lowest dose/mask `retained` of its series.json, when a preprocess run set one (#225), then `plan` and `beam`, the file names of its `plan` and `beam` series.json rows, each only when that row exists (#280). A plan check_rows refuses is left out and counted. A patient folder whose name is not UTF-8 is left out and counts 1 (#260). A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.json items, and a
 series whose header cannot be read is left out and counted on its own. The tree is only read; manifest.jsonl (and its dated copy, manifest_<UTC time>.jsonl) in the root is the one place the patient folder names
 appear. The log line carries counts only.
 """
@@ -43,6 +43,12 @@ def _retained(kept):
     if not all(np.isfinite(values)):  # a hand-edited cell: the plan is refused like any other malformed series.json
         raise CaseRefused(REASON_SERIES_CSV)
     return {'retained': min(values)} if values else {}
+
+
+def _files(kept):
+    """{'plan': file, 'beam': file} for the plan.parquet and beam volume rows of a plan, in that order; a key is left out when its row is absent (#280)."""
+    files = {kind: next((row['file'] for row in kept if row['kind'] == kind), None) for kind in ('plan', 'beam')}
+    return {kind: file for kind, file in files.items() if file}
 
 
 def _geometry(size, spacing):
@@ -130,7 +136,7 @@ def manifest(root):
             rows.append(([f'{patient.name}/{plan.name}', patient.name, plan.name, *_geometry(ct[0], ct[2]),
                           str(int(any(row['kind'] == 'dose' for row in kept))), masks,
                           kept[0]['rtplan_uid'], kept[0]['series_instance_uid'], kept[0]['study_instance_uid'],  # kept[0] is the ct row
-                          'plan', 'CT', '', _aligned(plan, series, ct), image_fov_mask(plan, kept[0]['file'], ct)], _optional(kept[0]) | retained))
+                          'plan', 'CT', '', _aligned(plan, series, ct), image_fov_mask(plan, kept[0]['file'], ct)], _optional(kept[0]) | retained | _files(kept)))
         for study in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(STUDY_FOLDER, p.name) and holds_series(p)):
             study_rows, study_refused = _study_rows(patient, study)
             rows += study_rows

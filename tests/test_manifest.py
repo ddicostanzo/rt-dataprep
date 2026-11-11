@@ -12,7 +12,7 @@ import series_files as sf
 import SimpleITK as sitk
 from test_convert import BOX, PID, dose_spec, make_plan
 from test_preprocess import (AHE_MR_OUT, AHE_STUDY_CT, CUT, DOSE_SPLIT, HALF_OUT, MR_OUT, MR_RAMP, MR_SIZE, SMALL, SMALL_AHE, box, grid, landmark,
-                             mr_spec, rigid, run_plan, save_rows, series_row, state, write_plan, write_study_tree)
+                             mr_spec, photon_converted, rigid, run_plan, save_rows, series_row, state, write_plan, write_study_tree)
 from test_series import STUDY_D1, STUDY_D2, STUDY_T1, STUDY_T2, put
 
 from rt_dataprep import convert as conv
@@ -47,8 +47,8 @@ def read(root):
     rows = [json.loads(line) for line in (root / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]
     for row in rows:  # the optional keys (task-04) follow the fixed ones, in order; this helper's callers compare the fixed part
         base = [*COLUMNS, 'fov_mask'] if 'fov_mask' in row else COLUMNS
-        assert list(row) == [*base, *(key for key in [*OPTIONAL, 'retained'] if key in row)]
-    return [{key: value for key, value in row.items() if key not in [*OPTIONAL, 'retained']} for row in rows]
+        assert list(row) == [*base, *(key for key in [*OPTIONAL, 'retained', 'plan', 'beam'] if key in row)]
+    return [{key: value for key, value in row.items() if key not in [*OPTIONAL, 'retained', 'plan', 'beam']} for row in rows]
 
 
 def test_rows_columns_and_values_on_a_converted_tree(tmp_path):
@@ -602,3 +602,63 @@ def test_a_patient_folder_whose_name_is_not_utf8_is_refused_and_the_rest_still_s
     assert man.manifest(root) == (3, 1)
     assert {row['patient'] for row in read(root)} == {PATIENT_A, PATIENT_B}
     sp.split(root / 'manifest.jsonl', test_size=0.5, val_size=0.0, seed=0)  # #249 would refuse the whole manifest
+
+
+# ---- #280: `plan` and `beam` file-name keys, after `retained` ----
+
+def plan_line(root):
+    (line,) = (root / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()
+    return json.loads(line)
+
+
+def test_a_converted_photon_plan_line_has_plan_and_beam_keys_last(tmp_path):
+    converted, _ = photon_converted(tmp_path)
+    assert man.manifest(converted) == (1, 0)
+    line = plan_line(converted)
+    assert list(line)[-2:] == ['plan', 'beam']
+    assert (line['plan'], line['beam']) == (conv.PLAN_NAME, conv.BEAM_NAME)
+    assert 'retained' not in line
+
+
+def test_a_geometric_run_lists_the_beam_under_its_output_name_after_retained(tmp_path):
+    converted, folder = photon_converted(tmp_path)
+    out = tmp_path / 'out'
+    steps = dataclasses.replace(SMALL, new_shape=(8, 8, 8))
+    pre.preprocess(converted, out, steps)
+    assert man.manifest(out) == (1, 0)
+    line = plan_line(out)
+    assert list(line)[-3:] == ['retained', 'plan', 'beam']
+    assert line['plan'] == conv.PLAN_NAME
+    assert line['beam'] == pre.output_name(conv.BEAM_NAME, steps) != conv.BEAM_NAME
+    assert (out / folder.parent.name / 'plan_1' / line['beam']).is_file()
+
+
+def test_each_key_is_present_only_with_its_series_row(tmp_path):
+    converted, folder = photon_converted(tmp_path)
+    rows = sf.read(folder)
+    for dropped, kept_key in (('beam', 'plan'), ('plan', 'beam')):
+        sf.write([r for r in rows if r['kind'] != dropped], folder / conv.SERIES_NAME)
+        assert man.manifest(converted) == (1, 0)
+        line = plan_line(converted)
+        assert dropped not in line and line[kept_key]
+
+
+def test_a_beam_row_leaves_retained_unchanged(tmp_path):
+    converted, folder = photon_converted(tmp_path)
+    out = tmp_path / 'out'
+    pre.preprocess(converted, out, dataclasses.replace(SMALL, new_shape=(8, 8, 8)))
+    done = out / folder.parent.name / 'plan_1'
+    man.manifest(out)
+    with_beam = plan_line(out)['retained']
+    sf.write([r for r in sf.read(done) if r['kind'] != 'beam'], done / conv.SERIES_NAME)
+    man.manifest(out)
+    assert plan_line(out)['retained'] == with_beam is not None
+
+
+def test_a_non_photon_plan_line_has_neither_key(tmp_path):
+    org, converted = tmp_path / 'org', tmp_path / 'converted'
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10)], rois=[BOX])  # brachy: no plan.parquet, no beam
+    conv.convert(org, converted)
+    assert man.manifest(converted) == (1, 0)
+    line = plan_line(converted)
+    assert 'plan' not in line and 'beam' not in line

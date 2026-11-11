@@ -200,7 +200,7 @@ them as refused. Reconvert them with `convert --overwrite`.
 
 A photon external-beam RTPLAN also writes `plan.parquet` in its plan folder (after the masks, before `series.json`), with a
 `series.json` row of `kind` `plan`; `preprocess` writes it under the same name (copied unchanged on a run with no geometric step), and `manifest`
-ignores it. Brachy and RT Ion plans, a plan mixing photon with other beams, and a photon plan with a missing or inconsistent
+lists it in the plan line's `plan` key. Brachy and RT Ion plans, a plan mixing photon with other beams, and a photon plan with a missing or inconsistent
 value get no `plan.parquet` (the plan still converts; a malformed photon plan logs a warning). The file has one row per control point of each
 treatment beam (SETUP beams are dropped; a plan with a CONTINUATION, TRMT_PORTFILM or OPEN_PORTFILM beam gets no
 `plan.parquet`, since that beam's dose is in `dose.nii.gz`), values DICOM omits are filled forward from the earlier control point, and the
@@ -372,7 +372,8 @@ these keys:
 | `series` | List of aligned plan series (objects with `file`, `modality`, optional `fov_mask`); `[]` for imaging. |
 | `fov_mask` (optional) | Planning-CT or study-image support-mask filename, relative to its case folder; blank when absent. |
 | `patient_age`, `patient_sex`, `patient_weight`, `study_date`, `series_date`, `manufacturer`, `model`, `institution_name` (all optional) | From the `dicom` object of the case's primary image (a plan's planning CT; an imaging line's own series), `series_date` from that image's `series_date` field. A key the image has no value for is left out of that line, so lines can differ in which of these they carry. A value that varied over the series is the `{"min": ..., "max": ...}` or `{"distinct": [...]}` object, copied as is. They follow the fixed keys (and `fov_mask`) in the order listed; a `series.json` without `dicom` gives only `series_date`. `split` ignores them. |
-| `retained` (optional, plans only) | The lowest dose/mask `retained` of a preprocessed plan (the fraction kept by `--allow-crop`), the last key; left out on a converted tree or a run without a geometric step. |
+| `retained` (optional, plans only) | The lowest dose/mask `retained` of a preprocessed plan (the fraction kept by `--allow-crop`), after the metadata keys; left out on a converted tree or a run without a geometric step. |
+| `plan`, `beam` (optional, plans only) | The file name of the plan's `plan` series.json row (`plan.parquet`) and of its `beam` row (`beam_mu.nii.gz`, or its prefixed name after a geometric `preprocess` run); each is left out when the plan has no such row. They follow `retained`, `plan` then `beam`. |
 
 `masks` and `series` are native JSON lists, `patient_age` and `retained` are numbers, and the optional metadata values may be objects; every other value is a string. The `fov_mask` key appears on every line only
 when at least one usable primary-image mask is present in the tree. Without those masks, the original fourteen keys are

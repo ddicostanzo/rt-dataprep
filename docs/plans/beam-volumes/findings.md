@@ -58,3 +58,12 @@ Append findings under `## <task-id>` (append only).
 - Beyond the task: regression test for the unreadable / non-SCHEMA `plan.parquet` case was added (the plan deferred it); it also pins the log text.
 - `test_manifest_rows_are_unchanged_by_plan_parquet` still passes unchanged (both trees keep the beam row; task-04 owns the manifest `beam` key).
 - Not done / deferred: a null in a SCHEMA-valid isocenter_x/y/z column is not guarded (the schema marks them non-nullable).
+
+## task-04
+- The manifest helper `_files(kept)` returns `{'plan': file, 'beam': file}` for the first `plan` / `beam` series.json rows, a key only when its row exists; merged as
+  `_optional(kept[0]) | retained | _files(kept)`, so a plan without them writes the same bytes as before. `_retained` is untouched (dose/mask only);
+  a test drops the beam row from a preprocessed tree and pins `retained` equal.
+- `test_manifest.read` now allows `plan`/`beam` after `retained` in its key-order assert. New tests: converted photon (`plan.parquet`, `beam_mu.nii.gz`),
+  geometric run (beam under its prefixed name, `retained` then `plan` then `beam`), each key alone, non-photon plan with neither.
+- `test_manifest_rows_are_unchanged_by_plan_parquet`: the bare tree keeps its beam row, so the manifests differ by the `plan` key only (asserted).
+- README: manifest key table gains `plan`/`beam`; plan.parquet section no longer says the manifest ignores it; `retained` is no longer called "the last key".
