@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pydicom
+import pyarrow.parquet as pq
 import pytest
 import series_files as sf
 import SimpleITK as sitk
@@ -25,7 +26,7 @@ from test_dicom_io import fail_python_open as fail_open  # workers=1 where used:
 
 from rt_dataprep import convert as conv
 from rt_dataprep import dicom_io
-from rt_dataprep import masks
+from rt_dataprep import masks, plan_table
 from rt_dataprep.organize import organize
 from rt_dataprep.dicom_io import CaseRefused
 
@@ -55,15 +56,17 @@ def dose_spec(value, summation='PLAN', **kwargs):
     return spec
 
 
-def make_plan(folder, doses=(), rois=(), values=None, contour_images=True, patient=PID, ct_meta=None, plan_meta=None, struct_meta=None):
-    """One plan folder: CT, RTSTRUCT, RTPLAN and an RTDOSE per entry of `doses` (write_rtdose kwargs)."""
+def make_plan(folder, doses=(), rois=(), values=None, contour_images=True, patient=PID, ct_meta=None, plan_meta=None, struct_meta=None,
+              plan_writer=sd.write_rtplan):
+    """One plan folder: CT, RTSTRUCT, RTPLAN (by `plan_writer`, the brachy builder by default) and an RTDOSE per entry of `doses`."""
     folder.mkdir(parents=True, exist_ok=True)
     if values is None:
         values = (np.arange(np.prod(SHAPE)) % 200 - 100).reshape(SHAPE)
     ct = sd.write_ct_series(folder, values, spacing=SPACING, origin=ORIGIN, patient_id=patient, **(ct_meta or {}))
     study = dict(patient_id=patient, study_uid=ct['study_uid'])
     struct = sd.write_rtstruct_rois(folder / 'struct.dcm', ct, list(rois), contour_images=contour_images, **study, **(struct_meta or {}))
-    plan = sd.write_rtplan(folder / 'plan.dcm', struct, np.zeros((2, 3)), **study, **(plan_meta or {}))
+    positions = dict(positions_mm=np.zeros((2, 3))) if plan_writer is sd.write_rtplan else {}  # the other writers take beams or none
+    plan = plan_writer(folder / 'plan.dcm', struct, **positions, **study, **(plan_meta or {}))
     for k, spec in enumerate(doses):
         spec = dict(spec)
         spec.setdefault('frame_uid', ct['frame_uid'])
@@ -1864,3 +1867,101 @@ def test_workers_auto_on_a_rerun_without_overwrite_starts_no_pool(tree, monkeypa
     rows = conv.convert(org, out, workers='auto').rows
     assert {r.outcome for r in rows} == {conv.OUTCOME_SKIPPED} and len(rows) >= 3
     assert sizes == [1, 1, 1]  # every patient was skipped in the probe: no converted patient, no sized pool
+
+
+# ---------------------------------------------------------------- plan.parquet (rtplan-parquet task-02)
+
+PHOTON = dict(plan_writer=sd.write_photon_rtplan)
+
+
+def photon_plan(tree, beams=None, **kwargs):
+    """(plan, rows, out) of a converted tree whose plan is a photon RTPLAN of `beams` (default: one VMAT beam)."""
+    plan_meta = dict(label='SYNTHETIC_PLAN', **({'beams': beams} if beams else {}), **kwargs.pop('plan_meta', {}))
+    return one_plan(tree, plan_meta=plan_meta, **PHOTON, **kwargs)
+
+
+def test_a_photon_plan_converts_with_plan_parquet_last_before_series_json(tree):
+    plan, rows, out = photon_plan(tree, rois=[BOX, RING])
+    row = row_of(rows)
+    assert row.outcome == conv.OUTCOME_CONVERTED
+    assert row.files == ['planning_ct.nii.gz', 'liver.nii.gz', 'ROIA.nii.gz', 'plan.parquet', 'series.json']  # after the line point file
+    folder = out / PID / 'plan_1'
+    assert sorted(p.name for p in folder.iterdir()) == sorted(row.files)  # no temp left
+    with open(out / 'convert_report.csv', newline='') as handle:
+        assert next(csv.DictReader(handle))['files'] == ';'.join(row.files)
+    header = dicom_io.read_header_core(plan['folder'] / 'plan.dcm')
+    expected = plan_table.to_table(plan_table.plan_rows(header, read(folder / 'planning_ct.nii.gz')))
+    assert pq.read_table(folder / 'plan.parquet').equals(expected) and expected.num_rows == 7
+
+
+def test_series_json_has_one_plan_row_last_with_the_plan_columns_and_string_values(tree):
+    plan, _, out = photon_plan(tree, rois=[BOX], plan_meta=dict(plan_date=PLAN_DATE, fractions=5, frame_uid=sd.generate_uid()))
+    rows = series_rows(out)
+    assert [r['file'] for r in rows] == ['planning_ct.nii.gz', 'liver.nii.gz', 'plan.parquet']
+    ct_row, plan_row = rows[0], rows[-1]
+    assert plan_row == dict(file='plan.parquet', kind='plan', modality='RTPLAN', series_description='', series_instance_uid=
+                            str(pydicom.dcmread(plan['folder'] / 'plan.dcm').SeriesInstanceUID),
+                            study_instance_uid=str(pydicom.dcmread(plan['folder'] / 'plan.dcm').StudyInstanceUID),
+                            frame_of_reference_uid=str(pydicom.dcmread(plan['folder'] / 'plan.dcm').FrameOfReferenceUID),
+                            series_date='', roi_name='', dose_summation_type='', reg_matrix='',
+                            **{key: ct_row[key] for key in ('rtplan_uid', 'rtplan_label', 'rtplan_date', 'fractions_planned')})
+    assert ct_row['rtplan_uid'] == plan['plan'] and ct_row['rtplan_label'] == 'SYNTHETIC_PLAN' and ct_row['fractions_planned'] == '5'
+    assert all(isinstance(value, str) for value in plan_row.values())
+    full = sf.read(out / PID / 'plan_1')[-1]
+    assert list(full) == [*SERIES_COLUMNS, 'dicom'] and isinstance(full['dicom'], dict)
+    ds = pydicom.dcmread(plan['folder'] / 'plan.dcm')
+    assert full['dicom'] == conv.metadata.collect([ds], (conv.metadata.ALL, conv.metadata.RTPLAN)) | conv.metadata.collect(
+        [ds], (conv.metadata.RTPLAN,))
+
+
+def test_plan_series_row_leaves_frame_of_reference_empty_when_the_plan_has_none(tree):
+    _, _, out = photon_plan(tree)
+    assert series_rows(out)[-1]['frame_of_reference_uid'] == ''
+
+
+ELECTRON = sd.photon_beam(2, tags=dict(RadiationType='ELECTRON'))
+
+
+@pytest.mark.parametrize('kwargs', [dict(), dict(plan_writer=sd.write_ion_rtplan),
+                                    dict(plan_writer=sd.write_photon_rtplan, plan_meta=dict(beams=[sd.photon_beam(1), ELECTRON]))],
+                         ids=['brachy', 'ion', 'photon+electron'])
+def test_brachy_ion_and_mixed_plans_get_no_plan_parquet_and_no_plan_row(tree, kwargs, caplog):
+    caplog.set_level(logging.DEBUG)
+    _, rows, out = one_plan(tree, rois=[BOX], **kwargs)
+    assert plan_table.REASON_PLAN_TABLE not in caplog.text  # not malformed: no warning
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
+    assert row_of(rows).files == ['planning_ct.nii.gz', 'liver.nii.gz', 'series.json']
+    assert not (out / PID / 'plan_1' / 'plan.parquet').exists()
+    assert [r['kind'] for r in series_rows(out)] == ['ct', 'mask']
+
+
+def with_empty_weight():
+    beam = sd.photon_beam()
+    beam['ControlPointSequence'][1]['CumulativeMetersetWeight'] = ''
+    return beam
+
+
+@pytest.mark.parametrize('beam', [sd.photon_beam(tags=dict(BeamMeterset=None)), with_empty_weight()],
+                         ids=['no-meterset', 'empty-weight'])
+def test_a_malformed_photon_plan_converts_without_plan_parquet_and_logs_only_the_fixed_reason(tree, caplog, beam):
+    caplog.set_level(logging.DEBUG)
+    plan, rows, out = photon_plan(tree, beams=[beam], rois=[BOX])
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED and row_of(rows).files == ['planning_ct.nii.gz', 'liver.nii.gz', 'series.json']
+    assert not (out / PID / 'plan_1' / 'plan.parquet').exists()
+    assert [r['kind'] for r in series_rows(out)] == ['ct', 'mask']
+    assert any(r.levelno == logging.WARNING and r.getMessage() == f'convert: {plan_table.REASON_PLAN_TABLE}' for r in caplog.records)
+    secrets = [plan['plan'], 'SYNTHETIC_PLAN', 'SYNTHETIC_B1', plan['ct']['frame_uid'], PID]
+    assert all(secret not in caplog.text for secret in secrets)
+
+
+def test_a_bug_in_the_table_builder_propagates_and_leaves_no_plan_folder(tree, monkeypatch):
+    org, _ = tree
+    make_plan(org / PID / 'plan_1', **PHOTON)
+
+    def bug(plan, ct):
+        raise RuntimeError('SYNTHETIC bug')
+    monkeypatch.setattr(plan_table, 'plan_rows', bug)
+    case = org.parent / 'case'
+    with pytest.raises(RuntimeError):
+        run_plan(org / PID / 'plan_1', case)
+    assert not case.exists()

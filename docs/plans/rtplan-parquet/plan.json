@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "metadata": {
+    "title": "convert: photon RTPLAN as plan.parquet",
+    "spec": "docs/specs/2026-11-11-rtplan-parquet.md",
+    "branch": "feat/rtplan-ml-format",
+    "profile": "project-profile.yml",
+    "created": "2026-11-11"
+  },
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "plan_table module: photon RTPLAN -> schema-typed pyarrow Table (pyarrow dependency, photon fixture builder)",
+      "depends_on": [],
+      "files": [
+        "pyproject.toml",
+        "uv.lock",
+        "src/rt_dataprep/plan_table.py",
+        "tests/synthetic_dicom.py",
+        "tests/test_plan_table.py"
+      ],
+      "file_ops": {
+        "pyproject.toml": "modify",
+        "uv.lock": "modify",
+        "src/rt_dataprep/plan_table.py": "create",
+        "tests/synthetic_dicom.py": "modify",
+        "tests/test_plan_table.py": "create"
+      },
+      "test_approach": "Add pyarrow with `uv add pyarrow` (owner-approved dependency). TDD in tests/test_plan_table.py against a new photon RTPLAN builder in tests/synthetic_dicom.py (beams, control points, beam-limiting device sequences, wedge sequence and wedge positions, fraction group BeamMeterset, PrimaryFluenceModeSequence, IsocenterPosition) plus an RT Ion variant; datasets go through save_as + dicom_io.read_header_core before use (vault: pydicom-empty-values-read-back-as-none-or-stripped). The existing brachy builder and its callers stay unchanged. Unit-level: call the builder directly with a header and a small SimpleITK CT image; no convert run in this task. Column set, sources, fill-forward and malformed rules are exactly the spec's 'Columns', 'Filling forward' and 'Malformed photon plans' sections. The photon builder takes the same arguments as sd.write_rtplan (path, struct_sop_uid, sop_uid, frame_uid, **meta) so convert fixtures can swap it in.",
+      "criteria": [
+        "AC1: plan_table exposes SCHEMA (a pa.schema with exactly the spec's columns, types and nullability, lists as list<float64>), a row builder that takes (plan header, CT image) and returns a list of row dicts or None, a to_table(rows) that returns pa.Table.from_pylist(rows, schema=SCHEMA), and a writer that only calls pq.write_table on a given path.",
+        "AC2: VMAT beam whose CP 1+ carry only GantryAngle, CumulativeMetersetWeight and the MLC position item: one row per control point; jaw_x1/x2/y1/y2, nominal_energy, couch_angle, collimator_angle and dose_rate on every row equal CP 0's; mu sums to beam_meterset (within 1e-6 relative); mlc_positions length is 2 x NumberOfLeafJawPairs; fluence_mode is the FluenceModeID ('FFF').",
+        "AC3: Fill-forward is per RTBeamLimitingDeviceType: a later CP listing only the MLC leaves the jaw state unchanged; wedge position is tracked by ReferencedWedgeNumber; CumulativeMetersetWeight is never filled forward. A present-but-empty value ('' from read_header_core) counts as missing: a later CP with an empty DoseRateSet or GantryAngle keeps the inherited value; an empty required value at CP 0 raises CaseRefused.",
+        "AC4: Step-and-shoot beam with equal consecutive cumulative weights builds; those rows have mu 0.",
+        "AC5: 3D plan with one wedge and a SETUP beam that has no BeamMeterset: the SETUP beam has no rows; wedge_id, wedge_angle, wedge_type, wedge_orientation and wedge_position are filled on the treatment beam's rows. A beam that declares no MLC device has mlc_type, leaf_position_boundaries and mlc_positions null; a beam that declares no ASYMX/X device has jaw_x1/jaw_x2 null; both build (only a declared device missing at CP 0 is malformed, AC8).",
+        "AC6: isocenter_x/y/z equal IsocenterPosition and isocenter_i/j/k equal the CT image's TransformPhysicalPointToContinuousIndex of it.",
+        "AC7: Returns None (no exception, no log line) for: a brachy plan (no BeamSequence, read with plan.get), an RT Ion plan, a plan whose treatment beams include a non-PHOTON beam, a plan whose only beams are SETUP.",
+        "AC8: Raises CaseRefused(REASON_PLAN_TABLE) (a fixed module constant) for: a required value missing after filling forward (asserted at least for a beam without BeamType and a CP 0 without NominalBeamEnergy; pyarrow does not enforce non-nullable columns, so the builder checks); a treatment beam without a matching BeamMeterset; a non-finite GantryAngle; mlc_positions length != 2 x NumberOfLeafJawPairs; leaf_position_boundaries length != pairs + 1; strictly decreasing cumulative weights; a final weight of 0; CP 0 weight != 0 or last CP weight != FinalCumulativeMetersetWeight (1e-6 relative); more than one MLC device on a beam; a declared jaw/MLC device missing at CP 0. The builder tests value in ('', None) before any conversion, so an empty required value (e.g. an empty CumulativeMetersetWeight) raises CaseRefused(REASON_PLAN_TABLE), asserted by calling the builder directly.",
+        "AC9: A VMAT plan without a wedge yields a table whose schema equals SCHEMA exactly (null wedge columns keep their declared types), and a parquet written by the writer reads back with pq.read_table to an equal table. Every non-nullable column has null_count 0 on every fixture table built in this test file.",
+        "AC10: Guardrail (vault: pydicom-validates-lazily-on-first-tag-access, tell-a-pydicom-missing-tag-from-our-own-bug): plan_table neither calls quiet_call nor enters _pydicom_quiet, catches no exception itself, and never puts a UID, label, name or value into an exception message.",
+        "AC11: `uv run --group dev pytest -q --tb=short` and `uv run --group dev ruff check .` pass; pyarrow appears in pyproject.toml [project].dependencies and uv.lock."
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "convert writes plan.parquet and its series.json row",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_convert.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_convert.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_convert.py with end-to-end convert runs on synthetic organized trees (photon plan from task-01's builder alongside the existing CT/RTSTRUCT/RTDOSE fixtures; brachy plans from the existing builder). Integration is exactly the spec's 'Integration' and 'Mechanics' paragraphs: build the table through _header_call after the masks and before case_dir.mkdir; catch CaseRefused from that one call, log REASON_PLAN_TABLE, continue; write with _atomic after the masks and before series.json; append to files; add the series.json row via an explicit branch in _series_rows. make_plan (tests/test_convert.py:58-66) gains a plan-writer parameter defaulting to sd.write_rtplan. Write order: plan.parquet is written after the applicator/line point files and appended last to files; its series.json row comes last. Expected, not a bug: PLAN_TAGS (tests/test_metadata.py:43) gives the brachy fixture a partial photon BeamSequence, so convert runs in tests/test_dicom_metadata_convert.py will log REASON_MISSING_TAG/REASON_PLAN_TABLE and write no parquet; those tests must still pass and the shared fixture is not changed. _header_call wraps the row builder only; to_table runs after it returns (ArrowInvalid is a ValueError, which _header_call would mislabel as a missing tag), still before case_dir.mkdir.",
+      "criteria": [
+        "AC1: Converting a photon plan writes plan.parquet in the plan folder; it is in the plan's files list and in convert_report.csv's files column; pq.read_table returns the task-01 table.",
+        "AC2: series.json has exactly one row for plan.parquet with exactly the SERIES_COLUMNS keys plus dicom: kind 'plan', modality 'RTPLAN', file 'plan.parquet', roi_name/dose_summation_type/reg_matrix '', frame_of_reference_uid the plan's FrameOfReferenceUID or '', the plan columns equal to the other rows', dicom built from (metadata.ALL, metadata.RTPLAN); every value in SERIES_COLUMNS is a string.",
+        "AC3: Brachy, RT Ion and photon+electron plans convert as before: no plan.parquet, no 'plan' row in series.json, the other files unchanged; tests/test_plan_regression.py passes unmodified.",
+        "AC4: A malformed photon plan (missing BeamMeterset on a treatment beam; empty CumulativeMetersetWeight) converts with CT, dose and masks but no plan.parquet and no 'plan' row; the log contains REASON_PLAN_TABLE at WARNING level and none of the plan's UIDs, label or beam names; the run outcome is converted, not refused.",
+        "AC5: A failure while building the table leaves no plan folder side effect: the table is built before case_dir.mkdir (asserted by a monkeypatched builder that raises RuntimeError (not ValueError/TypeError/IndexError, which _header_call maps to REASON_MISSING_TAG): it propagates as before and no plan folder exists).",
+        "AC6: `uv run --group dev pytest -q --tb=short` and `uv run --group dev ruff check .` pass."
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "preprocess carries plan.parquet; docs and compliance list",
+      "depends_on": [
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py",
+        "README.md",
+        "project-profile.yml",
+        ".gitignore"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "README.md": "modify",
+        "project-profile.yml": "modify",
+        ".gitignore": "modify"
+      },
+      "test_approach": "TDD in tests/test_preprocess.py over a converted photon plan folder (from task-02's convert path or a series.json fixture with a 'plan' row and a parquet file). Edits are the spec's preprocess bullet: 'plan' joins KINDS and the ('applicator', 'line') tuples at the output-name line and the copy branch; module docstring kind list updated. README and project-profile.yml edits are the spec's docs bullet.",
+      "criteria": [
+        "AC1: preprocess accepts a series.json with a 'plan' row on a non-geometric run and on a geometric run (resample or reshape): plan.parquet is in the output folder under the same name, byte-identical to the input, and listed in the output series.json.",
+        "AC2: manifest build over that preprocessed tree succeeds and its rows are unchanged from a tree without plan.parquet (manifest.py is not modified).",
+        "AC3: README output tree lists plan.parquet and states that isocenter_i/j/k describe planning_ct.nii.gz, not a preprocessed grid; README notes that existing converted trees gain plan.parquet only on a run with --overwrite. README's kind list (README.md:613) includes plan. A short README section documents plan.parquet's columns, naming plan_table.SCHEMA: beam_meterset is MU per fraction while dose.nii.gz may be the plan total; mlc_positions is bank A then bank B; mu is the meterset between CP i-1 and CP i attributed to row i; null means the beam declares no such device or the optional tag is absent.",
+        "AC4: project-profile.yml's phi compliance rule lists plan.parquet among the per-folder files carrying metadata (never committed).",
+        "AC4b: .gitignore lists plan.parquet.",
+        "AC5: `uv run --group dev pytest -q --tb=short` and `uv run --group dev ruff check .` pass."
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ],
+    [
+      "task-03"
+    ]
+  ],
+  "deferred": [
+    "Fluence maps per beam; CT-grid beam volumes",
+    "Proton spots/energy layers; metadata.RTPLAN IonBeamSequence fallback",
+    "Brachy dwell positions and times",
+    "Electron beams, SRS cones, dual-layer MLC, more than one wedge per beam",
+    "Recompute isocenter_i/j/k on the preprocessed grid; manifest plan flag; run-summary count"
+  ]
+}

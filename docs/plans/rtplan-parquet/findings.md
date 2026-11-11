@@ -1,0 +1,44 @@
+# Findings: photon RTPLAN plan.parquet
+
+Spec: docs/specs/2026-11-11-rtplan-parquet.md · Plan: docs/plans/rtplan-parquet/plan.json
+
+Summary: convert writes plan.parquet (one filled-forward row per control point, pyarrow schema) for photon EBRT plans;
+non-photon and malformed photon plans get no parquet and still convert. preprocess copies it unchanged.
+Tasks: task-01 plan_table module (+pyarrow, photon fixture) → task-02 convert integration → task-03 preprocess + docs.
+
+Append findings under `## <task-id>` (append only).
+
+## task-01
+- Commit 75abb8e (squashed). Files: pyproject.toml, uv.lock (pyarrow>=26.0.1), src/rt_dataprep/plan_table.py, tests/synthetic_dicom.py, tests/test_plan_table.py (29 tests).
+- API: plan_table.SCHEMA, REASON_PLAN_TABLE, plan_rows(plan, ct) -> list|None, to_table(rows), write_plan_table(table, path). Task-02 imports these names.
+- Every tag read uses .get, so a missing tag is CaseRefused(REASON_PLAN_TABLE), not a pydicom AttributeError. No try/except, quiet_call or _pydicom_quiet (AST-checked test).
+- Treatment beam = TreatmentDeliveryType TREATMENT/absent/empty; OPEN_TREATMENT, CONTINUATION dropped like SETUP. Missing RadiationType = not photon → None.
+- Any device type starting with MLC counts; two MLC devices refuse. Extra refusals: jaw list != 2 values, IsocenterPosition != 3, beam with no control points.
+- write_photon_rtplan(path, struct_sop_uid, sop_uid, frame_uid, *, beams=[photon_beam(...)], fractions, ...): call by keyword (write_rtplan's 3rd positional is positions_mm). BeamMeterset in a beam dict is moved into the fraction group.
+- nan gantry triggers a pydicom DS warning; filtered in those tests.
+- Not checked: NumberOfControlPoints vs ControlPointSequence length.
+
+## review-1
+PASS (no BLOCKING). Fixed in aeffd85: empty WedgeSequence item returned the Dataset as wedge_id (ArrowTypeError outside _header_call).
+Deferred (file in 2.9): NumberOfControlPoints/ControlPointIndex not checked; duplicate BeamNumber/ReferencedBeamNumber last-wins;
+wedge_orientation typed string though VR DS (spec choice); CONTINUATION beams dropped (MU under-count, owner question);
+empty RadiationType silently drops the parquet. Task-02 fixtures must call write_photon_rtplan by keyword.
+
+## task-02
+- Commit 52b2aaf (squashed). convert.py: PLAN_NAME = 'plan.parquet'; _header_call(plan_rows) in try/except CaseRefused → log.warning REASON_PLAN_TABLE; to_table outside _header_call, before mkdir; parquet written last via _atomic; _series_rows has an explicit last branch for the plan row (series_description/UIDs/date from the plan header).
+- make_plan(plan_writer=sd.write_rtplan); only the default writer gets positions_mm. 8 new tests (1617 passed total).
+- write_photon_rtplan writes no FrameOfReferenceUID by default; tests pass frame_uid explicitly and cover the '' fallback.
+
+## review-2
+PASS (no BLOCKING). Notes: task-02 must not land without task-03 (preprocess KINDS refuses 'plan'); an ArrowInvalid from to_table stops the whole run (spec choice, hardening candidate);
+test_series_json_has_one_plan_row asserts series/study UIDs equal to themselves (trivial, fix in review round); no test that a ValueError from to_table propagates.
+
+## task-03
+- Commit 05a1e77 (squashed as 41becfb). preprocess: 'plan' in KINDS, output-name and copy tuples, docstring. 5 tests (AC1 parametrized over rescale/four-step/resample/reshape; AC2 manifest.jsonl byte-identical with and without plan.parquet). README section `### plan.parquet`; project-profile phi rule and .gitignore list plan.parquet. 1622 passed.
+- Not checked: a 'plan' row in a study folder's series.json (convert never writes one).
+
+## review-loop-pass-1
+/code-review (opus) + spec axis (opus): no BLOCKING code finding. Owner decision (plan bug, treatment data): a plan with a
+CONTINUATION/TRMT_PORTFILM/OPEN_PORTFILM beam gets no parquet → 8b0b034. Trivial fixes: AC9 on every fixture table (8b0b034);
+plan-row UID self-compare, no warning for non-photon plans, stale bank comment (6f7146c); README dropped-beam wording.
+Deferred: hardening #272-#278; follow-ups #279-#282.

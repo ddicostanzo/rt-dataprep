@@ -12,7 +12,7 @@ execution:
 compliance:
   - name: phi
     rules:
-      - "No PatientID, name, date of birth or path in log lines or exception messages. Under the output root, organize_report.csv / convert_report.csv / preprocess_report.csv (and their dated per-run copies, <name>_<UTC time>.csv) carry the sanitized id, and per-folder series.json files carry per-file metadata (sanitized id, dates, plan label, SeriesDescription, UIDs); none of these is ever committed. Likewise manifest.jsonl (and its dated copies, manifest_<UTC time>.jsonl) and splits.json carry the sanitized id; they are written under the data root and never committed."
+      - "No PatientID, name, date of birth or path in log lines or exception messages. Under the output root, organize_report.csv / convert_report.csv / preprocess_report.csv (and their dated per-run copies, <name>_<UTC time>.csv) carry the sanitized id, and per-folder series.json files and plan.parquet carry per-file metadata (sanitized id, dates, plan label, SeriesDescription, UIDs; plan.parquet holds the treatment machine, beam names and the isocenter); none of these is ever committed. Likewise manifest.jsonl (and its dated copies, manifest_<UTC time>.jsonl) and splits.json carry the sanitized id; they are written under the data root and never committed."
       - "Reports and logs are written under the output root only, never the working directory."
       - "Test data is synthetic, generated at test time; no .dcm or imaging files are committed."
   - name: data-safety
