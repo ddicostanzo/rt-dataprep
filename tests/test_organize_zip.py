@@ -238,7 +238,14 @@ def lzma_zip(path):
     make_zip(path, [(NAME + 'xz', DICOM)], method=zipfile.ZIP_LZMA)
 
 
-BAD = [encrypted, crc_flipped, truncated, method_9, bad_name, bzip2, lzma_zip]
+def negative_offset(path):
+    make_zip(path, [(NAME + 'neg', DICOM)])
+    data = bytearray(path.read_bytes())  # no archive comment, so the end record is the last 22 bytes, its central directory offset at 16
+    data[-6:-2] = (int.from_bytes(data[-6:-2], 'little') + 1000).to_bytes(4, 'little')  # zipfile then reads header_offset -1000 (#242)
+    path.write_bytes(bytes(data))
+
+
+BAD = [encrypted, crc_flipped, truncated, method_9, bad_name, bzip2, lzma_zip, negative_offset]
 
 
 @pytest.mark.parametrize('build', BAD)
