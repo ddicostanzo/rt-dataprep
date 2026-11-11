@@ -51,6 +51,7 @@ Writes `<root>/manifest.csv` with `dicom_io.write_report` (dated copy plus lates
 | `dose` | `1` if `series.csv` lists a dose file, else `0` |
 | `masks` | the mask rows' `roi_name`s, sorted, as a JSON list (`["bladder", "ptv"]`; a name may hold `;`, #74) |
 | `rtplan_uid`, `ct_series_uid`, `study_uid` | from the ct row of `series.csv` |
+| `retained` (plan lines, last key) | the lowest dose/mask `retained` of a preprocessed `series.json`, as a number; left out when no row has one (a converted tree, a non-geometric run); a cell that is not a finite number refuses the plan (#225) |
 
 Returns the number of cases written and refused.
 
