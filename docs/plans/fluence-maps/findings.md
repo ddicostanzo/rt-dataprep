@@ -29,3 +29,11 @@ Files: src/rt_dataprep/beam_volume.py, tests/test_beam_volume.py, docs/specs/202
 - Tests added: flat/reversed boundary cases in the ac8 refusal test; aperture None for the six cases; aperture shapes for a
   jaws-only and an MLC row. `vmat_arc(number, start, step)` is module-level (slow test uses it).
 - Full suite 1708 passed, 4 skipped; ruff clean.
+
+## task-03
+Files: src/rt_dataprep/preprocess.py, src/rt_dataprep/manifest.py, tests/test_preprocess.py, tests/test_manifest.py (+ this file).
+- preprocess: 'fluence' added to KINDS, the keep-the-name tuple and the copy tuple (so a geometric run copies it byte-identical too); not the same-grid tuple.
+- manifest: `_files` tuple is now ('plan', 'beam', 'fluence'); module and `_files` docstrings updated.
+- Tests: preprocess copy test (geometric + non-geometric) and a no-fluence-row test; manifest key test (absent, then present after plan and beam); test_manifest.read() ignores the new key.
+- Gotcha: a series.json row injected by a test must carry the same key set as the others (`dicom: {}` when converted rows have it), else read_series_json calls the file malformed and manifest refuses the plan. The file must exist or REASON_FILE_MISSING.
+- Gotcha: the fluence tests write placeholder bytes (preprocess never reads the file); `FLUENCE_NAME` is a literal in the tests until convert defines one (task-04).

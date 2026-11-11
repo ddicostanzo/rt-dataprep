@@ -7,7 +7,7 @@ and the crop/pad follow torchio 1.2.1 (floor size, centre-preserving origin, cei
 CT image is the one reference grid: dose and masks are each resampled once onto it. Direction is never re-derived.
 Every compute call in the three process_* entry points runs inside dicom_io.quiet_call; a failure is one fixed REASON_.
 
-preprocess() reads each plan's series.json (kinds ct, dose, mask, applicator, line, plan, beam, and the registered series, each resampled once onto the final CT) and each study folder's
+preprocess() reads each plan's series.json (kinds ct, dose, mask, applicator, line, plan, beam, fluence, and the registered series, each resampled once onto the final CT) and each study folder's
 (<patient>/study_<n>/, one case per series: a CT through every step that is on, an MR or PT through all but the HU rescale),
 and writes a separate tree plus preprocess_report.csv in the output root. Log lines and exceptions carry fixed REASON_ constants only; the report
 is the one place the patient folder names appear.
@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 
 REPORT_NAME = 'preprocess_report.csv'
 OUTCOME_PREPROCESSED = 'preprocessed'
-KINDS = ('ct', 'dose', 'mask', 'applicator', 'line', 'plan', 'beam')
+KINDS = ('ct', 'dose', 'mask', 'applicator', 'line', 'plan', 'beam', 'fluence')
 
 REASON_OUTSIDE_INPUT = 'output root is the converted root or inside it'
 REASON_NO_STEPS = 'no preprocessing step is on'
@@ -764,7 +764,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
     for row in kept:  # the CT first: its final grid is the reference of the rest
         kind, source = row['kind'], plan_dir / row['file']
         cell = ''  # series.json `retained`: only a dose or mask of a geometric run
-        name = row['file'] if kind in ('applicator', 'line', 'plan') else output_name(row['file'], steps, ct=kind == 'ct', image=kind == 'ct')
+        name = row['file'] if kind in ('applicator', 'line', 'plan', 'fluence') else output_name(row['file'], steps, ct=kind == 'ct', image=kind == 'ct')
         if kind == 'ct':
             final = process_ct(read_image(source), steps)
             conv.write_atomic(final, out_dir / name)
@@ -772,7 +772,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
             if not index_plan_table(source, out_dir / name, final):
                 log.warning('preprocess: %s', REASON_PLAN_INDEX)
                 continue
-        elif kind in ('applicator', 'line', 'plan') or not geometric:  # point text and (non-geometric) plan.parquet: copied unchanged
+        elif kind in ('applicator', 'line', 'plan', 'fluence') or not geometric:  # point text, fluence (a collimator-frame map, no CT grid) and (non-geometric) plan.parquet: copied unchanged
             shutil.copyfile(source, out_dir / name)
         else:  # one image at a time: read, resampled, written, released
             native = read_image(source)

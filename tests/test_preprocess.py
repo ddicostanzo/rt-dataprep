@@ -1654,6 +1654,34 @@ def test_a_beam_volume_is_copied_under_the_dose_name_rule_on_a_non_geometric_run
     assert (tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1' / name).read_bytes() == (folder / conv.BEAM_NAME).read_bytes()
 
 
+FLUENCE_NAME = 'fluence_mu.nii.gz'  # convert's name for it (a later task); preprocess only copies the file, so any bytes will do
+FLUENCE_BYTES = b'SYNTHETIC fluence bytes'
+
+
+def add_fluence(folder):
+    """A fluence_mu file and its series.json row beside the plan's other rows."""
+    (folder / FLUENCE_NAME).write_bytes(FLUENCE_BYTES)
+    save_rows(folder, [*sf.read(folder), series_row(FLUENCE_NAME, 'fluence', modality='RTPLAN')])
+
+
+@pytest.mark.parametrize('steps', [SMALL, PreprocessSteps(rescale=True)], ids=['geometric', 'non_geometric'])
+def test_a_fluence_file_is_copied_unchanged_under_its_own_name_and_keeps_its_row(tmp_path, steps):
+    folder, _ = write_plan(tmp_path / 'converted')
+    add_fluence(folder)
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
+    assert plan_row(report).outcome == 'preprocessed'
+    assert (done / FLUENCE_NAME).read_bytes() == FLUENCE_BYTES
+    assert [(r['file'], r['retained']) for r in sf.read(done) if r['kind'] == 'fluence'] == [(FLUENCE_NAME, '')]
+
+
+def test_a_tree_without_a_fluence_row_is_unaffected(tmp_path):
+    write_plan(tmp_path / 'converted')
+    pre.preprocess(tmp_path / 'converted', tmp_path / 'out', SMALL)
+    done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
+    assert not (done / FLUENCE_NAME).exists() and all(r['kind'] != 'fluence' for r in sf.read(done))
+
+
 def test_manifest_rows_are_unchanged_by_plan_parquet(tmp_path):
     import shutil
 
