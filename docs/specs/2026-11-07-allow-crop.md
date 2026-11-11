@@ -93,7 +93,7 @@ masks (body) extend past a 400 x 400 x 320 mm box.
 - Crop centred on the dose or on a named structure instead of the image centre.
 - Applicator and reference-line points that fall outside the final grid (copied unchanged today).
 - manifest.csv column with the lowest `retained` per plan.
-- A run summary log line counting plans with low `retained`.
+- ~~A run summary log line counting plans with low `retained`.~~ Done (#226): the closing log line gains `; N plans cropped, M with retained < 0.9` before the replaced/kept counts (`LOW_RETAINED`).
 
 ## Delivery
 Owner runs the 41-plan subset at 320 x 320 x 256 on the clinical machine and inspects `retained` and `cropped`.
