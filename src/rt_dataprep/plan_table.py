@@ -124,7 +124,7 @@ def _beam_rows(beam, meterset, ct):
     jaw_type = {axis: _device_type(devices, kinds) for axis, kinds in JAW_TYPES.items()}
 
     wedges = beam.get('WedgeSequence') or []
-    wedge = wedges[0] if wedges else None
+    wedge = (wedges[0] if wedges else None) or None  # an empty item is falsy: no wedge, never the Dataset itself
     wedge_number = None if wedge is None or _missing(wedge.get('WedgeNumber')) else int(wedge.get('WedgeNumber'))
     fluence = (beam.get('PrimaryFluenceModeSequence') or [None])[0]
 
