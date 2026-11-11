@@ -244,6 +244,15 @@ def _null_boundaries(beam):
     del beam['BeamLimitingDeviceSequence'][2]['LeafPositionBoundaries']
 
 
+def _flat_boundaries(beam):  # a duplicated boundary: the pair has zero width
+    boundaries = beam['BeamLimitingDeviceSequence'][2]['LeafPositionBoundaries']
+    boundaries[2] = boundaries[1]
+
+
+def _reversed_boundaries(beam):
+    beam['BeamLimitingDeviceSequence'][2]['LeafPositionBoundaries'].reverse()
+
+
 def _sad_missing(beam):
     del beam['SourceAxisDistance']
 
@@ -261,14 +270,42 @@ def _no_y_limit(beam):
     del beam['ControlPointSequence'][0]['BeamLimitingDevicePositionSequence'][1]
 
 
-@pytest.mark.parametrize('mutate', [_blocks, _mlc_not_mlcx, _null_boundaries, _sad_missing, _sad_zero, _sad_negative,
-                                    _no_y_limit])
+@pytest.mark.parametrize('mutate', [_blocks, _mlc_not_mlcx, _null_boundaries, _flat_boundaries, _reversed_boundaries,
+                                    _sad_missing, _sad_zero, _sad_negative, _no_y_limit])
 def test_ac8_not_modelled_beams_are_refused(tmp_path, mutate):
     beam = static(mlc=mutate is not _no_y_limit)  # with an MLC the Y axis would be bounded after all
     mutate(beam)
     with pytest.raises(CaseRefused) as raised:
         volume(tmp_path, beam)
     assert str(raised.value) == REASON_BEAM_VOLUME
+
+
+@pytest.mark.parametrize('mutate', [_blocks, _mlc_not_mlcx, _null_boundaries, _flat_boundaries, _reversed_boundaries,
+                                    _no_y_limit])
+def test_aperture_is_none_and_raises_nothing_for_a_not_modelled_row(tmp_path, mutate):
+    beam = static(mlc=mutate is not _no_y_limit)
+    mutate(beam)
+    plan = written(tmp_path, [beam])
+    rows = plan_table.plan_rows(plan, ct_image())
+    assert rows and all(beam_volume.aperture(row) is None for row in rows)
+
+
+def test_aperture_of_a_jaws_only_row(tmp_path):
+    plan = written(tmp_path, [static(jaws=(-30.0, 40.0, -50.0, 60.0))])
+    jaws, leaves = beam_volume.aperture(plan_table.plan_rows(plan, ct_image())[0])
+    assert jaws == {'x': (-30.0, 40.0), 'y': (-50.0, 60.0)} and leaves is None
+
+
+def test_aperture_of_an_mlc_row(tmp_path):
+    beam = static(mlc=True, pairs=2)
+    set_mlc(beam, [-10.0, 0.0, 10.0], {0: ([-5.0, 7.0], [5.0, 3.0])})  # pair 1 has X1 >= X2: closed
+    plan = written(tmp_path, [beam])
+    jaws, leaves = beam_volume.aperture(plan_table.plan_rows(plan, ct_image())[0])
+    assert set(jaws) == {'x', 'y'}
+    boundaries, x1, x2, opening = leaves
+    assert all(isinstance(a, np.ndarray) for a in leaves)
+    assert boundaries.tolist() == [-10.0, 0.0, 10.0] and x1.tolist() == [-5.0, 7.0] and x2.tolist() == [5.0, 3.0]
+    assert opening.tolist() == [True, False]
 
 
 @pytest.mark.parametrize('keyword', beam_volume.TABLE_TOP_ANGLES)
@@ -317,32 +354,33 @@ def test_beam_volume_catches_and_quiets_nothing():
     assert raises == ['CaseRefused(REASON_BEAM_VOLUME)']
 
 
+def vmat_arc(number, start, step):
+    beam = sd.photon_beam(number, kind='vmat', pairs=40)
+    beam['SourceAxisDistance'] = 1000.0
+    boundaries = [-100.0 + 5.0 * k for k in range(41)]
+
+    def leaves(i):
+        width = 30.0 + 20.0 * np.sin(i / 10.0)
+        return [-width] * 40, [width] * 40
+
+    points = copy.deepcopy(beam['ControlPointSequence'][:1])
+    points[0].update(GantryAngle=start, BeamLimitingDeviceAngle=0.0, PatientSupportAngle=0.0,
+                     IsocenterPosition=[0.0, 0.0, 0.0])
+    points[0]['BeamLimitingDevicePositionSequence'][0]['LeafJawPositions'] = [-100.0, 100.0]
+    points[0]['BeamLimitingDevicePositionSequence'][1]['LeafJawPositions'] = [-100.0, 100.0]
+    for i in range(1, 178):
+        points.append(dict(ControlPointIndex=i, CumulativeMetersetWeight=i / 177, GantryAngle=(start + step * i) % 360.0,
+                           BeamLimitingDevicePositionSequence=[dict(RTBeamLimitingDeviceType='MLCX')]))
+    beam.update(ControlPointSequence=points, NumberOfControlPoints=178, FinalCumulativeMetersetWeight=1.0)
+    set_mlc(beam, boundaries, {i: leaves(i) for i in range(178)})
+    return beam
+
+
 @pytest.mark.slow
 def test_ac14_full_size_vmat_case(tmp_path):
     """512 x 512 x 150 CT, two 178-point arcs; run with -m slow -s to see the wall time and peak RSS."""
-    def arc(number, start, step):
-        beam = sd.photon_beam(number, kind='vmat', pairs=40)
-        beam['SourceAxisDistance'] = 1000.0
-        boundaries = [-100.0 + 5.0 * k for k in range(41)]
-
-        def leaves(i):
-            width = 30.0 + 20.0 * np.sin(i / 10.0)
-            return [-width] * 40, [width] * 40
-
-        points = copy.deepcopy(beam['ControlPointSequence'][:1])
-        points[0].update(GantryAngle=start, BeamLimitingDeviceAngle=0.0, PatientSupportAngle=0.0,
-                         IsocenterPosition=[0.0, 0.0, 0.0])
-        points[0]['BeamLimitingDevicePositionSequence'][0]['LeafJawPositions'] = [-100.0, 100.0]
-        points[0]['BeamLimitingDevicePositionSequence'][1]['LeafJawPositions'] = [-100.0, 100.0]
-        for i in range(1, 178):
-            points.append(dict(ControlPointIndex=i, CumulativeMetersetWeight=i / 177, GantryAngle=(start + step * i) % 360.0,
-                               BeamLimitingDevicePositionSequence=[dict(RTBeamLimitingDeviceType='MLCX')]))
-        beam.update(ControlPointSequence=points, NumberOfControlPoints=178, FinalCumulativeMetersetWeight=1.0)
-        set_mlc(beam, boundaries, {i: leaves(i) for i in range(178)})
-        return beam
-
     ct = ct_image(size=(512, 512, 150), spacing=(1.0, 1.0, 2.0))
-    plan = written(tmp_path, [arc(1, 181.0, 2.0), arc(2, 179.0, -2.0)])
+    plan = written(tmp_path, [vmat_arc(1, 181.0, 2.0), vmat_arc(2, 179.0, -2.0)])
     rows = plan_table.plan_rows(plan, ct)
     assert len(rows) == 2 * 178
     start = time.perf_counter()
