@@ -150,6 +150,7 @@ converted/
       dose.nii.gz
       liver.nii.gz
       series_MR_1.nii.gz
+      plan.parquet
       series.json
     study_1/
       series_CT_1.nii.gz
@@ -193,6 +194,24 @@ use `study_<n>/` and ignore the old `images/` layout.
 Trees converted by v0.1.x hold a `series.csv` and no `series.json`. `preprocess` and `manifest` refuse those folders (the
 CSV is never read) with the reason `converted by an older version (series.csv); reconvert with --overwrite`, and count
 them as refused. Reconvert them with `convert --overwrite`.
+
+### plan.parquet
+
+A photon external-beam RTPLAN also writes `plan.parquet` in its plan folder (after the masks, before `series.json`), with a
+`series.json` row of `kind` `plan`; `preprocess` copies it byte-identical under the same name on every run, and `manifest`
+ignores it. Brachy and RT Ion plans, a plan mixing photon with other beams, and a photon plan with a missing or inconsistent
+value get no `plan.parquet` (the plan still converts; a malformed photon plan logs a warning). The file has one row per control point of each
+treatment beam (SETUP beams are dropped), values DICOM omits are filled forward from the earlier control point, and the
+beam-level fields repeat on every row. The columns and types are `rt_dataprep.plan_table.SCHEMA`; read them with
+`pyarrow.parquet.read_table`.
+
+- `beam_meterset` is the beam's MU per fraction, while `dose.nii.gz` may be the plan total over all fractions.
+- `mlc_positions` is the leaf positions in mm, bank A then bank B.
+- `mu` is the meterset between control point i-1 and control point i, attributed to row i; `mu_cumulative` is the running sum.
+- A null means the beam declares no such device (no MLC, no jaw pair, no wedge) or the optional tag is absent.
+- `isocenter_x/y/z` are patient coordinates in mm; `isocenter_i/j/k` are the same point as a continuous voxel index of
+  `planning_ct.nii.gz`, not of a preprocessed grid. A resampled or reshaped CT does not change them.
+- Converted trees made before this version gain `plan.parquet` only on a run with `--overwrite`.
 
 ## Conversion behavior
 
@@ -610,7 +629,7 @@ def load(case_dir):
 train = [load(case) for cases in splits['train'].values() for case in cases]
 ```
 
-In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, or `line`.
+In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, or `plan`.
 Applicator and line files are gzip-compressed coordinate text, not NIfTI; see [Conversion behavior](#conversion-behavior).
 After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (summed dose) and mask (volume)
 kept on the final grid. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should

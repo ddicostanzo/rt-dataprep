@@ -1523,6 +1523,54 @@ def test_manifest_lists_the_same_cases_on_the_converted_and_the_preprocessed_tre
     assert [r['image'] for r in after[2:]] == [pre.output_name(f'series_MR_{k}.nii.gz', steps) for k in (1, 2)]
 
 
+# ---- rtplan-parquet task-03: plan.parquet is carried through unchanged ----
+
+def photon_converted(tmp_path):
+    """A converted tree whose one plan folder is a photon plan (plan.parquet + its series.json row); returns (converted root, plan folder)."""
+    import synthetic_dicom as sd
+    from test_convert import BOX, PID, dose_spec, make_plan
+    org, converted = tmp_path / 'org', tmp_path / 'converted'
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10)], rois=[BOX], plan_writer=sd.write_photon_rtplan)
+    conv.convert(org, converted)
+    folder = converted / PID / 'plan_1'
+    assert (folder / conv.PLAN_NAME).is_file()
+    return converted, folder
+
+
+@pytest.mark.parametrize('steps', [PreprocessSteps(rescale=True), SMALL, PreprocessSteps(resample=True), PreprocessSteps(reshape=True, new_shape=(8, 8, 8))],
+                         ids=['non_geometric', 'four_steps', 'resample', 'reshape'])
+def test_plan_parquet_is_copied_byte_identical_and_listed(tmp_path, steps):
+    converted, folder = photon_converted(tmp_path)
+    out = tmp_path / 'out'
+    report = pre.preprocess(converted, out, steps)
+    assert [(r.folder, r.outcome, r.reason) for r in report.rows] == [('plan_1', 'preprocessed', '')]
+    done = out / folder.parent.name / 'plan_1'
+    assert (done / conv.PLAN_NAME).read_bytes() == (folder / conv.PLAN_NAME).read_bytes()
+    assert conv.PLAN_NAME in plan_row(report).files
+    assert [(r['file'], r['kind'], r['retained']) for r in sf.read(done) if r['kind'] == 'plan'] == [(conv.PLAN_NAME, 'plan', '')]
+
+
+def test_manifest_rows_are_unchanged_by_plan_parquet(tmp_path):
+    import shutil
+
+    from rt_dataprep import manifest as man
+    converted, folder = photon_converted(tmp_path)
+    bare = tmp_path / 'bare'
+    shutil.copytree(converted, bare)
+    bare_folder = bare / folder.parent.name / 'plan_1'
+    (bare_folder / conv.PLAN_NAME).unlink()
+    sf.write([r for r in sf.read(bare_folder) if r['kind'] != 'plan'], bare_folder / conv.SERIES_NAME)
+    steps = dataclasses.replace(SMALL, new_shape=(8, 8, 8))
+    outs = {}
+    for name, root in (('with', converted), ('without', bare)):
+        outs[name] = tmp_path / f'out_{name}'
+        assert plan_row(pre.preprocess(root, outs[name], steps)).outcome == 'preprocessed'
+    assert (outs['with'] / folder.parent.name / 'plan_1' / conv.PLAN_NAME).is_file()
+    assert not (outs['without'] / folder.parent.name / 'plan_1' / conv.PLAN_NAME).exists()
+    assert man.manifest(outs['with']) == man.manifest(outs['without']) == (1, 0)
+    assert (outs['with'] / 'manifest.jsonl').read_bytes() == (outs['without'] / 'manifest.jsonl').read_bytes()
+
+
 # ---- task-03: registered series aligned onto the final CT grid (reg-resampling D1-D9, D13). SYNTHETIC volumes with one bright landmark voxel. ----
 
 CT_FRAME, MR_FRAME = 'SYNTHETICFORCT', 'SYNTHETICFORMR'

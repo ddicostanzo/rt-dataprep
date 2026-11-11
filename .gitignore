@@ -24,3 +24,4 @@ convert_report*.csv
 preprocess_report*.csv
 series.csv
 series.json
+plan.parquet
