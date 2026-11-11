@@ -38,7 +38,7 @@ a channel computed once, deterministically, from the plan.
 - **No plan rows → no beam volume, no new log line.** `plan_rows` returning None (brachy, ion, CONTINUATION/port-film,
   non-photon) or refusing (already logged as REASON_PLAN_TABLE) means the beam step is not run.
 - **Not modelled → no beam volume, one WARNING, plan still converts (with plan.parquet):** any beam with
-  blocks (`number_of_blocks > 0`); an MLC whose type is not `MLCX`; an MLCX with null or non-strictly-increasing `leaf_position_boundaries`; a
+  blocks (`number_of_blocks > 0`); an MLC whose type is not `MLCX`; an MLCX with null, fewer than two or non-strictly-increasing `leaf_position_boundaries`; a
   missing or non-positive `SourceAxisDistance` on any treatment beam; unsupported PatientPosition; a control point
   whose aperture is unbounded on an axis (no jaw pair and no MLC bounding it); a non-zero `TableTopPitchAngle`, `TableTopRollAngle` or
   `TableTopEccentricAngle` on any treatment control point (#287). Wedges are ignored (they modulate

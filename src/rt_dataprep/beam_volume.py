@@ -70,7 +70,7 @@ def aperture(row):
     """
     `(jaws, leaves)` of one plan_rows row, or None when the aperture is not modelled; never raises. `jaws` maps 'x'/'y' to a
     (low, high) pair or None; `leaves` is None without an MLC, else (boundaries, x1, x2, opening) as numpy arrays.
-    Not modelled: blocks, a non-MLCX MLC, null or non-strictly-increasing leaf boundaries, an axis bounded by neither.
+    Not modelled: blocks, a non-MLCX MLC, null, fewer than two or non-strictly-increasing leaf boundaries, an axis bounded by neither.
     """
     mlc = row['mlc_type']
     jaws = {axis: None if row[f'jaw_{axis}1'] is None or row[f'jaw_{axis}2'] is None
