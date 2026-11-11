@@ -12,6 +12,7 @@ dependencies = [
     "simpleitk>=2.5.7",
     "dicomrttool==6.2.0",
     "scikit-image>=0.26.0",
+    "pyarrow>=26.0.1",
 ]
 
 [dependency-groups]

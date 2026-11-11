@@ -1,5 +1,5 @@
 """
-Synthetic DICOM for the rt_dataprep tests: CT slices, RTSTRUCT, brachy RTPLAN, multi-frame RTDOSE, REG. No patient data.
+Synthetic DICOM for the rt_dataprep tests: CT slices, RTSTRUCT, brachy and photon/ion RTPLAN, multi-frame RTDOSE, REG. No patient data.
 Ported from rnt_transformer tests/synthetic_dicom.py.
 
 Every UID comes from generate_uid() at run time, PatientID and PatientName start with SYNTHETIC_, and a date or time tag
@@ -259,6 +259,104 @@ def _channel(number, dwells_mm, times=None, applicator_id=None, roi=None, step_s
     if step_size is not None:
         channel.SourceApplicatorStepSize = float(step_size)
     return channel
+
+
+def photon_beam(number=1, kind='vmat', meterset=200.0, pairs=4, mlc=True, wedge=False, tags=None):
+    """
+    A BeamSequence item as a tag dict (see `_apply_tags`; None as a value deletes a tag) for `write_photon_rtplan`.
+    The extra key BeamMeterset is not a beam tag: the builder moves it into the fraction group (None writes no reference).
+    kind: 'vmat' (7 control points; CP 1+ carry only gantry, weight and the MLC), 'sas' (step and shoot: weights
+    0, .5, .5, 1), '3d' (2 control points, weight only on CP 1), 'setup' (a SETUP beam: no meterset, no MLC).
+    Jaws are ASYMX and ASYMY (CP 0 only); mlc adds an MLCX with `pairs` leaf pairs (positions all bank A, then bank B);
+    wedge adds one wedge and its position on CP 0. Edit the returned dict (and its ControlPointSequence) for other cases.
+    """
+    weights = dict(vmat=[i / 6 for i in range(7)], sas=[0.0, 0.5, 0.5, 1.0], **{'3d': [0.0, 1.0]}, setup=[0.0, 1.0])[kind]
+    setup = kind == 'setup'
+    devices = [dict(RTBeamLimitingDeviceType='ASYMX', NumberOfLeafJawPairs=1),
+               dict(RTBeamLimitingDeviceType='ASYMY', NumberOfLeafJawPairs=1)]
+    if mlc and not setup:
+        devices.append(dict(RTBeamLimitingDeviceType='MLCX', NumberOfLeafJawPairs=pairs,
+                            LeafPositionBoundaries=[-10.0 + 20.0 * k / pairs for k in range(pairs + 1)]))
+
+    def leaves(shift):
+        return [-5.0 + shift] * pairs + [5.0 + shift] * pairs
+
+    def moved(i):  # the MLC item of a later control point
+        return [dict(RTBeamLimitingDeviceType='MLCX', LeafJawPositions=leaves(float(i)))]
+
+    first = dict(
+        ControlPointIndex=0, NominalBeamEnergy=6.0, DoseRateSet=600.0, GantryAngle=181.0 if kind == 'vmat' else 0.0,
+        GantryRotationDirection='CW' if kind == 'vmat' else 'NONE', BeamLimitingDeviceAngle=10.0, PatientSupportAngle=5.0,
+        SourceToSurfaceDistance=950.0, IsocenterPosition=[10.0, 20.0, 30.0], CumulativeMetersetWeight=weights[0],
+        BeamLimitingDevicePositionSequence=[
+            dict(RTBeamLimitingDeviceType='ASYMX', LeafJawPositions=[-40.0, 50.0]),
+            dict(RTBeamLimitingDeviceType='ASYMY', LeafJawPositions=[-30.0, 35.0])] + (moved(0) if mlc and not setup else []))
+    if wedge:
+        first['WedgePositionSequence'] = [dict(ReferencedWedgeNumber=1, WedgePosition='IN')]
+    points = [first]
+    for i in range(1, len(weights)):
+        point = dict(ControlPointIndex=i, CumulativeMetersetWeight=weights[i])
+        if kind == 'vmat':
+            point['GantryAngle'] = (181.0 + 60.0 * i) % 360.0
+        if mlc and not setup and (kind == 'vmat' or (kind == 'sas' and i == 2)):
+            point['BeamLimitingDevicePositionSequence'] = moved(i)
+        points.append(point)
+    beam = dict(
+        BeamNumber=number, BeamName=f'SYNTHETIC_B{number}', BeamType='DYNAMIC' if kind == 'vmat' else 'STATIC',
+        RadiationType='PHOTON', TreatmentDeliveryType='SETUP' if setup else 'TREATMENT',
+        TreatmentMachineName='SYNTHETIC_LINAC', BeamLimitingDeviceSequence=devices,
+        NumberOfWedges=int(wedge), NumberOfBlocks=0, NumberOfBoli=0, FinalCumulativeMetersetWeight=weights[-1],
+        NumberOfControlPoints=len(weights), ControlPointSequence=points,
+        BeamMeterset=None if setup else meterset)
+    if kind == 'vmat':
+        beam['PrimaryFluenceModeSequence'] = [dict(FluenceMode='NON_STANDARD', FluenceModeID='FFF')]
+    if wedge:
+        beam['WedgeSequence'] = [dict(WedgeNumber=1, WedgeID='SYNTHETIC_W1', WedgeType='STANDARD', WedgeAngle=30.0,
+                                      WedgeOrientation=90.0)]
+    beam.update(tags or {})
+    return beam
+
+
+def write_photon_rtplan(path, struct_sop_uid, beams=None, fractions=1, sop_uid=None, frame_uid=None, plan_date=None,
+                        plan_time=None, label=None, **meta):
+    """
+    A photon EBRT RTPLAN: ReferencedStructureSetSequence -> `struct_sop_uid`, one fraction group of `fractions` that
+    references each beam of `beams` (a list of `photon_beam` dicts; default one VMAT beam) with its BeamMeterset.
+    Same leading arguments as `write_rtplan`, so a convert fixture can swap it in by keyword. Returns its SOPInstanceUID.
+    """
+    ds = _dataset(path, pydicom.uid.RTPlanStorage, 'RTPLAN', sop_uid=sop_uid, frame_uid=frame_uid, **meta)
+    if plan_date:
+        ds.RTPlanDate = plan_date
+    if plan_time:
+        ds.RTPlanTime = plan_time
+    if label:
+        ds.RTPlanLabel = label
+    reference = Dataset()
+    reference.ReferencedSOPClassUID = pydicom.uid.RTStructureSetStorage
+    reference.ReferencedSOPInstanceUID = struct_sop_uid
+    ds.ReferencedStructureSetSequence = [reference]
+    beams = [dict(b) for b in (beams or [photon_beam()])]
+    group = dict(FractionGroupNumber=1, NumberOfFractionsPlanned=fractions, ReferencedBeamSequence=[
+        dict(ReferencedBeamNumber=b['BeamNumber'], BeamMeterset=b['BeamMeterset'])
+        for b in beams if b.get('BeamMeterset') is not None])
+    for b in beams:
+        b.pop('BeamMeterset', None)
+    _apply_tags(ds, dict(FractionGroupSequence=[group], BeamSequence=beams))
+    _save(ds)
+    return ds.SOPInstanceUID
+
+
+def write_ion_rtplan(path, struct_sop_uid, sop_uid=None, frame_uid=None, **meta):
+    """An RT Ion plan: one IonBeamSequence item (proton, no BeamSequence). Returns its SOPInstanceUID."""
+    ds = _dataset(path, pydicom.uid.RTIonPlanStorage, 'RTPLAN', sop_uid=sop_uid, frame_uid=frame_uid, **meta)
+    reference = Dataset()
+    reference.ReferencedSOPClassUID = pydicom.uid.RTStructureSetStorage
+    reference.ReferencedSOPInstanceUID = struct_sop_uid
+    ds.ReferencedStructureSetSequence = [reference]
+    _apply_tags(ds, dict(FractionGroupSequence=[dict(FractionGroupNumber=1, NumberOfFractionsPlanned=1)],
+                         IonBeamSequence=[dict(BeamNumber=1, RadiationType='PROTON', TreatmentDeliveryType='TREATMENT')]))
+    _save(ds)
+    return ds.SOPInstanceUID
 
 
 def write_rtstruct_contours(path, contours, sop_uid=None, brachy=True, **meta):
