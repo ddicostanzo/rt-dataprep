@@ -188,7 +188,9 @@ def plan_rows(plan, ct):
     beams = plan.get('BeamSequence')  # a brachy plan has none, an RT Ion plan has IonBeamSequence instead
     if not beams:
         return None
-    treatment = [b for b in beams if b.get('TreatmentDeliveryType') in (None, '', 'TREATMENT')]  # SETUP beams drop first
+    if any(b.get('TreatmentDeliveryType') not in (None, '', 'TREATMENT', 'SETUP') for b in beams):
+        return None  # a CONTINUATION or port-film beam delivers dose the table would leave out (owner, 2026-11-11)
+    treatment = [b for b in beams if b.get('TreatmentDeliveryType') != 'SETUP']  # SETUP beams drop first
     if not treatment or any(b.get('RadiationType') != 'PHOTON' for b in treatment):
         return None
     metersets = _metersets(plan)

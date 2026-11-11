@@ -29,7 +29,10 @@ def ct_image():
 def rows_of(tmp_path, beams=None, ct=None, writer=sd.write_photon_rtplan, **kwargs):
     path = tmp_path / 'plan.dcm'
     writer(path, sd.generate_uid(), **({'beams': beams} if beams is not None else {}), **kwargs)
-    return plan_table.plan_rows(read_header(path), ct or ct_image())
+    rows = plan_table.plan_rows(read_header(path), ct or ct_image())
+    if rows is not None:  # AC9: every fixture table has no null in a required column
+        required_complete(plan_table.to_table(rows))
+    return rows
 
 
 def refused(tmp_path, beams):
@@ -157,6 +160,8 @@ def test_plans_without_a_table_return_none_silently(tmp_path, caplog):
         dict(writer=sd.write_ion_rtplan),
         dict(beams=[sd.photon_beam(1, kind='3d'), electron]),
         dict(beams=[sd.photon_beam(1, kind='setup')]),
+        *(dict(beams=[sd.photon_beam(1, kind='3d'), sd.photon_beam(2, kind='3d', tags=dict(TreatmentDeliveryType=kind))])
+          for kind in ('CONTINUATION', 'TRMT_PORTFILM', 'OPEN_PORTFILM')),
     ]
     caplog.set_level(0)
     for spec in plans:

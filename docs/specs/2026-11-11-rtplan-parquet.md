@@ -25,7 +25,9 @@ how the dose was delivered. Dose-prediction, plan-parameter and fluence models n
    Plan Storage SOP class but have no `BeamSequence`; RT Ion plans have `IonBeamSequence` instead. Either → no parquet,
    no log line (not malformed).
 2. Treatment beams = beams whose `TreatmentDeliveryType` is TREATMENT or absent. SETUP beams are dropped **before** any
-   other check (they often have no or zero `BeamMeterset`).
+   other check (they often have no or zero `BeamMeterset`). A plan with any beam of another delivery type
+   (CONTINUATION, TRMT_PORTFILM, OPEN_PORTFILM: they deliver dose that is in `dose.nii.gz`) → no parquet, no log line
+   (owner, 2026-11-11, review round).
 3. Every treatment beam has `RadiationType` PHOTON, else no parquet, no log line. No treatment beam → no parquet.
 
 ## Columns (one row per control point)

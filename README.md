@@ -201,8 +201,8 @@ A photon external-beam RTPLAN also writes `plan.parquet` in its plan folder (aft
 `series.json` row of `kind` `plan`; `preprocess` copies it byte-identical under the same name on every run, and `manifest`
 ignores it. Brachy and RT Ion plans, a plan mixing photon with other beams, and a photon plan with a missing or inconsistent
 value get no `plan.parquet` (the plan still converts; a malformed photon plan logs a warning). The file has one row per control point of each
-treatment beam (only beams whose `TreatmentDeliveryType` is TREATMENT or absent are kept; SETUP and CONTINUATION beams are
-dropped), values DICOM omits are filled forward from the earlier control point, and the
+treatment beam (SETUP beams are dropped; a plan with a CONTINUATION, TRMT_PORTFILM or OPEN_PORTFILM beam gets no
+`plan.parquet`, since that beam's dose is in `dose.nii.gz`), values DICOM omits are filled forward from the earlier control point, and the
 beam-level fields repeat on every row. The columns and types are `rt_dataprep.plan_table.SCHEMA`; read them with
 `pyarrow.parquet.read_table`.
 
