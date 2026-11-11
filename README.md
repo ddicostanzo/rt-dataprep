@@ -253,7 +253,8 @@ By default a plan whose dose or mask extends past the final CT grid is refused. 
 `series.json`, the `retained` key of each dose and mask object is the fraction of that file's native-grid content (summed dose,
 mask volume) kept by the crop: exactly `1.0` when nothing is cut, and blank for CT, applicator, line and series entries and on runs
 without a geometric step. In `preprocess_report.csv`, the `cropped` column counts the dose and mask files the final grid cut; a
-negligible tail counts. A dose or mask that the final grid empties entirely refuses the plan, with or without `--allow-crop`.
+negligible tail counts. The run's closing log line counts the cropped plans and how many of them have a
+lowest `retained` below 0.9. A dose or mask that the final grid empties entirely refuses the plan, with or without `--allow-crop`.
 
 CT study series receive all enabled steps. MR/PT study series receive geometric steps and optional AHE, and skip HU rescaling. `--rescale`
 alone (or the same Python configuration) refuses MR/PT because it has no applicable step. With no geometric step (`--rescale` and/or

@@ -48,6 +48,7 @@ PREPROCESSED_SERIES_COLUMNS = [*conv.SERIES_COLUMNS, 'retained']  # preprocess's
 REASON_NO_CT = 'series.json does not list exactly one ct file'
 REASON_DOSE_COUNT = 'series.json lists more than one dose file'
 REASON_KIND = 'series.json has a row of an unknown kind'
+LOW_RETAINED = 0.9  # the run log counts preprocessed plans whose lowest dose/mask `retained` is below this (#226)
 REASON_SERIES_CSV = 'series.json is malformed: not valid JSON, not an array of objects of strings with the expected keys, or one file named twice'
 LEGACY_SERIES_NAME = 'series.csv'  # what convert v0.1.x wrote; never read
 REASON_LEGACY_SERIES = 'converted by an older version (series.csv); reconvert with --overwrite'
@@ -372,6 +373,7 @@ class PreprocessRow:
     files: list = field(default_factory=list)
     skipped_series: int = 0  # registered series left out of a plan (unusable matrix, no overlap, unreadable file)
     cropped: int | str = ''  # preprocessed plan row of a geometric run: its dose and mask files that extend past the final grid; blank otherwise
+    retained: float | None = None  # its lowest dose/mask `retained` (run log only, #226); None when no file has one
 
 
 @dataclass
@@ -440,11 +442,12 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
     imaging_rows = [r for r in rows if r.folder.startswith('study_')]
     plan_rows = [r for r in rows if r.folder and not r.folder.startswith('study_')]
     patient_rows = [r for r in rows if r.folder == '']
-    log.info('preprocess: %d plan rows (%d preprocessed, %d refused), %d imaging rows (%d preprocessed, %d refused), %d patient rows (%d refused, %d skipped); %d registered series skipped; %d replaced, %d kept',
+    log.info('preprocess: %d plan rows (%d preprocessed, %d refused), %d imaging rows (%d preprocessed, %d refused), %d patient rows (%d refused, %d skipped); %d registered series skipped; %d plans cropped, %d with retained < %g; %d replaced, %d kept',
              len(plan_rows), *(sum(r.outcome == o for r in plan_rows) for o in (OUTCOME_PREPROCESSED, conv.OUTCOME_REFUSED)),
              len(imaging_rows), *(sum(r.outcome == o for r in imaging_rows) for o in (OUTCOME_PREPROCESSED, conv.OUTCOME_REFUSED)),
              len(patient_rows), *(sum(r.outcome == o for r in patient_rows) for o in (conv.OUTCOME_REFUSED, conv.OUTCOME_SKIPPED)),
-             sum(r.skipped_series for r in rows), replaced, kept)
+             sum(r.skipped_series for r in rows), sum(bool(r.cropped) for r in rows),
+             sum(r.retained is not None and r.retained < LOW_RETAINED for r in rows), LOW_RETAINED, replaced, kept)
     if aborted:  # raised here, after the except blocks: nothing of the original is chained
         raise PreprocessAborted(REASON_INTERNAL)
     return PreprocessReport(rows)
@@ -499,7 +502,7 @@ def preprocess_one(plan_dir, out_dir, steps):
     """The PreprocessRow of one plan. A refusal leaves no `out_dir`; an OSError or REASON_INTERNAL is the patient's and propagates."""
     reason = None
     try:
-        files, skipped, cropped = preprocess_plan(plan_dir, out_dir, steps)
+        files, skipped, cropped, retained = preprocess_plan(plan_dir, out_dir, steps)
     except CaseRefused as exc:
         if str(exc) == REASON_INTERNAL:
             raise
@@ -509,7 +512,8 @@ def preprocess_one(plan_dir, out_dir, steps):
             shutil.rmtree(out_dir)
         log.warning('preprocess: plan refused: %s', reason)
         return PreprocessRow(plan_dir.parent.name, plan_dir.name, conv.OUTCOME_REFUSED, reason)
-    return PreprocessRow(plan_dir.parent.name, plan_dir.name, OUTCOME_PREPROCESSED, files=files, skipped_series=skipped, cropped=cropped)
+    return PreprocessRow(plan_dir.parent.name, plan_dir.name, OUTCOME_PREPROCESSED, files=files, skipped_series=skipped, cropped=cropped,
+                         retained=retained)
 
 
 def preprocess_study(study_dir, out_dir, steps):
@@ -730,7 +734,7 @@ def native_retained(native, final):
 
 
 def preprocess_plan(plan_dir, out_dir, steps):
-    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run). CaseRefused on a refusal."""
+    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run; the lowest dose/mask `retained`, None when none is set). CaseRefused on a refusal."""
     kept, ct, series = check_rows(plan_dir)
     if too_small(ct, steps):
         raise CaseRefused(REASON_TOO_SMALL)
@@ -795,4 +799,5 @@ def preprocess_plan(plan_dir, out_dir, steps):
             del image
         del native, fov
     conv.write_series_json(series_rows, out_dir / conv.SERIES_NAME)
-    return [*files, conv.SERIES_NAME], skipped, cropped if geometric else ''
+    retained = [float(row['retained']) for row in series_rows if row['retained']]
+    return [*files, conv.SERIES_NAME], skipped, cropped if geometric else '', min(retained, default=None)

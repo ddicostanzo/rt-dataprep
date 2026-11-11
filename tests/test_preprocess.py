@@ -1480,7 +1480,7 @@ def test_the_run_log_counts_plan_rows_and_imaging_rows_separately(tmp_path, capl
         pre.preprocess(converted, out, SMALL)
     messages = [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.preprocess' and r.getMessage().startswith('preprocess: ')]
     summary = [m for m in messages if 'plan rows' in m]
-    assert summary == ['preprocess: 1 plan rows (1 preprocessed, 0 refused), 4 imaging rows (2 preprocessed, 2 refused), 1 patient rows (0 refused, 1 skipped); 0 registered series skipped; 0 replaced, 0 kept']
+    assert summary == ['preprocess: 1 plan rows (1 preprocessed, 0 refused), 4 imaging rows (2 preprocessed, 2 refused), 1 patient rows (0 refused, 1 skipped); 0 registered series skipped; 0 plans cropped, 0 with retained < 0.9; 0 replaced, 0 kept']
 
 
 def test_study_refusals_log_only_reasons(tmp_path, caplog):
@@ -2567,6 +2567,15 @@ def test_retained_is_the_native_in_grid_fraction_of_the_summed_dose_and_of_the_m
                      pre.output_name('ptv.nii.gz', CUT): '0.5', pre.output_name('bladder.nii.gz', CUT): '1.0', 'applicator_a.txt': ''}
     assert all('np.' not in cell and (not cell or float(cell) == float(cell)) for cell in cells.values())
     assert plan_row(report).cropped == 2  # the dose and the ptv
+
+
+@pytest.mark.parametrize(('masks', 'tail'), [({'ptv': HALF_OUT}, '1 plans cropped, 1 with retained < 0.9'),  # retained 0.5
+                                            ({'bladder': box((5, 5, 5), (8, 8, 8))}, '0 plans cropped, 0 with retained < 0.9')])  # 1.0
+def test_the_run_log_counts_cropped_plans_and_those_with_a_low_retained(tmp_path, caplog, masks, tail):
+    write_plan(tmp_path / 'converted', dose=None, masks=masks)
+    with caplog.at_level('INFO'):
+        pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    assert f'; {tail}; ' in caplog.records[-1].getMessage()
 
 
 def test_a_cut_plan_without_allow_crop_still_refuses_and_records_no_cropped_count(tmp_path):
