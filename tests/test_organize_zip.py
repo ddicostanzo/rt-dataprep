@@ -119,7 +119,6 @@ def test_every_allowed_method_extracts(folder, stage, method):
     assert [p.read_bytes() for p in staged] == [DICOM]
 
 
-
 def test_extraction_reads_the_scanned_member_sizes_not_a_zip_rewritten_after_the_scan(folder, stage, monkeypatch):
     make_zip(folder / 'a.zip', [('x', DICOM)], method=zipfile.ZIP_STORED)
     real = org._zip_scan
@@ -132,6 +131,7 @@ def test_extraction_reads_the_scanned_member_sizes_not_a_zip_rewritten_after_the
     monkeypatch.setattr(org, '_zip_scan', scan_then_grow)
     staged, *_ = run(folder, stage)
     assert [p.read_bytes() for p in staged] == [DICOM]
+
 
 def test_a_zip_inside_a_zip_is_staged_as_a_plain_file_and_never_opened(folder, stage, monkeypatch):
     inner = io.BytesIO()

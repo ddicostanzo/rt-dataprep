@@ -126,8 +126,8 @@ export/
 The patient directory name is a sanitized PatientID, not an anonymous identifier. A source folder containing multiple
 nonblank PatientIDs is refused. Files are copied, never moved, renamed, or deleted in the source tree.
 
-Zip archives in a source folder are read too, recognized by content rather than extension. Stored, deflate, bzip2 and lzma
-members are supported; encrypted members, a zip inside a zip, and tar/7z/gzip archives are not. Before anything is
+Zip archives in a source folder are read too, recognized by content rather than extension. Stored and deflate
+members are supported (bzip2 and lzma are not); encrypted members, a zip inside a zip, and tar/7z/gzip archives are not. Before anything is
 extracted, a folder's zips may declare at most 16 GiB and 200,000 members in total. Members are extracted into a hidden
 `.unzip-<random>/` folder under the output root and appear in the plan folders under index names (`1`, `1_1`, ...), never
 under their names inside the archive. A zip that is over the cap or cannot be read is skipped when the folder also holds
