@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "metadata": {
+    "title": "convert: photon beam volume (beam_mu.nii.gz) on the planning-CT grid (#280)",
+    "spec": "docs/specs/2026-11-11-beam-volumes.md",
+    "branch": "feat/beam-volumes",
+    "profile": "project-profile.yml",
+    "created": "2026-11-11"
+  },
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "beam_volume module: plan rows + RTPLAN SAD + CT PatientPosition -> MU-weighted divergent aperture volume on the CT grid",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/beam_volume.py",
+        "tests/test_beam_volume.py",
+        "tests/synthetic_dicom.py",
+        "pyproject.toml"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/beam_volume.py": "create",
+        "tests/test_beam_volume.py": "create",
+        "tests/synthetic_dicom.py": "modify",
+        "pyproject.toml": "modify"
+      },
+      "test_approach": "TDD in tests/test_beam_volume.py, unit-level: build a photon RTPLAN with sd.photon_beam / sd.write_photon_rtplan (edit the returned beam dicts for jaws, MLC, angles, isocenter), read it back through save_as + dicom_io.read_header_core, get rows from plan_table.plan_rows(plan, ct) on a small SimpleITK CT image, then call the new module's single entry point with (plan header, rows, ct image, patient_position string). Geometry, weighting, units, not-modelled list and catch rules are exactly the spec's 'Decisions' and 'Geometry' sections (IEC 61217 maps, right-handed rotations, half-MU-to-each-endpoint, zero-weight CPs skipped, z-chunked float32). Voxel centres from the CT's full direction (origin + direction*spacing*index). synthetic_dicom: photon_beam gains SourceAxisDistance (default 1000.0) on the beam; CT PatientPosition is set through write_ct_series's existing `tags=` (no new argument). pyproject: register a `slow` marker and add `addopts = \"-m 'not slow'\"` under [tool.pytest.ini_options]; criterion 14's test is marked slow and run once with `uv run --group dev pytest -q -m slow tests/test_beam_volume.py`, wall time and peak RSS (resource.getrusage) recorded in findings.md. An AST test mirrors tests/test_plan_table.py::test_plan_table_catches_and_quiets_nothing for the new module. Interface: entry point `beam_volume.beam_mu(plan, rows, ct, patient_position) -> sitk.Image` (float32, CT geometry); `REASON_BEAM_VOLUME` is a fixed string constant in beam_volume.py. SAD lookup: `{int(b.get('BeamNumber')): b.get('SourceAxisDistance')}` over BeamSequence items with TreatmentDeliveryType != 'SETUP' (the plan_rows filter, plan_table.py); each row uses the SAD of its beam_number. AC14 case: extend each arc's ControlPointSequence to 178 points (2 deg gantry step) and call beam_mu directly on an in-memory 512x512x150 sitk.Image; record results in docs/plans/beam-volumes/findings.md.",
+      "criteria": [
+        "AC1: HFS static beam, G0/C0/couch 0, symmetric 100x100 mm jaw field, no MLC, isocenter at the CT centre: voxels at the isocenter plane with |x|,|z| < 45 mm hold the beam MU; voxels with |x| > 55 mm hold 0",
+        "AC2: in the AC1 case the lateral half-width of the non-zero region at depth d below the isocenter plane is 50*(SAD+d)/SAD mm +/- one voxel, at two depths",
+        "AC3: HFS gantry 90/180/270 with an off-axis asymmetric jaw field: the beam enters from the patient's left / posterior / right",
+        "AC4: HFP, FFS, FFP each place the G90 field per the spec's step-1 map, on a CT whose direction matrix is not identity in at least one case",
+        "AC5a: HFS, couch 90, G90, symmetric field: the source is inferior (field divergence widens toward the patient's superior side)",
+        "AC5b: HFS, G0, C90, jaws open only on +X (jaw_x1=0, jaw_x2=50, Y symmetric): the lit region at the isocenter plane lies on the patient's superior side (+z), none inferior",
+        "AC6: an MLCX opening only one leaf pair yields non-zero voxels only within that pair's projected Y band and X opening (+/- one voxel); a fully closed control point contributes nothing",
+        "AC7: a two-control-point static beam of MU M yields M inside the field; a step-and-shoot beam with two segments of different apertures yields each segment's MU in its own region and their sum where they overlap; a three-point arc's voxel sum scales linearly with beam MU",
+        "AC8 (module part): blocks, a non-MLCX MLC, an MLCX with null leaf_position_boundaries, missing or non-positive SourceAxisDistance on a treatment beam, PatientPosition not in HFS/HFP/FFS/FFP (or absent), and a control point unbounded on an axis each raise CaseRefused(REASON_BEAM_VOLUME); the reason is a fixed string constant with no UID, name or value; a SAD is accepted only when isinstance(v, (int, float)) and math.isfinite(v) and v > 0, otherwise CaseRefused (no exception path)",
+        "AC8 (AST): an AST test confirms beam_volume.py raises only CaseRefused(REASON_BEAM_VOLUME) and has no try/except",
+        "Output is a float32 SimpleITK image with the CT's size, spacing, origin and direction",
+        "AC14: a slow-marked test runs a 512x512x150 CT with 2 arcs x 178 control points to completion; wall time and peak memory are recorded in findings.md; over 15 min is flagged for a hardening issue",
+        "The default suite (`uv run --group dev pytest -q --tb=short`) excludes slow tests and passes; plan_table rows and series.json of existing synthetic_dicom callers are unchanged"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "convert writes beam_mu.nii.gz with a `beam` series.json row; not-modelled plans warn and still convert",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_convert.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_convert.py": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "TDD in tests/test_convert.py with the existing photon-plan convert fixtures (write_photon_rtplan swapped in, CT written with patient_position='HFS'). In _convert_plan, call the beam module only when plan rows exist, outside _header_call, before case_dir.mkdir; catch only its CaseRefused and log `log.warning('convert: %s', REASON_BEAM_VOLUME)`; write beam_mu.nii.gz after plan.parquet; update the 'the one catch' comment. _series_rows adds the `beam` row per the spec (kind beam, modality RTPLAN, plan columns, plan metadata as `dicom`, CT frame_of_reference_uid). README: new `### beam_mu.nii.gz` section (content, units MU per fraction, positions, not-modelled list, converted-tree invariant for isocenter_i/j/k is task-03's). `BEAM_NAME = 'beam_mu.nii.gz'` sits beside PLAN_NAME in convert.py. convert passes `ct_slices[0][1].get('PatientPosition')`. Fixtures: photon_plan() defaults to ct_meta=dict(tags=dict(PatientPosition='HFS')); `files` becomes [..., 'plan.parquet', 'beam_mu.nii.gz', 'series.json'] and series.json rows follow `files` order (beam row after plan row); update test_a_photon_plan_converts..., test_series_json_has_one_plan_row_last... and test_plan_series_row_leaves_frame... to match. README: `kind` list gains `beam`; the tree example gains beam_mu.nii.gz. metadata collects PatientPosition, so the HFS default adds `patient_position` to the CT row's `dicom`: update any photon-plan test in test_convert.py asserting an exact dicom dict.",
+      "criteria": [
+        "AC8 (convert part): every not-modelled case writes no beam_mu.nii.gz and no `beam` series.json row, logs exactly one WARNING `convert: <REASON_BEAM_VOLUME>`, and still writes planning_ct.nii.gz, plan.parquet (when it had rows) and series.json",
+        "When a plan has two not-modelled conditions, the first refuses and exactly one WARNING line is logged",
+        "A plan with no plan rows (brachy, RT Ion, mixed, CONTINUATION/port-film) or whose plan table is refused writes no beam_mu.nii.gz and logs no beam-volume line (only the existing REASON_PLAN_TABLE warning where it applies)",
+        "AC9: a converted photon plan's series.json has a `beam` row (kind beam, modality RTPLAN, plan columns filled, frame_of_reference_uid = the CT's) and convert_report.csv's `files` lists beam_mu.nii.gz; the file has the planning CT's size, spacing, origin and direction and is float32",
+        "AC9: a plan with an ROI named 'Beam' converts with both its beam.nii.gz mask and beam_mu.nii.gz",
+        "AC13: assert_no_leak runs over every not-modelled case of AC8 with the patient ID, plan UID and source paths as secrets",
+        "Full suite passes"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "preprocess: beam kind resampled without crop/retained checks; geometric runs rewrite plan.parquet isocenter_i/j/k",
+      "depends_on": [
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "TDD in tests/test_preprocess.py from converted photon plans (task-02 fixtures). KINDS gains beam; check_rows same_grid-checks it; output_name like dose; process_dose resample; exempt from check_crop/crosses_final, cropped, retained (blank), has_voxels->REASON_CROP and min_mask_retention. plan.parquet on a geometric run: read with pyarrow, require schema == plan_table.SCHEMA, replace isocenter_i/j/k with final CT's TransformPhysicalPointToContinuousIndex of isocenter_x/y/z, write atomically; unreadable or schema mismatch -> leave out the file and its `plan` row, one WARNING `preprocess: <REASON_PLAN_INDEX>` (fixed string). Update test_plan_parquet_is_copied_byte_identical_and_listed to non-geometric runs. README: plan.parquet section now states the invariant 'isocenter_i/j/k always index the CT in the same folder' and drops 'byte-identical on every run'. photon_converted (test_preprocess.py) defaults its CT to PatientPosition='HFS' as in task-02. Parquet read catches only pa.ArrowInvalid (plus the explicit schema != SCHEMA check); an OSError keeps the existing REASON_IO_ERROR path; REASON_PLAN_INDEX is a fixed string constant in preprocess.py. README: the `retained` 'blank for ...' list gains beam; REASON_GRID text names the beam volume too. Likewise update photon-plan tests in test_preprocess.py asserting an exact CT-row dicom dict.",
+      "criteria": [
+        "AC10: preprocess with reshape that cuts the beam volume does not refuse the plan and does not count it as cropped; the beam row's retained is blank; the output is float32 on the final CT grid with the dose's output-name prefixes; final-grid voxels outside the native CT are exactly 0 (vault: torchio-croporpad-pads-labelmaps-with-padding-mode)",
+        "A beam row not on the CT grid is refused by check_rows like a dose or mask",
+        "AC11: geometric run: output plan.parquet's isocenter_i/j/k equal the final CT's continuous index of isocenter_x/y/z (1e-6); all other columns, row order and SCHEMA identical to the input. Non-geometric run: byte-identical copy; null_count == 0 for isocenter_i/j/k (vault: pyarrow-schema-does-not-enforce-non-nullable-fields)",
+        "A geometric run whose input plan.parquet is unreadable or not SCHEMA writes no plan.parquet and no `plan` row, logs one WARNING `preprocess: <REASON_PLAN_INDEX>`, and the plan is still preprocessed (manual check in this task; regression test deferred to the hardening issue)",
+        "Full suite passes"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "manifest: optional `plan` and `beam` file-name keys",
+      "depends_on": [
+        "task-03"
+      ],
+      "files": [
+        "src/rt_dataprep/manifest.py",
+        "tests/test_manifest.py",
+        "README.md",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/manifest.py": "modify",
+        "tests/test_manifest.py": "modify",
+        "README.md": "modify",
+        "tests/test_preprocess.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_manifest.py on converted and preprocessed photon trees. Keys added through the same optional-key path as `retained` (_optional / the dict merged onto the line). README: manifest key list gains plan/beam; plan.parquet section drops 'manifest ignores it'.",
+      "criteria": [
+        "AC12: a plan line has `plan` (\"plan.parquet\") and `beam` (the beam row's file name) keys exactly when those series.json rows exist, absent otherwise; lines of plans without them are byte-identical to before",
+        "AC12: `retained` is unchanged by a beam row",
+        "test_manifest_rows_are_unchanged_by_plan_parquet (tests/test_preprocess.py) now asserts the two manifests differ only by the `plan` (and `beam`) keys",
+        "Keys are merged as _optional(kept[0]) | retained | {plan, beam}, so `plan` then `beam` follow `retained`",
+        "Full suite passes"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ],
+    [
+      "task-03"
+    ],
+    [
+      "task-04"
+    ]
+  ],
+  "deferred": [
+    "Real-cohort check: dose >= 50% of max inside beam_mu > 0 (hardening issue)",
+    "Regression test for a bad plan.parquet in a geometric preprocess run (hardening issue)",
+    "TableTopEccentricAngle / pitch / roll; CT vs RTPLAN PatientPosition disagreement",
+    "Isocenter marker volume; per-beam volumes; inverse-square or attenuation variants",
+    "Blocks, MLCY, decubitus positions",
+    "Performance optimization after the real cohort run",
+    "Duplicate BeamNumber makes the SAD lookup ambiguous (hardening issue; related #273)"
+  ]
+}
