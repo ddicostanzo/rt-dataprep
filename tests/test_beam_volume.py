@@ -271,6 +271,21 @@ def test_ac8_not_modelled_beams_are_refused(tmp_path, mutate):
     assert str(raised.value) == REASON_BEAM_VOLUME
 
 
+@pytest.mark.parametrize('keyword', beam_volume.TABLE_TOP_ANGLES)
+def test_ac8_non_zero_table_top_angle_is_refused(tmp_path, keyword):
+    beam = static()
+    beam['ControlPointSequence'][0][keyword] = 5.0
+    with pytest.raises(CaseRefused) as raised:
+        volume(tmp_path, beam)
+    assert str(raised.value) == REASON_BEAM_VOLUME
+
+
+def test_zero_table_top_angles_are_modelled(tmp_path):
+    beam = static()
+    beam['ControlPointSequence'][0].update({keyword: 0.0 for keyword in beam_volume.TABLE_TOP_ANGLES})
+    assert lit(volume(tmp_path, beam))[1].size
+
+
 @pytest.mark.parametrize('position', ['HFDR', 'hfs', '', None])
 def test_ac8_unsupported_patient_position_is_refused(tmp_path, position):
     with pytest.raises(CaseRefused) as raised:

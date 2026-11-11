@@ -17,6 +17,7 @@ import SimpleITK as sitk
 from rt_dataprep.dicom_io import CaseRefused
 
 REASON_BEAM_VOLUME = 'the photon plan has a value the beam volume does not model; no beam volume written'
+TABLE_TOP_ANGLES = ('TableTopPitchAngle', 'TableTopRollAngle', 'TableTopEccentricAngle')
 CHUNK_VOXELS = 1 << 21  # voxels per z-chunk: bounds the float32 work arrays
 # Patient-position map P of spec step 1: DICOM patient d -> IEC patient-support frame, as a matrix.
 POSITIONS = {'HFS': ((1, 0, 0), (0, 0, 1), (0, -1, 0)), 'HFP': ((-1, 0, 0), (0, 0, 1), (0, 1, 0)),
@@ -51,6 +52,20 @@ def _sads(plan):
     return sads
 
 
+def _table_top_flat(plan):
+    """Refuse a non-zero table-top pitch, roll or eccentric angle on any treatment control point (6-DoF couch, not modelled).
+
+    Checking every control point that lists one covers the filled-forward value too; absent or empty counts as 0.
+    """
+    for beam in plan.get('BeamSequence') or []:
+        if beam.get('TreatmentDeliveryType') == 'SETUP':
+            continue
+        for point in beam.get('ControlPointSequence') or []:
+            for keyword in TABLE_TOP_ANGLES:
+                value = point.get(keyword)
+                _check(value in (None, '') or (isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0))
+
+
 def _point(row, sad, weight, position, grid):
     """What the chunk loop needs of one control point: linear map of the voxel index to the beam frame, and the aperture."""
     mlc = row['mlc_type']
@@ -77,6 +92,7 @@ def _points(plan, rows, patient_position, grid):
     _check(isinstance(patient_position, str) and patient_position in POSITIONS)
     position = np.array(POSITIONS[patient_position], dtype=float)
     sads = _sads(plan)
+    _table_top_flat(plan)
     points = []
     for _, group in itertools.groupby(rows, key=lambda r: r['beam_number']):
         group = list(group)
