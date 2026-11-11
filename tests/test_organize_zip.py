@@ -112,12 +112,26 @@ def test_zips_are_staged_as_zip_number_member_number_in_sorted_order(folder, sta
     assert staged_files(stage) == staged
 
 
-@pytest.mark.parametrize('method', [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+@pytest.mark.parametrize('method', [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED])
 def test_every_allowed_method_extracts(folder, stage, method):
     make_zip(folder / 'a.zip', [('x', DICOM)], method=method)
     staged, *_ = run(folder, stage)
     assert [p.read_bytes() for p in staged] == [DICOM]
 
+
+
+def test_extraction_reads_the_scanned_member_sizes_not_a_zip_rewritten_after_the_scan(folder, stage, monkeypatch):
+    make_zip(folder / 'a.zip', [('x', DICOM)], method=zipfile.ZIP_STORED)
+    real = org._zip_scan
+
+    def scan_then_grow(path):
+        scan = real(path)
+        make_zip(path, [('x', DICOM * 100)], method=zipfile.ZIP_STORED)  # same member, same offset, 100x the bytes
+        return scan
+
+    monkeypatch.setattr(org, '_zip_scan', scan_then_grow)
+    staged, *_ = run(folder, stage)
+    assert [p.read_bytes() for p in staged] == [DICOM]
 
 def test_a_zip_inside_a_zip_is_staged_as_a_plain_file_and_never_opened(folder, stage, monkeypatch):
     inner = io.BytesIO()
@@ -216,7 +230,15 @@ def bad_name(path):
     path.write_bytes(path.read_bytes().replace('é'.encode(), b'\xff\xfe'))
 
 
-BAD = [encrypted, crc_flipped, truncated, method_9, bad_name]
+def bzip2(path):
+    make_zip(path, [(NAME + 'bz', DICOM)], method=zipfile.ZIP_BZIP2)  # off the allow-list: unbounded output on early 3.12.x (#243)
+
+
+def lzma_zip(path):
+    make_zip(path, [(NAME + 'xz', DICOM)], method=zipfile.ZIP_LZMA)
+
+
+BAD = [encrypted, crc_flipped, truncated, method_9, bad_name, bzip2, lzma_zip]
 
 
 @pytest.mark.parametrize('build', BAD)
