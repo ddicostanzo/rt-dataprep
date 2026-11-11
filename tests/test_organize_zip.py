@@ -245,7 +245,12 @@ def negative_offset(path):
     path.write_bytes(bytes(data))
 
 
-BAD = [encrypted, crc_flipped, truncated, method_9, bad_name, bzip2, lzma_zip, negative_offset]
+def past_eof_offset(path):
+    make_zip(path, [(NAME + 'eof', DICOM)])
+    patch_headers(path, central=[(42, (1 << 30).to_bytes(4, 'little'))])  # local header offset far past the end: BadZipFile, not OSError (#262)
+
+
+BAD = [encrypted, crc_flipped, truncated, method_9, bad_name, bzip2, lzma_zip, negative_offset, past_eof_offset]
 
 
 @pytest.mark.parametrize('build', BAD)
