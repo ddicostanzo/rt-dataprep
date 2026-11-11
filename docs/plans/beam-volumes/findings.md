@@ -27,3 +27,16 @@ Append findings under `## <task-id>` (append only).
 - AC14 (`uv run --group dev pytest -q -m slow -s tests/test_beam_volume.py`): 512x512x150 CT (1x1x2 mm), 2 arcs x 178 control points,
   40-pair MLC, 200x200 mm jaws: `beam_mu` wall **352 s (5.9 min)**, process peak RSS **645 MB** (ru_maxrss of the whole test process,
   which also holds the CT image and the plan). Under the 15 min soft budget: no hardening issue needed.
+
+## task-02
+- `_convert_plan` calls `beam_volume.beam_mu` only when `rows is not None`, outside `_header_call`, before `case_dir.mkdir`; it catches
+  `CaseRefused` (beam_mu raises only REASON_BEAM_VOLUME, so no reason check is needed) and logs the fixed reason. `beam_mu.nii.gz` is
+  written after `plan.parquet`; the `beam` series row follows the plan row and carries the CT's FrameOfReferenceUID. BEAM_NAME is not in
+  `masks.classify`'s `taken` (an ROI named 'Beam' gives `beam.nii.gz` beside it; tested).
+- Tests: `photon_plan()` defaults the CT to `PatientPosition='HFS'` (ct_meta=dict(tags=...)); only the three named tests needed edits, no exact
+  CT `dicom` dict asserted for photon plans. Not-modelled cases (blocks, MLCY, null boundaries, no SAD, unbounded axis, unsupported and absent
+  position, two conditions) each log exactly one WARNING and pass assert_no_leak. Brachy/ion/mixed assert no beam line inside the existing test.
+- Gotcha: the default synthetic photon beam's field barely touches the 4x5x6 convert-fixture CT, so beam_mu.nii.gz is all zeros there; geometry is
+  task-01's tests' job, convert tests pin file/row/geometry/dtype only.
+- Not covered in convert tests: a CONTINUATION/port-film plan (plan_rows returns None there, same path as brachy/ion).
+- Full default suite: 1677 passed, 4 skipped, 1 deselected (slow); ruff and compileall clean.

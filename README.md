@@ -151,6 +151,7 @@ converted/
       liver.nii.gz
       series_MR_1.nii.gz
       plan.parquet
+      beam_mu.nii.gz
       series.json
     study_1/
       series_CT_1.nii.gz
@@ -214,6 +215,22 @@ beam-level fields repeat on every row. The columns and types are `rt_dataprep.pl
 - `isocenter_x/y/z` are patient coordinates in mm; `isocenter_i/j/k` are the same point as a continuous voxel index of
   `planning_ct.nii.gz` (kept only in the converted tree), not of a preprocessed grid. A resampled or reshaped CT does not change them.
 - Converted trees made before this version gain `plan.parquet` only on a run with `--overwrite`.
+
+### beam_mu.nii.gz
+
+A photon plan that gets a `plan.parquet` also gets `beam_mu.nii.gz` (after `plan.parquet`, before `series.json`), with a
+`series.json` row of `kind` `beam` and `modality` `RTPLAN` (the plan's columns and metadata, and the planning CT's
+`frame_of_reference_uid`). It is a float32 image on the planning-CT grid (same size, spacing, origin and direction) holding, in
+each voxel, the MU per fraction of every control point whose divergent jaw and MLC aperture covers it: each control point
+carries half the MU of the segment before it and half of the segment after it. It is pure geometry: no attenuation, no inverse
+square and no dependence on the CT values. The beam geometry follows IEC 61217 and the CT's `PatientPosition`, which must be
+`HFS`, `HFP`, `FFS` or `FFP`.
+
+A plan the volume does not model gets no `beam_mu.nii.gz` and no `beam` row, and logs one warning (the plan still converts, with
+its `plan.parquet`): any beam with blocks, an MLC that is not `MLCX`, an `MLCX` without leaf boundaries, a treatment beam without a
+positive `SourceAxisDistance`, another or missing `PatientPosition`, or a control point with no jaw or MLC bounding an axis.
+Wedges are ignored. Plans without a `plan.parquet` (brachy, RT Ion, mixed, CONTINUATION or port-film, malformed) get none either.
+Trees converted before this version gain `beam_mu.nii.gz` only on a run with `convert --overwrite`.
 
 ## Conversion behavior
 
@@ -631,7 +648,7 @@ def load(case_dir):
 train = [load(case) for cases in splits['train'].values() for case in cases]
 ```
 
-In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, or `plan`.
+In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, `plan`, or `beam`.
 Applicator and line files are gzip-compressed coordinate text, not NIfTI; see [Conversion behavior](#conversion-behavior).
 After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (summed dose) and mask (volume)
 kept on the final grid. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should
