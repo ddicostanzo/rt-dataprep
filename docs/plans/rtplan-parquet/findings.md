@@ -23,3 +23,8 @@ PASS (no BLOCKING). Fixed in aeffd85: empty WedgeSequence item returned the Data
 Deferred (file in 2.9): NumberOfControlPoints/ControlPointIndex not checked; duplicate BeamNumber/ReferencedBeamNumber last-wins;
 wedge_orientation typed string though VR DS (spec choice); CONTINUATION beams dropped (MU under-count, owner question);
 empty RadiationType silently drops the parquet. Task-02 fixtures must call write_photon_rtplan by keyword.
+
+## task-02
+- Commit 52b2aaf (squashed). convert.py: PLAN_NAME = 'plan.parquet'; _header_call(plan_rows) in try/except CaseRefused → log.warning REASON_PLAN_TABLE; to_table outside _header_call, before mkdir; parquet written last via _atomic; _series_rows has an explicit last branch for the plan row (series_description/UIDs/date from the plan header).
+- make_plan(plan_writer=sd.write_rtplan); only the default writer gets positions_mm. 8 new tests (1617 passed total).
+- write_photon_rtplan writes no FrameOfReferenceUID by default; tests pass frame_uid explicitly and cover the '' fallback.
