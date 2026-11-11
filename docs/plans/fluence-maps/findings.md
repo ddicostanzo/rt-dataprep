@@ -37,3 +37,21 @@ Files: src/rt_dataprep/preprocess.py, src/rt_dataprep/manifest.py, tests/test_pr
 - Tests: preprocess copy test (geometric + non-geometric) and a no-fluence-row test; manifest key test (absent, then present after plan and beam); test_manifest.read() ignores the new key.
 - Gotcha: a series.json row injected by a test must carry the same key set as the others (`dicom: {}` when converted rows have it), else read_series_json calls the file malformed and manifest refuses the plan. The file must exist or REASON_FILE_MISSING.
 - Gotcha: the fluence tests write placeholder bytes (preprocess never reads the file); `FLUENCE_NAME` is a literal in the tests until convert defines one (task-04).
+
+## task-02
+Files: src/rt_dataprep/fluence.py, tests/test_fluence.py (+ this file).
+- `fluence_mu(plan, rows)` -> `(sitk image float32 (beams, 400, 400), [int BeamNumber])`; origin (-199.5, -199.5, 0), spacing 1, identity direction.
+  The only beam_volume name used is `aperture` (`from rt_dataprep.beam_volume import aperture`).
+- Per control point: rectangles = open pairs (opening mask) intersected with the jaws (or the jaw rectangle alone), kept only if
+  `(xhi - xlo > 0) & (yhi - ylo > 0)` (so NaN is dropped too). Off-grid check (strict, `< -200` / `> 200`) runs on the kept
+  rectangles, only for non-zero weight; `aperture(row)` runs for every row. Accumulate `w * Yov.T @ Xov` in float64.
+- Duplicate-number check is on `plan['BeamSequence']` non-SETUP beams (`int(BeamNumber)`), before any row work.
+- Weights are beam_mu's half-segment rule, recomputed in fluence.py (not shared: `_points` is beam_mu-private and the spec bars other beam_volume names).
+- Tests import fixtures by name from test_beam_volume (static, set_mlc, written, ct_image, vmat_arc, _blocks, ...). They were written
+  after the module was drafted, then checked with five hand mutations (transposed matmul, off-grid limit +1, pixel edges shifted
+  0.5, weight-0 check removed, `keep` filter removed): each fails at least one test.
+- Gotchas: a weight-0 control point needs a 3-point beam whose CP 1 re-states the jaws (forward fill otherwise carries the wide
+  aperture into every point); the AC4 edge fractions are 0.3 (X, -10.3 to -10) and 0.25 (Y, -5.25 to -5).
+- AC14 (2 arcs x 178 control points): 1.45 s wall in `pytest -m slow tests/test_fluence.py` (budget 10 s; other agents' jobs were
+  sharing the machine, so not strictly idle).
+- Full suite 1735 passed, 4 skipped, 2 deselected (slow); ruff clean.
