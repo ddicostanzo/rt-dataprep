@@ -1996,6 +1996,19 @@ def test_a_photon_plan_series_json_has_a_beam_row_after_the_plan_row_and_beam_mu
     assert mu.GetPixelID() == sitk.sitkFloat32
 
 
+def test_beam_mu_holds_the_plan_mu_on_the_patients_left_of_a_one_sided_field(tree):
+    """End to end: convert passes the plan rows, the planning CT and its PatientPosition (HFS: G0 jaw X>0 = patient left, +x)."""
+    beam = sd.photon_beam(kind='3d', mlc=False, meterset=200.0)
+    first = beam['ControlPointSequence'][0]
+    first.update(BeamLimitingDeviceAngle=0.0, PatientSupportAngle=0.0, IsocenterPosition=[0.0, 8.0, 10.0])
+    first['BeamLimitingDevicePositionSequence'] = [dict(RTBeamLimitingDeviceType='ASYMX', LeafJawPositions=[0.0, 1000.0]),
+                                                   dict(RTBeamLimitingDeviceType='ASYMY', LeafJawPositions=[-1000.0, 1000.0])]
+    _, _, out = photon_plan(tree, beams=[beam], rois=[BOX])
+    mu = sitk.GetArrayFromImage(read(out / PID / 'plan_1' / 'beam_mu.nii.gz'))  # (z, y, x); x = ORIGIN[0] + i
+    x = ORIGIN[0] + np.arange(SHAPE[2]) * SPACING[0]
+    assert np.all(mu[..., x > 0] == 200.0) and np.all(mu[..., x < 0] == 0.0)  # 100 MU from each control point
+
+
 def test_an_roi_named_beam_converts_beside_beam_mu(tree):
     _, rows, out = photon_plan(tree, rois=[dict(BOX, name='Beam')])
     assert row_of(rows).files == ['planning_ct.nii.gz', 'beam.nii.gz', 'plan.parquet', 'beam_mu.nii.gz', 'series.json']
