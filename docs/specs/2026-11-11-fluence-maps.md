@@ -41,7 +41,7 @@ centres, so it gives neither a per-beam view nor exact aperture areas.
   leaf boundaries, an axis bounded by neither jaws nor MLC) move into a public **`beam_volume.aperture(row)`** that
   **never raises**: it returns `(jaws, leaves)`, or None when the aperture is not modelled. beam_mu does
   `_check(result is not None)` (REASON_BEAM_VOLUME), fluence the same with REASON_FLUENCE (owner, stress-test round).
-  The helper also treats leaf boundaries that are not strictly increasing as not modelled (owner): a **new beam_mu
+  The helper also treats leaf boundaries that are not strictly increasing, or fewer than two of them (added in implementation: zero pairs would mis-slice `mlc_positions`), as not modelled (owner): a **new beam_mu
   refusal**, for data beam_mu would otherwise assign to the wrong pair. All other beam_mu behaviour is unchanged.
 - **Where:** a new module `src/rt_dataprep/fluence.py` with its own fixed reason **`REASON_FLUENCE`**, entry point
   `fluence_mu(plan, rows)` returning `(image, beam_numbers)` (the plan for the BeamNumber check, compared as
