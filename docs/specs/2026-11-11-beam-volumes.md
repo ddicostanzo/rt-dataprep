@@ -40,7 +40,8 @@ a channel computed once, deterministically, from the plan.
 - **Not modelled → no beam volume, one WARNING, plan still converts (with plan.parquet):** any beam with
   blocks (`number_of_blocks > 0`); an MLC whose type is not `MLCX`; an MLCX with null `leaf_position_boundaries`; a
   missing or non-positive `SourceAxisDistance` on any treatment beam; unsupported PatientPosition; a control point
-  whose aperture is unbounded on an axis (no jaw pair and no MLC bounding it). Wedges are ignored (they modulate
+  whose aperture is unbounded on an axis (no jaw pair and no MLC bounding it); a non-zero `TableTopPitchAngle`, `TableTopRollAngle` or
+  `TableTopEccentricAngle` on any treatment control point (#287). Wedges are ignored (they modulate
   intensity, not the aperture).
 - **Catch path:** the beam module reads headers with `.get` and raises only `CaseRefused(REASON_BEAM_VOLUME)` (an AST
   test like plan_table's enforces it). `_convert_plan` calls it **outside** `_header_call` (whose ValueError/TypeError
@@ -153,7 +154,7 @@ at G0. Each patient position flips the expected side per step 1.
 
 ## Deferred
 - Filed: #283 real-cohort dose-overlap check; #284 bad plan.parquet preprocess test; #285 duplicate BeamNumber SAD lookup.
-- TableTopEccentricAngle / table pitch and roll (assumed 0, not checked).
+- Modelling TableTopEccentricAngle / table pitch and roll (refused when non-zero, #287).
 - CT PatientPosition vs RTPLAN PatientSetupSequence disagreement.
 - Isocenter marker volume; per-beam volumes; inverse-square or attenuation variants.
 - Blocks, MLCY, decubitus positions.
