@@ -384,7 +384,7 @@ def _zip_scan(path):
             infos = zf.infolist()
     except _ZIP_ERRORS:  # no `as`: its text can quote a member name
         return None
-    if any(i.flag_bits & 0x61 or i.compress_type not in _ZIP_METHODS for i in infos):  # encrypted, strong-encrypted, patched; odd methods
+    if any(i.flag_bits & 0x61 or i.compress_type not in _ZIP_METHODS or i.header_offset < 0 for i in infos):  # encrypted, strong-encrypted, patched; odd methods; a corrupt central directory (#242)
         return None
     files = [i for i in infos if not i.is_dir()]
     return sum(i.file_size for i in files), len(files), infos
