@@ -29,11 +29,13 @@ needs (covariates, scanner stratification, time ordering, PET dose, RT context) 
 that parses, else by the rendered string/list);
   several distinct values →
   - for a VM 1 element whose VR is numeric (DS, IS, FL, FD, US, UL, SS, SL) or DA/TM/DT: `{"min": a, "max": b}` with the
-    first-seen texts of the extremes (numeric order for numbers, string order for DA/TM/DT); if a value does not parse as a
+    first-seen texts of the extremes (numeric order for numbers, string order for DA/TM/DT: standard (colon-free) TM fields are fixed width from the left,
+    so string order is time order across precision, `0900` < `090000.5`); if a value does not parse as a
     number, the element falls back to the next rule;
   - otherwise `{"distinct": [v1, v2, ...]}` in first-seen order.
 - The VR is read from the element (`ds[keyword].VR`), not from a keyword list. For a sequence-item source, the same rules
-  apply to the item's element.
+  apply to the item's element. A header whose sequence is empty where the path takes item `[0]` is skipped like a
+  header without the tag (#252).
 - Per-cell guard: each key is computed under a guard that catches `AttributeError`, `KeyError`, `IndexError`, `TypeError`
   and `ValueError` (like `series._or_none`); a failure omits that key. A metadata value never refuses a file, plan or
   series and never aborts the run. Headers are already fully converted inside the quiet block by
@@ -42,8 +44,8 @@ that parses, else by the rendered string/list);
 ### patient_age
 Computed per header, then aggregated like a number. From PatientAge (`nnnY` → n as an integer; `nnnM` → n/12, `nnnW` →
 n·7/365.25, `nnnD` → n/365.25, as numbers rounded to 2 decimals); else completed years between PatientBirthDate and the
-first present of StudyDate, SeriesDate, AcquisitionDate; an unparseable or impossible date (`20230229`) or no dates →
-absent. Written as a JSON number. The birth date is read, never written.
+first present of StudyDate, SeriesDate, AcquisitionDate; an unparseable or impossible date (`20230229`), that reference
+date before the birth date (a negative age) or no dates → absent. Written as a JSON number. The birth date is read, never written.
 
 ## Which keys go on which row
 Header sources: ct row = every planning-CT slice header (`_series_rows` receives `ct_slices`, not `ct_slices[0][1]`);
@@ -103,7 +105,7 @@ BrachyTreatmentType.
 structure_set_label StructureSetLabel, structure_set_date StructureSetDate, structure_set_time StructureSetTime;
 for the row's ROI (by ROINumber): roi_interpreted_type (RTROIObservationsSequence item with that ReferencedROINumber →
 RTROIInterpretedType), roi_generation_algorithm (StructureSetROISequence item with that ROINumber →
-ROIGenerationAlgorithm). masks.py's applicator and line records gain the ROI number (today only `rois.kept` carries it);
+ROIGenerationAlgorithm); an item whose number is empty or not an integer is skipped. masks.py's applicator and line records gain the ROI number (today only `rois.kept` carries it);
 there is no fallback by name.
 
 ### RTDOSE

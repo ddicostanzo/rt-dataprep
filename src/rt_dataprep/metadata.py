@@ -36,7 +36,7 @@ def _roi_lookup(sequence, number_keyword, keyword):
         if roi is None:
             return None
         items = [item for ds in heads if sequence in ds for item in ds[sequence].value
-                 if number_keyword in item and keyword in item and int(item[number_keyword].value) == int(roi)]
+                 if number_keyword in item and keyword in item and _int(item[number_keyword].value) == int(roi)]
         return _aggregate([sample for item in items if (sample := _render(item[keyword]))], False)
     return lookup
 
@@ -164,7 +164,7 @@ def _walk(ds, path):
         for item in items:
             if name in item:
                 children = item[name].value
-                reached += list(children) if index == '*' else [children[int(index)]]
+                reached += list(children) if index == '*' else list(children[int(index):int(index) + 1])  # empty: skipped like a missing tag
         items = reached
     return [item[last] for item in items if last in item]
 
@@ -184,6 +184,14 @@ def _render(element):
 def _text(ds, keyword):
     sample = _render(ds[keyword]) if keyword in ds else None
     return sample[0] if sample and isinstance(sample[0], str) else None
+
+
+def _int(value):
+    """int(value), or None when it holds no integer (one odd item must not hide the others)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _floats(texts):
@@ -212,7 +220,7 @@ def _aggregate(samples, minmax):
     if minmax and numbers:
         return {'min': distinct[min(distinct)], 'max': distinct[max(distinct)]}
     if minmax and scalar and len(vrs) == 1 and vrs <= TEXT_ORDER_VRS:
-        return {'min': min(values), 'max': max(values)}
+        return {'min': min(values), 'max': max(values)}  # standard (colon-free) TM is fixed width from the left: string order is time order
     return {'distinct': values}
 
 
