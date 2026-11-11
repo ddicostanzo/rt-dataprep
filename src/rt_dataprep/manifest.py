@@ -3,7 +3,7 @@ manifest.jsonl of a converted or preprocessed tree (spec: f3-manifest-split; JSO
 and one per series of each <patient>/study_<n>/ that holds one (imaging-cases spec D9, D14-D16).
 
 Each plan goes through preprocess.check_rows, which validates series.json and reads the CT header only; the `series` key (a list of objects) then
-reads the header of each identity series; an entry gains `fov_mask` when fovmask_<file> beside it is on the CT grid. A plan line ends with `retained`, the lowest dose/mask `retained` of its series.json, when a preprocess run set one (#225). A plan check_rows refuses is left out and counted. A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.json items, and a
+reads the header of each identity series; an entry gains `fov_mask` when fovmask_<file> beside it is on the CT grid. A plan line ends with `retained`, the lowest dose/mask `retained` of its series.json, when a preprocess run set one (#225). A plan check_rows refuses is left out and counted. A patient folder whose name is not UTF-8 is left out and counts 1 (#260). A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.json items, and a
 series whose header cannot be read is left out and counted on its own. The tree is only read; manifest.jsonl (and its dated copy, manifest_<UTC time>.jsonl) in the root is the one place the patient folder names
 appear. The log line carries counts only.
 """
@@ -114,6 +114,11 @@ def manifest(root):
     root = Path(root)
     rows, refused = [], 0
     for patient in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith('.')):
+        try:
+            patient.name.encode('utf-8')
+        except UnicodeEncodeError:  # a non-UTF-8 folder name (a surrogate escape) would make split refuse the whole manifest (#260)
+            refused += 1
+            continue
         for plan in (p for p in patient.iterdir() if p.is_dir() and re.fullmatch(conv.PLAN_FOLDER, p.name) and holds_series(p)):
             try:
                 kept, ct, series = check_rows(plan)
