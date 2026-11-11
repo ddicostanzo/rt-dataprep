@@ -206,7 +206,8 @@ them as refused. Reconvert them with `convert --overwrite`.
   the plan. Point-only ROIs and names containing `dose` are excluded. Brachy applicator outputs are **gzip-compressed
   coordinate text**, despite their legacy `.nii.gz` extension; consult `kind` in `series.json` before opening a file as NIfTI.
   An applicator ROI that no plan channel references is dropped when a referenced channel has the same file name (ignoring
-  case) and point count (the structure set's copy of that channel). An applicator named like a mask is written as `<name>_channel.nii.gz`. Find
+  case) and point count (the structure set's copy of that channel). An applicator named like a mask is written as `<name>_channel.nii.gz`, and
+  a later applicator with an earlier one's file name (ignoring case) gets `_2`, `_3`, ... appended. Find
   an applicator's file through `series.json` (`kind` applicator), not from its `SourceApplicatorID`.
   An ROI whose every contour crosses CT slices (a reference line drawn on a reformatted plane) is not a mask: its points
   are written as the same coordinate text with `kind` `line`, and preprocess copies it unchanged. An ROI that mixes axial
