@@ -32,3 +32,7 @@ empty RadiationType silently drops the parquet. Task-02 fixtures must call write
 ## review-2
 PASS (no BLOCKING). Notes: task-02 must not land without task-03 (preprocess KINDS refuses 'plan'); an ArrowInvalid from to_table stops the whole run (spec choice, hardening candidate);
 test_series_json_has_one_plan_row asserts series/study UIDs equal to themselves (trivial, fix in review round); no test that a ValueError from to_table propagates.
+
+## task-03
+- Commit 05a1e77 (squashed as 41becfb). preprocess: 'plan' in KINDS, output-name and copy tuples, docstring. 5 tests (AC1 parametrized over rescale/four-step/resample/reshape; AC2 manifest.jsonl byte-identical with and without plan.parquet). README section `### plan.parquet`; project-profile phi rule and .gitignore list plan.parquet. 1622 passed.
+- Not checked: a 'plan' row in a study folder's series.json (convert never writes one).
