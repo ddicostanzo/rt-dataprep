@@ -46,7 +46,7 @@ pipeline, so reading it must not open a path-traversal, zip-bomb, PHI-leak or da
 - Checked from the central directory before anything of the folder is extracted, over all zips of one source folder:
   sum of declared `file_size` ≤ `MAX_UNZIP_BYTES` = 16 GiB, and non-directory members ≤ `MAX_ZIP_MEMBERS` = 200,000.
 - Every member must pass an allow-list before extraction: `flag_bits & 0x61 == 0` (not encrypted, not strong-encrypted,
-  not patched) and `compress_type in {0, 8, 12, 14}` (stored, deflate, bzip2, lzma). Else the zip is unreadable.
+  not patched) and `compress_type in {0, 8}` (stored, deflate; bzip2/lzma output is bounded only on recent CPython patch releases, #243). Else the zip is unreadable.
 - A stream that disagrees with its declared size or CRC is unreadable (zipfile stops at `file_size` and checks the CRC,
   so declared sizes bound what is written).
 

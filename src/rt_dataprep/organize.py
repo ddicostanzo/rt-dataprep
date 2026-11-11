@@ -44,7 +44,7 @@ WARN_NO_LOCK = 'organize: the output root cannot be locked here; running without
 WARN_STAGING_LEFT = 'organize: %d item(s) of the staging folder under the output root could not be removed; the next run removes them'
 MAX_UNZIP_BYTES = 16 * 2**30  # declared bytes of all zips in one source folder
 MAX_ZIP_MEMBERS = 200_000  # non-directory members of all zips in one source folder
-_ZIP_METHODS = {0, 8, 12, 14}  # stored, deflate, bzip2, lzma
+_ZIP_METHODS = {0, 8}  # stored, deflate: zipfile bounds bzip2/lzma output only on recent patch releases (#243)
 _ZIP_ERRORS = (zipfile.BadZipFile, EOFError, zlib.error, lzma.LZMAError, UnicodeDecodeError, NotImplementedError, RuntimeError)
 _CT_DATES = (('SeriesDate', 'SeriesTime'), ('StudyDate', 'StudyTime'), ('AcquisitionDate', 'AcquisitionTime'),
              ('ContentDate', 'ContentTime'))  # fx order: the first non-blank date wins, with its own time as the tiebreak (#68)
@@ -378,7 +378,7 @@ def _has_preamble(path):
 
 
 def _zip_scan(path):
-    """(declared bytes, non-directory members) of a zip that opens and passes the allow-list, else None. Reads the central directory only."""
+    """(declared bytes, non-directory members, infolist) of a zip that opens and passes the allow-list, else None. Reads the central directory only."""
     try:
         with zipfile.ZipFile(path) as zf:
             infos = zf.infolist()
@@ -387,15 +387,15 @@ def _zip_scan(path):
     if any(i.flag_bits & 0x61 or i.compress_type not in _ZIP_METHODS for i in infos):  # encrypted, strong-encrypted, patched; odd methods
         return None
     files = [i for i in infos if not i.is_dir()]
-    return sum(i.file_size for i in files), len(files)
+    return sum(i.file_size for i in files), len(files), infos
 
 
-def _unzip(path, dest):
-    """Stage every non-directory member of one zip as dest/<infolist position>; the paths, or None if the zip fails while read."""
+def _unzip(path, dest, infos):
+    """Stage every non-directory member of the scanned `infos` as dest/<infolist position>; the paths, or None if the zip fails while read."""
     try:
         with zipfile.ZipFile(path) as zf:
             staged = []
-            for n, info in enumerate(zf.infolist(), start=1):
+            for n, info in enumerate(infos, start=1):  # the scanned list, so the caps checked are the sizes read (#243)
                 if info.is_dir():
                     continue
                 dest.mkdir(parents=True, exist_ok=True)
@@ -430,7 +430,7 @@ def _stage_zips(paths, staging, kinds=None):
         raise ZipRefused(REASON_ZIP_UNREADABLE) from None
     staged, extracted = [], 0
     for n, (path, scan) in enumerate(zip(zips, scans, strict=True), start=1):
-        here = None if scan is None else _unzip(path, staging / str(n))
+        here = None if scan is None else _unzip(path, staging / str(n), scan[2])
         if here is None:  # a scan failure (loose DICOM only: else refused above) or a failure while read
             dicom_io.remove_tree(staging / str(n))
             if not loose:
