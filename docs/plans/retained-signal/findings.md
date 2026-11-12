@@ -20,3 +20,9 @@ a fixture that adds it must add it to every row.
 ## task-02
 - `_retained` now builds the list of dose/mask rows with a `retained` cell, parses all of them (EXTERNAL included, so a malformed EXTERNAL cell still refuses with REASON_SERIES_CSV), then takes the minimum over `counts_toward_retained` rows; `{}` when none qualify.
 - Tests reuse `with_roi_types` and `EXTERNAL_CUT` from test_preprocess (task-01). The ~L577 comment said 0.75 for the dose; it is 0.5 since DOSE_SPLIT changed.
+
+## review-loop-pass-1
+/code-review (high) + spec axis on PR #306: 0 BLOCKING. Trivial fixed: R3 README manifest `retained` row (2801597).
+Deferred to hardening: #307 (dose with no voxel >= 1 Gy), #308 (EXTERNAL without dicom / non-exact), #309 (quiet_call,
+temp image, duplicated filter, float32 boundary, caplog[-1]), #310 (cropped with EXTERNAL, configurable threshold,
+refuse on above-threshold cut). Old-tree mixed meaning: owner decision (release note). No verification pass needed.
