@@ -572,6 +572,19 @@ def test_a_series_json_without_dicom_still_gives_lines_with_only_series_date(met
     assert {line['case_dir'].split('/')[1]: line.get('series_date') for line in lines}['plan_1'] == STUDY_D1
 
 
+def test_a_preprocessed_tree_whose_series_json_carries_dicom_reaches_the_manifest_with_the_8_optional_keys(meta_master, tmp_path):  # #253
+    converted = tmp_path / 'converted'
+    shutil.copytree(meta_master, converted)
+    out = tmp_path / 'out'
+    pre.preprocess(converted, out, pre.PreprocessSteps(rescale=True))  # a non-geometric step: no `retained`
+    assert all('dicom' in row for row in sf.read(out / PID / 'plan_1'))
+    assert man.manifest(out) == (2, 0)  # the plan and the study CT: rescale refuses the PT
+    lines = {row['case_dir']: row for row in map(json.loads, (out / 'manifest.jsonl').read_text(encoding='utf-8').splitlines())}
+    plan_line = lines[f'{PID}/plan_1']
+    assert list(plan_line) == [*COLUMNS, *OPTIONAL]
+    assert (plan_line['patient_age'], plan_line['manufacturer'], plan_line['institution_name']) == (63, 'SYNTHETIC_MAKER', 'SYNTHETIC_SITE')
+
+
 def test_a_plan_line_carries_the_lowest_dose_or_mask_retained_of_a_cut_plan_and_none_on_a_converted_tree(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     write_plan(converted, dose=DOSE_SPLIT, masks={'ptv': HALF_OUT, 'bladder': box((5, 5, 5), (8, 8, 8))})  # retained 0.5 (dose, >= its threshold), 0.5, 1.0

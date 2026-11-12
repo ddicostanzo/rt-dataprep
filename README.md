@@ -410,7 +410,7 @@ CT study series receive all enabled steps. MR/PT study series receive geometric 
 alone (or the same Python configuration) refuses MR/PT because it has no applicable step. With no geometric step (`--rescale` and/or
 `--ahe` only), dose and masks are copied unchanged. Registered plan series are resampled onto
 the final planning CT grid; unusable alignment, no overlap, or unreadable data skips that series and increments the plan's
-`skipped_series`. Output `reg_matrix` is `identity` after alignment.
+`skipped_series`. Output `reg_matrix` is `identity` after alignment, but the row's `dicom` object keeps the original REG's `reg_*` keys unchanged.
 
 Masks use nearest-neighbor interpolation and uint8 by default. `--legacy-linear-masks` requests the legacy linear float32
 behavior. `--series-fov-mask` adds a uint8 `fovmask_<image filename>` for the planning CT, each study image, and aligned
