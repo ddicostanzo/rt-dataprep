@@ -50,7 +50,8 @@ PREPROCESSED_SERIES_COLUMNS = [*conv.SERIES_COLUMNS, 'retained']  # preprocess's
 REASON_NO_CT = 'series.json does not list exactly one ct file'
 REASON_DOSE_COUNT = 'series.json lists more than one dose file'
 REASON_KIND = 'series.json has a row of an unknown kind'
-LOW_RETAINED = 0.9  # the run log counts preprocessed plans whose lowest dose/mask `retained` is below this (#226)
+LOW_RETAINED = 0.9  # the run log counts preprocessed plans whose lowest `retained` (dose at or above DOSE_RETAINED_GY, non-EXTERNAL mask) is below this (#226)
+DOSE_RETAINED_GY = 1.0  # a dose file's `retained` is the in-grid fraction of its voxels at or above this (inclusive; dose is always Gy)
 REASON_SERIES_CSV = 'series.json is malformed: not valid JSON, not an array of objects of strings with the expected keys, or one file named twice'
 LEGACY_SERIES_NAME = 'series.csv'  # what convert v0.1.x wrote; never read
 REASON_LEGACY_SERIES = 'converted by an older version (series.csv); reconvert with --overwrite'
@@ -83,7 +84,7 @@ class PreprocessSteps:
     ahe_clip_limit: float = 0.05
     min_mask_retention: float | None = None  # optional minimum output/input physical foreground volume; no clinical default
     legacy_linear_masks: bool = False
-    allow_crop: bool = False  # crop a dose or mask that extends past the final grid instead of refusing the plan; `retained` records how much is kept
+    allow_crop: bool = False  # crop a dose or mask that extends past the final grid instead of refusing the plan; `retained` records how much is kept (a dose: its voxels at or above DOSE_RETAINED_GY)
     series_fov_mask: bool = False  # not a step: uint8 support masks for planning CT, study and aligned plan images
     new_spacing: tuple = (1, 1, 1)  # mm, (x, y, z)
     final_spacing: tuple = (1.25, 1.25, 1.25)
@@ -376,7 +377,7 @@ class PreprocessRow:
     files: list = field(default_factory=list)
     skipped_series: int = 0  # registered series left out of a plan (unusable matrix, no overlap, unreadable file)
     cropped: int | str = ''  # preprocessed plan row of a geometric run: its dose and mask files that extend past the final grid; blank otherwise
-    retained: float | None = None  # its lowest dose/mask `retained` (run log only, #226); None when no file has one
+    retained: float | None = None  # its lowest `retained` over counts_toward_retained files (run log only, #226); None when no file has one
 
 
 @dataclass
@@ -715,8 +716,14 @@ def check_crop(native, final):
         raise CaseRefused(REASON_CROP)
 
 
+def counts_toward_retained(row):
+    """Whether a series.json row sets a plan's lowest `retained`: a dose or mask with a value, except a body outline (mask typed exactly 'EXTERNAL')."""
+    external = row['kind'] == 'mask' and row.get('dicom', {}).get('roi_interpreted_type') == 'EXTERNAL'
+    return row['kind'] in ('dose', 'mask') and bool(row.get('retained')) and not external
+
+
 def native_retained(native, final):
-    """The part of `native` (summed values, float64) whose voxel centres fall inside final's buffer, over the whole; 1.0 for an empty image.
+    """The part of `native` (summed values, float64; a 0/1 image gives a voxel fraction) whose voxel centres fall inside final's buffer, over the whole; 1.0 for an empty image.
     Same direction as the CT, so each native axis maps increasingly onto one final axis: bisect the first and last in-grid index per axis."""
     def run():
         total = sitk.GetArrayViewFromImage(native).sum(dtype=np.float64)
@@ -754,7 +761,7 @@ def index_plan_table(source, path, final, schema=plan_table.SCHEMA, prefix='isoc
 
 
 def preprocess_plan(plan_dir, out_dir, steps):
-    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run; the lowest dose/mask `retained`, None when none is set). CaseRefused on a refusal."""
+    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run; the lowest `retained` of the rows counts_toward_retained accepts, None when none is set). CaseRefused on a refusal."""
     kept, ct, series = check_rows(plan_dir)
     if too_small(ct, steps):
         raise CaseRefused(REASON_TOO_SMALL)
@@ -784,7 +791,8 @@ def preprocess_plan(plan_dir, out_dir, steps):
                     check_crop(native, final)
                     crossed = False
                 cropped += crossed
-                cell = repr(native_retained(native, final) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
+                # a dose is judged on its voxels at or above DOSE_RETAINED_GY (a 0/1 temporary, released at once); crosses_final, process_dose and has_voxels keep the unthresholded native
+                cell = repr(native_retained(native >= DOSE_RETAINED_GY if kind == 'dose' else native, final) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
             image = process_dose(native, final) if kind in ('dose', 'beam') else process_mask(native, final, steps)
             if kind != 'beam' and has_voxels(native) and not has_voxels(image):
                 raise CaseRefused(REASON_CROP)
@@ -825,5 +833,5 @@ def preprocess_plan(plan_dir, out_dir, steps):
             del image
         del native, fov
     conv.write_series_json(series_rows, out_dir / conv.SERIES_NAME)
-    retained = [float(row['retained']) for row in series_rows if row['retained']]
+    retained = [float(row['retained']) for row in series_rows if counts_toward_retained(row)]
     return [*files, conv.SERIES_NAME], skipped, cropped if geometric else '', min(retained, default=None)

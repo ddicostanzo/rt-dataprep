@@ -3,7 +3,7 @@ manifest.jsonl of a converted or preprocessed tree (spec: f3-manifest-split; JSO
 and one per series of each <patient>/study_<n>/ that holds one (imaging-cases spec D9, D14-D16).
 
 Each plan goes through preprocess.check_rows, which validates series.json and reads the CT header only; the `series` key (a list of objects) then
-reads the header of each identity series; an entry gains `fov_mask` when fovmask_<file> beside it is on the CT grid. A plan line ends with `retained`, the lowest dose/mask `retained` of its series.json, when a preprocess run set one (#225), then `plan`, `beam`, `fluence`, `ion_plan` and `dwell`, the file names of its `plan`, `beam`, `fluence`, `ion_plan` and `dwell` series.json rows, each only when that row exists (#280, #279, #281, #282). A plan check_rows refuses is left out and counted. A patient folder whose name is not UTF-8 is left out and counts 1 (#260). A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.json items, and a
+reads the header of each identity series; an entry gains `fov_mask` when fovmask_<file> beside it is on the CT grid. A plan line ends with `retained`, the lowest dose/mask `retained` of its series.json, leaving out EXTERNAL masks, when a preprocess run set one (#225, #305), then `plan`, `beam`, `fluence`, `ion_plan` and `dwell`, the file names of its `plan`, `beam`, `fluence`, `ion_plan` and `dwell` series.json rows, each only when that row exists (#280, #279, #281, #282). A plan check_rows refuses is left out and counted. A patient folder whose name is not UTF-8 is left out and counts 1 (#260). A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.json items, and a
 series whose header cannot be read is left out and counted on its own. The tree is only read; manifest.jsonl (and its dated copy, manifest_<UTC time>.jsonl) in the root is the one place the patient folder names
 appear. The log line carries counts only.
 """
@@ -15,7 +15,7 @@ import numpy as np
 
 from rt_dataprep import convert as conv
 from rt_dataprep.dicom_io import CaseRefused, write_report
-from rt_dataprep.preprocess import REASON_SERIES_CSV, STUDY_FOLDER, check_rows, check_study_rows, holds_series, is_legacy, read_info, read_series_json, same_grid, series_id, study_refusal_count
+from rt_dataprep.preprocess import REASON_SERIES_CSV, STUDY_FOLDER, check_rows, check_study_rows, counts_toward_retained, holds_series, is_legacy, read_info, read_series_json, same_grid, series_id, study_refusal_count
 
 log = logging.getLogger(__name__)
 
@@ -35,14 +35,17 @@ def _optional(row):
 
 
 def _retained(kept):
-    """{'retained': the lowest dose/mask `retained` of a plan as a float} (#225), or {} when no row has one (a converted tree, a non-geometric run)."""
+    """{'retained': the lowest dose/mask `retained` of a plan as a float} (#225), or {} when no row has one (a converted tree, a non-geometric run) or only EXTERNAL masks do (#305).
+    Every non-blank cell is parsed and validated first, an EXTERNAL one too; the minimum then covers the rows `counts_toward_retained` accepts."""
+    rows = [row for row in kept if row['kind'] in ('dose', 'mask') and row.get('retained')]
     try:
-        values = [float(row['retained']) for row in kept if row['kind'] in ('dose', 'mask') and row.get('retained')]
+        values = [float(row['retained']) for row in rows]
     except ValueError:
         values = [float('nan')]
     if not all(np.isfinite(values)):  # a hand-edited cell: the plan is refused like any other malformed series.json
         raise CaseRefused(REASON_SERIES_CSV)
-    return {'retained': min(values)} if values else {}
+    counted = [value for row, value in zip(rows, values, strict=True) if counts_toward_retained(row)]
+    return {'retained': min(counted)} if counted else {}
 
 
 def _files(kept):

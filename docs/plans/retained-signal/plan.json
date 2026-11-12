@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "preprocess: dose retained over the >= 1 Gy region; EXTERNAL masks leave the plan minimum",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify"
+      },
+      "test_approach": "TDD on the existing NIfTI + series.json retained tests in tests/test_preprocess.py (write_plan fixtures, DOSE_SPLIT); new cases for spec acceptance tests 1, 2, 3 (preprocess part: series.json values and the run-log low-retained count), 4 (log count) and 6. Fixtures for 3-4 give every series.json row a `dicom` object (all-or-none per file) with the mask's roi_interpreted_type.",
+      "criteria": [
+        "A module constant DOSE_RETAINED_GY = 1.0 defines the dose region. For kind == 'dose' only, native_retained receives the 0/1 image `native >= DOSE_RETAINED_GY` (a SimpleITK comparison, geometry kept), so the value is a voxel fraction, not summed dose; it is computed only when crosses_final(native, final) is true, else exactly 1.0. crosses_final, process_dose and has_voxels still get the unthresholded `native` (spec decision 1).",
+        "native_retained's signature and behaviour are unchanged; its unit tests pass untouched; its docstring no longer implies it is only for summed dose.",
+        "Mask `retained` is unchanged (volume-based); beam volumes still have no `retained`; `cropped` is unchanged.",
+        "One shared predicate (importable by manifest) says whether a series.json row counts toward a plan's `retained` minimum: kind dose or mask, a non-blank `retained`, and not a mask whose `dicom.roi_interpreted_type` is exactly the string 'EXTERNAL'. preprocess_plan's returned minimum uses it.",
+        "Acceptance test 1: the negligible-tail test (~L2945) is renamed to match and asserts the dose cell == '1.0' exactly; a sub-1 Gy tail that crosses the grid still counts in `cropped`.",
+        "Acceptance test 2: a dose whose >= 1 Gy region is partly cut gets the voxel fraction of that region (the existing DOSE_SPLIT test now expects 0.5, renamed to say so).",
+        "Acceptance test 3 (preprocess part): a plan with a cut EXTERNAL mask and otherwise uncut files keeps the EXTERNAL mask's series.json retained below 1.0, and the run log does not count the plan in 'with retained < 0.9'.",
+        "Acceptance test 4 (preprocess part): a cut non-EXTERNAL mask still counts in the log's low-retained count.",
+        "Acceptance test 6: test_a_retained_of_zero_alone_does_not_refuse_when_the_output_still_holds_voxels (one dose voxel of exactly 1.0 Gy centred outside the grid) still passes unchanged with retained '0.0', pinning the inclusive >= threshold; it is not moved off 1.0 Gy.",
+        "The thresholded dose is computed inside the per-file block and released with `native` (one image at a time stays true).",
+        "Stale comments and names updated: LOW_RETAINED (L53), allow_crop (L86), the retained field (L379), preprocess_plan docstring (L757); tests/test_preprocess.py L2799 comment ('summed dose is 9 / 12') and the L2833 test name (`..._of_the_summed_dose_...`).",
+        "Full suite passes (`uv run --group dev pytest -q --tb=short`); ruff clean."
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "manifest: plan retained excludes EXTERNAL masks; README describes the new meanings",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/manifest.py",
+        "tests/test_manifest.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/manifest.py": "modify",
+        "tests/test_manifest.py": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "TDD in tests/test_manifest.py with series.json fixtures carrying `dicom` on every row: acceptance tests 3 (manifest part) and 5; existing _retained tests keep passing.",
+      "criteria": [
+        "manifest `_retained` parses and validates every non-blank dose/mask `retained` cell as today, so any malformed cell, EXTERNAL included, still refuses with REASON_SERIES_CSV; only then does it take the minimum over the rows the task-01 predicate accepts. The test_manifest.py ~L587 malformed-cell parametrization gains an EXTERNAL-mask case.",
+        "Acceptance test 3 (manifest part): the plan line's `retained` is 1.0 when only an EXTERNAL mask is cut.",
+        "Acceptance test 5: on a series.json whose EXTERNAL mask holds the lowest value, the manifest minimum omits it; a plan whose only values are EXTERNAL masks gets no `retained` key.",
+        "Acceptance test 4 (manifest part): a cut non-EXTERNAL mask still lowers the manifest `retained`.",
+        "Stale text updated: manifest.py module docstring (L6) and the _retained docstring; the test_manifest.py ~L577 comment.",
+        "README: the --allow-crop paragraph (~L398-404) and the trailing retained paragraph (~L763) say dose retained is the fraction of voxels >= 1 Gy kept, that a dose cut only below 1 Gy counts as cropped but has retained 1.0 (replacing 'a negligible tail counts'), and that EXTERNAL masks keep their own value but are left out of the plan-level minimum and the log count; the manifest `retained` row (~L478) says it excludes EXTERNAL masks.",
+        "Full suite passes; ruff clean."
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-12",
+    "spec": "docs/specs/2026-11-12-retained-signal.md",
+    "profile": "project-profile.yml",
+    "issue": 305
+  }
+}
