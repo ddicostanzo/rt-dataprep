@@ -179,17 +179,19 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
             folders = sorted(p for p in src_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # .X.partial too
             tasks = [pool.Task(_worker, (read_fn, folder, exclude_models, None if overwrite else out_root, staging_parent)) for folder in folders]
             workers = pool.run_auto(workers, tasks, handle, lambda k: k in done and done[k].outcome == OUTCOME_ORGANIZED)  # an int from here on
-        finally:  # Ctrl-C too: the report lists what was done
-            dicom_io.remove_tree(staging_parent)
-            if os.path.lexists(staging_parent):  # remove_tree swallows its error; the next run's sweep retries
-                try:
-                    left = 1 + sum(1 for _ in staging_parent.rglob('*'))
-                except OSError:  # an unreadable leftover: the report below must still be written
-                    left = 1
-                log.warning(WARN_STAGING_LEFT, left)
-            rows = [done[i] for i in sorted(done)]
-            write_report(out_root, REPORT_NAME, ['patient', 'plan_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'],
-                         ([r.patient, r.plans, r.misc, r.unreadable, r.outcome, r.reason] for r in rows))
+        finally:  # Ctrl-C too: the report lists what was done, written before the cleanup so a Ctrl-C there cannot skip it (#319)
+            try:
+                rows = [done[i] for i in sorted(done)]
+                write_report(out_root, REPORT_NAME, ['patient', 'plan_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'],
+                             ([r.patient, r.plans, r.misc, r.unreadable, r.outcome, r.reason] for r in rows))
+            finally:
+                dicom_io.remove_tree(staging_parent)
+                if os.path.lexists(staging_parent):  # remove_tree swallows its error; the next run's sweep retries
+                    try:
+                        left = 1 + sum(1 for _ in staging_parent.rglob('*'))
+                    except OSError:  # an unreadable leftover only changes the count
+                        left = 1
+                    log.warning(WARN_STAGING_LEFT, left)
         log.info('organize: %d patient folders, %d organized, %d plan folders, %d misc files, %d unreadable files, %d zips, %d zip members, '
                  '%d zips skipped; %d replaced, %d kept',
                  len(rows), sum(r.outcome == OUTCOME_ORGANIZED for r in rows), sum(r.plans for r in rows),
