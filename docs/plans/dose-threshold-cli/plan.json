@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "Dose retained threshold as PreprocessSteps fields (core)",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_preprocess.py with synthetic plans from the existing write_plan/box helpers. Reuse the cut-dose pattern of test_a_dose_threshold_is_the_lesser_of_1_gy_and_a_tenth_of_its_max for AC2/AC3, with one workers=2 case (precedent ~line 2628). For AC9, compare the two output dose files with read_bytes() (output is byte-reproducible: see written_bytes in test_two_patient_processes_write_the_same_files_and_rows_as_one ~2623). Build custom steps with dataclasses.replace(CUT, ...). Spec: docs/specs/2026-11-12-dose-threshold-cli.md. Vault guardrail: [[simpleitk-scalar-comparison-casts-constant-to-pixel-type]], so the threshold stays a numpy comparison.",
+      "criteria": [
+        "PreprocessSteps has dose_retained_gy (default DOSE_RETAINED_GY = 1.0) and dose_retained_fraction (default DOSE_RETAINED_FRACTION = 0.1); the module constants remain and are the defaults",
+        "dose_region(values, gy=DOSE_RETAINED_GY, fraction=DOSE_RETAINED_FRACTION) keeps the min(gy, fraction * max) rule, the 1e-6 relative tolerance and the numpy comparison; the plan loop passes the run's steps values without mutating module constants",
+        "The dose_region docstring describes the gy/fraction parameters; the DOSE_RETAINED_GY / DOSE_RETAINED_FRACTION comments say they are the PreprocessSteps defaults; the two new fields carry comments",
+        "Only `retained` uses the threshold: crosses_final, process_dose and has_voxels still receive the unthresholded native",
+        "preprocess() raises ValueError(REASON_DOSE_RETAINED_LIMIT) for a non-finite or out-of-range value (gy <= 0; fraction <= 0 or > 1), unconditionally, after the existing step/AHE/mask-retention checks and before out_root is created",
+        "When steps.allow_crop is set, preprocess() logs exactly once, from the parent before dispatch, 'preprocess: dose retained counts voxels at or above min(%g Gy, %g of the dose max)' with the run's values; no such line without allow_crop; the closing summary is still the last record",
+        "AC1: every existing test in tests/test_preprocess.py passes unchanged",
+        "AC2: with the dose layout of test_a_dose_threshold_is_the_lesser_of_1_gy_and_a_tenth_of_its_max (cut 0.7, kept 20.0 under CUT), the dose cell is '1.0' by default and '0.5' with dose_retained_gy=0.5, including one workers=2 run; the report's cropped is the same in both runs",
+        "AC3: with cut 0.15, kept 2.0 under CUT, the dose cell is '1.0' by default (threshold 0.2) and '0.5' with dose_retained_fraction=0.05 (threshold 0.1)",
+        "AC4: unit tests of dose_region with explicit gy and fraction, including fraction=1 with max < gy (only the peak voxels count)",
+        "AC5: preprocess() with a geometric step and allow_crop refuses gy in {0, -1, nan, inf} and fraction in {0, 1.5, nan, inf} with REASON_DOSE_RETAINED_LIMIT, and the output root does not exist afterwards; and PreprocessSteps(rescale=True, dose_retained_gy=0) (no allow_crop) is refused the same way, proving the check is unconditional",
+        "AC8: the run-log line appears exactly once with default and with custom values on an allow_crop run, and not on a run without allow_crop",
+        "AC9: the output dose NIfTI is byte-identical (read_bytes) between a default run and a changed-threshold run on the same cut input",
+        "Full suite passes: uv run --group dev pytest -q --tb=short; ruff check passes"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "CLI flags and README for the dose retained threshold",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/__main__.py",
+        "tests/test_cli.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_cli.py": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "TDD in tests/test_cli.py following its existing preprocess-option tests and the refusal pattern of tests/test_mask_retention.py (~line 91). Vault guardrail: [[argparse-error-exit-2-collides-with-domain-exit-code]], so a usage error asserts exit 2 AND empty stdout.",
+      "criteria": [
+        "preprocess has --dose-retained-gy (metavar GY) and --dose-retained-fraction (metavar F), type=float, default None; help names the default and valid range ('finite and greater than 0'; 'greater than 0 and at most 1') and says they require --allow-crop",
+        "Either flag without --allow-crop is parser.error(f'{option} requires --allow-crop'), checked per flag in the style of the --new-shape loop",
+        "The flags reach PreprocessSteps only when given (grids-dict pattern); without them PreprocessSteps keeps its field defaults",
+        "REASON_DOSE_RETAINED_LIMIT is imported and listed among the CLI's fixed refusal texts",
+        "AC6: either flag without --allow-crop exits 2 with empty stdout and '<flag> requires --allow-crop' in stderr; with --reshape --allow-crop the values reach PreprocessSteps; --reshape --allow-crop alone gives PreprocessSteps the field defaults",
+        "AC7: --reshape --allow-crop --dose-retained-gy nan, and an out-of-range --dose-retained-fraction, exit 1 with stderr exactly 'rt_dataprep: <REASON_DOSE_RETAINED_LIMIT>\\n', empty stdout, and no output root",
+        "README: line 88's options list names both flags; the PreprocessSteps table (~648) has two rows (dose_retained_gy / --dose-retained-gy / 1.0, dose_retained_fraction / --dose-retained-fraction / 0.1); the retained paragraphs (~405, ~768) call 1 Gy and 10% the defaults, say that changing them needs --overwrite or a fresh output root, and warn that fraction 1 counts only the peak voxels of a dose whose max is below the Gy floor",
+        "Full suite passes: uv run --group dev pytest -q --tb=short; ruff check passes"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-12",
+    "spec": "docs/specs/2026-11-12-dose-threshold-cli.md",
+    "profile": "project-profile.yml",
+    "issue": "#310 item 2",
+    "guardrails": [
+      "commit gate: at most 5 files per commit",
+      "set CLAUDE_ALLOW_PRIVATE_API=1 when tests use private names, and list them in the commit body",
+      "no bare python: uv run --group dev ...",
+      "synthetic data only, SYNTHETIC_ ids; temp files only under mktemp -d, removed by literal path"
+    ],
+    "deferred": [
+      "A per-dose threshold key in series.json or the manifest (provenance), tracked under #5",
+      "A prescription-relative threshold (needs the plan's prescription; not modelled)",
+      "Making LOW_RETAINED (0.9) configurable"
+    ]
+  }
+}
