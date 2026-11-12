@@ -137,7 +137,7 @@ zip members and skipped zips. On Linux and macOS a run holds `.organize.lock` in
 same root stops with `another organize run holds the output root lock`. Windows takes no lock; on a file system that
 refuses it a warning is logged and the run continues unlocked. A killed run's leftover `.unzip-*` folder is removed by the
 next locked run. An unlocked run (Windows, or no file locking) never sweeps them: they hold patient files, so delete any
-`.unzip-*` folder in the output root by hand once no run is active.
+`.unzip-*` folder in the output root not ending in `.old` or `.partial` (those are a patient's) by hand once no run is active.
 
 Representative converted output (optional files shown where applicable):
 
