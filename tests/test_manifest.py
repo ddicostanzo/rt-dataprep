@@ -11,8 +11,8 @@ import pytest
 import series_files as sf
 import SimpleITK as sitk
 from test_convert import BOX, PID, dose_spec, make_plan
-from test_preprocess import (AHE_MR_OUT, DWELL_NAME, ION_NAME, add_dwell, add_ion_plan, AHE_STUDY_CT, CUT, DOSE_SPLIT, HALF_OUT, MR_OUT, MR_RAMP, MR_SIZE, SMALL, SMALL_AHE, box, grid, landmark,
-                             mr_spec, photon_converted, rigid, run_plan, save_rows, series_row, state, write_plan, write_study_tree)
+from test_preprocess import (AHE_MR_OUT, DWELL_NAME, ION_NAME, add_dwell, add_ion_plan, AHE_STUDY_CT, CUT, DOSE_SPLIT, EXTERNAL_CUT, HALF_OUT, MR_OUT, MR_RAMP, MR_SIZE, SMALL, SMALL_AHE, box, grid, landmark,
+                             mr_spec, photon_converted, rigid, run_plan, save_rows, series_row, state, with_roi_types, write_plan, write_study_tree)
 from test_series import STUDY_D1, STUDY_D2, STUDY_T1, STUDY_T2, put
 
 from rt_dataprep import convert as conv
@@ -574,7 +574,7 @@ def test_a_series_json_without_dicom_still_gives_lines_with_only_series_date(met
 
 def test_a_plan_line_carries_the_lowest_dose_or_mask_retained_of_a_cut_plan_and_none_on_a_converted_tree(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
-    write_plan(converted, dose=DOSE_SPLIT, masks={'ptv': HALF_OUT, 'bladder': box((5, 5, 5), (8, 8, 8))})  # retained 0.75, 0.5, 1.0
+    write_plan(converted, dose=DOSE_SPLIT, masks={'ptv': HALF_OUT, 'bladder': box((5, 5, 5), (8, 8, 8))})  # retained 0.5 (dose, >= 1 Gy), 0.5, 1.0
     pre.preprocess(converted, out, CUT)
     assert man.manifest(out) == (1, 0) and man.manifest(converted) == (1, 0)
     line = json.loads((out / 'manifest.jsonl').read_text(encoding='utf-8'))
@@ -583,14 +583,58 @@ def test_a_plan_line_carries_the_lowest_dose_or_mask_retained_of_a_cut_plan_and_
     assert 'retained' not in read(out)[0]
 
 
+def external_plan(tmp_path, types, masks=EXTERNAL_CUT):
+    """A cut plan tree whose masks carry `types` (roi name -> roi_interpreted_type); (out series.json path, its rows)."""
+    folder, _ = write_plan(tmp_path / 'converted', masks=masks)
+    with_roi_types(folder, types)
+    pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    path = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1' / conv.SERIES_NAME
+    return path, json.loads(path.read_text(encoding='utf-8'))
+
+
+def plan_retained(out):
+    assert man.manifest(out) == (1, 0)
+    return json.loads((out / 'manifest.jsonl').read_text(encoding='utf-8')).get('retained')
+
+
+def test_a_cut_external_mask_alone_leaves_the_plan_line_retained_at_one(tmp_path):
+    path, rows = external_plan(tmp_path, {'body': 'EXTERNAL', 'ptv': 'PTV'})
+    assert float(next(r for r in rows if r.get('roi_name') == 'body')['retained']) < 1.0
+    assert plan_retained(tmp_path / 'out') == 1.0
+
+
+def test_a_cut_non_external_mask_still_lowers_the_plan_line_retained(tmp_path):
+    external_plan(tmp_path, {'body': 'ORGAN', 'ptv': 'PTV'})
+    assert 0.0 < plan_retained(tmp_path / 'out') < 1.0
+
+
+def test_the_plan_line_minimum_omits_an_external_mask_holding_the_lowest_value(tmp_path):
+    path, rows = external_plan(tmp_path, {'body': 'EXTERNAL', 'ptv': 'PTV'})
+    for row in rows:
+        row['retained'] = {'body': '0.1', 'ptv': '0.8'}.get(row['roi_name'], row['retained'])
+    path.write_text(json.dumps(rows), encoding='utf-8')
+    assert plan_retained(tmp_path / 'out') == 0.8
+
+
+def test_a_plan_whose_only_retained_values_are_external_masks_gets_no_retained_key(tmp_path):
+    path, rows = external_plan(tmp_path, {'body': 'EXTERNAL', 'ptv': 'PTV'})
+    for row in rows:
+        if row.get('retained'):
+            row['retained'] = '0.1' if row.get('roi_name') == 'body' else ''
+    path.write_text(json.dumps(rows), encoding='utf-8')
+    assert plan_retained(tmp_path / 'out') is None
+
+
 @pytest.mark.parametrize('cell', ['half', 'nan'])
-def test_a_plan_whose_retained_cell_is_not_a_finite_number_is_refused(tmp_path, cell):
+@pytest.mark.parametrize('target', ['first', 'external'])
+def test_a_plan_whose_retained_cell_is_not_a_finite_number_is_refused(tmp_path, cell, target):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
-    write_plan(converted, dose=DOSE_SPLIT)
+    folder, _ = write_plan(converted, masks=EXTERNAL_CUT)
+    with_roi_types(folder, {'body': 'EXTERNAL', 'ptv': 'PTV'})
     pre.preprocess(converted, out, CUT)
     path = out / 'SYNTHETICPTA' / 'plan_1' / conv.SERIES_NAME
     rows = json.loads(path.read_text(encoding='utf-8'))
-    next(row for row in rows if row['retained'])['retained'] = cell
+    next(row for row in rows if row['retained'] and (target == 'first' or row.get('roi_name') == 'body'))['retained'] = cell  # an EXTERNAL cell is validated too
     path.write_text(json.dumps(rows), encoding='utf-8')
     assert man.manifest(out) == (0, 1)
 

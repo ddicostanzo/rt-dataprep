@@ -397,10 +397,11 @@ pad a large extent at native spacing.
 
 By default a plan whose dose or mask extends past the final CT grid is refused. `--allow-crop` (needs at least one of
 `--initial-resample`, `--resample`, `--reshape`) writes the plan anyway, with the dose and masks cut to the final grid. In
-`series.json`, the `retained` key of each dose and mask object is the fraction of that file's native-grid content (summed dose,
-mask volume) kept by the crop: exactly `1.0` when nothing is cut, and blank for CT, applicator, line, plan, beam and series entries and on runs
+`series.json`, the `retained` key of each dose and mask object is the fraction of that file's native-grid content kept by the crop: for a
+dose, the fraction of its voxels >= 1 Gy; for a mask, its volume. It is exactly `1.0` when nothing is cut, and blank for CT, applicator, line, plan, beam and series entries and on runs
 without a geometric step. In `preprocess_report.csv`, the `cropped` column counts the dose and mask files the final grid cut; a
-negligible tail counts. The run's closing log line counts the cropped plans and how many of them have a
+dose cut only below 1 Gy counts as cropped but has `retained` `1.0`. A mask whose `dicom.roi_interpreted_type` is `EXTERNAL` (the body outline) keeps its own
+`retained`, but is left out of the plan's lowest `retained`. The run's closing log line counts the cropped plans and how many of them have a
 lowest `retained` below 0.9. A dose or mask that the final grid empties entirely refuses the plan, with or without `--allow-crop`.
 
 CT study series receive all enabled steps. MR/PT study series receive geometric steps and optional AHE, and skip HU rescaling. `--rescale`
@@ -475,7 +476,7 @@ these keys:
 | `series` | List of aligned plan series (objects with `file`, `modality`, optional `fov_mask`); `[]` for imaging. |
 | `fov_mask` (optional) | Planning-CT or study-image support-mask filename, relative to its case folder; blank when absent. |
 | `patient_age`, `patient_sex`, `patient_weight`, `study_date`, `series_date`, `manufacturer`, `model`, `institution_name` (all optional) | From the `dicom` object of the case's primary image (a plan's planning CT; an imaging line's own series), `series_date` from that image's `series_date` field. A key the image has no value for is left out of that line, so lines can differ in which of these they carry. A value that varied over the series is the `{"min": ..., "max": ...}` or `{"distinct": [...]}` object, copied as is. They follow the fixed keys (and `fov_mask`) in the order listed; a `series.json` without `dicom` gives only `series_date`. `split` ignores them. |
-| `retained` (optional, plans only) | The lowest dose/mask `retained` of a preprocessed plan (the fraction kept by `--allow-crop`), after the metadata keys; left out on a converted tree or a run without a geometric step. |
+| `retained` (optional, plans only) | The lowest dose/mask `retained` of a preprocessed plan (the fraction kept by `--allow-crop`; EXTERNAL masks are excluded), after the metadata keys; left out on a converted tree or a run without a geometric step. |
 | `plan`, `beam`, `fluence`, `ion_plan`, `dwell` (optional, plans only) | The file name of the plan's `plan` series.json row (`plan.parquet`), of its `beam` row (`beam_mu.nii.gz`, or its prefixed name after a geometric `preprocess` run), of its `fluence` row (`fluence_mu.nii.gz`, never renamed) of its `ion_plan` row (`ion_plan.parquet`) and of its `dwell` row (`dwell.parquet`); each is left out when the plan has no such row. They follow `retained`, in the order `plan`, `beam`, `fluence`, `ion_plan`, `dwell`. |
 
 `masks` and `series` are native JSON lists, `patient_age` and `retained` are numbers, and the optional metadata values may be objects; every other value is a string. The `fov_mask` key appears on every line only
@@ -760,9 +761,10 @@ train = [load(case) for cases in splits['train'].values() for case in cases]
 
 In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, `plan`, `beam`, `fluence`, `ion_plan`, or `dwell`.
 Applicator and line files are gzip-compressed coordinate text, not NIfTI; see [Conversion behavior](#conversion-behavior).
-After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (summed dose) and mask (volume)
+After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (its voxels >= 1 Gy) and mask (volume)
 kept on the final grid. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should
-not be used. The optional `fov_mask` manifest key and `fov_mask` entries in
+not be used. EXTERNAL masks (the body outline) keep their own value in `series.json` but are left out of the manifest's plan-level
+`retained` and of the run log's low-`retained` count. The optional `fov_mask` manifest key and `fov_mask` entries in
 the `series` JSON name support masks for excluding fill voxels from losses or metrics.
 
 ## Development
