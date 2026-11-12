@@ -281,8 +281,10 @@ order, then channel order, then dwell index. Setup, channel and source fields re
 - `dwell_weight` is `max(0, w(2k+1) - w(2k))` of the cumulative time weights; `dwell_time_s` is `channel_total_time * dwell_weight / final_cumulative_time_weight`
   (the DICOM definition), and 0 when both the final weight and the total time are 0. The `dwell_weight`s of a channel sum to its final weight within 1e-4 relative
   (`DWELL_WEIGHT_TOLERANCE`), not exactly.
-- The times are as exported in `ChannelTotalTime`. **Which date's source strength those times assume is not established** (DICOM ties the air kerma rate to its
-  reference date, not to the treatment time); it stays open until a TG-43 point dose from this table is compared with RTDOSE on a real export. No decay correction is applied.
+- The times are as exported in `ChannelTotalTime`. No decay correction is applied. **`reference_air_kerma_rate` may not be the real source strength**: on the first
+  real HDR cohort (651 GammaMed Plus plans) every plan exports the same 40,700 µGy/h at 1 m (a nominal 10 Ci source), with a reference date equal to the
+  plan date in nearly all of them. The times were planned with the actual decayed strength, which the RTPLAN does not carry, so a dose from this table needs
+  that strength from elsewhere (the clinic's source records, or RTDOSE) (#303).
 - For PDR, `channel_total_time` is stored as-is next to `number_of_pulses` and `pulse_repetition_interval`. Reading it as the time of one pulse (per fraction:
   multiply by `number_of_pulses`) is a vendor convention, not DICOM, and is unverified on a real PDR export.
 - A plan with a missing or inconsistent value (an odd control point count, the two control points of a dwell apart, weights that do not add up or that rise while the source
