@@ -2840,13 +2840,18 @@ def test_retained_is_the_native_in_grid_voxel_fraction_of_the_dose_at_or_above_1
     assert plan_row(report).cropped == 2  # the dose and the ptv
 
 
+def run_summary(caplog):
+    """The run log's closing summary line, wherever it sits among the records."""
+    return next(r.getMessage() for r in caplog.records if ' plan rows (' in r.getMessage())
+
+
 @pytest.mark.parametrize(('masks', 'tail'), [({'ptv': HALF_OUT}, '1 plans cropped, 1 with retained < 0.9'),  # retained 0.5
                                             ({'bladder': box((5, 5, 5), (8, 8, 8))}, '0 plans cropped, 0 with retained < 0.9')])  # 1.0
 def test_the_run_log_counts_cropped_plans_and_those_with_a_low_retained(tmp_path, caplog, masks, tail):
     write_plan(tmp_path / 'converted', dose=None, masks=masks)
     with caplog.at_level('INFO'):
         pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
-    assert f'; {tail}; ' in caplog.records[-1].getMessage()
+    assert f'; {tail}; ' in run_summary(caplog)
 
 
 def test_a_cut_plan_without_allow_crop_still_refuses_and_records_no_cropped_count(tmp_path):
@@ -2955,7 +2960,7 @@ def test_a_sub_threshold_tail_past_the_edge_counts_as_cropped_but_leaves_the_dos
                                                  (0.15, 2.0, '1.0'),  # ... and a cut half below 0.2 Gy does not
                                                  (0.2, 0.5, '0.5'),  # max 0.5 Gy: no voxel reaches 1 Gy, yet the cut half (>= 0.05 Gy) counts (#307)
                                                  (0.5, 20.0, '1.0'),  # max >= 10 Gy: the threshold stays 1 Gy
-                                                 (0.2, 2.0, '0.5'),  # exactly at the threshold: inclusive
+                                                 (0.2, 2.0, '0.5'),  # at the threshold (within the 1e-6 tolerance)
                                                  (0.99999994, 20.0, '0.5')])  # a nominal 1.0 Gy float32 voxel after DoseGridScaling is kept (#309)
 def test_a_dose_threshold_is_the_lesser_of_1_gy_and_a_tenth_of_its_max(tmp_path, cut, kept, cell):
     write_plan(tmp_path / 'converted', dose=(np.where(np.arange(12)[:, None, None] < 3, cut, kept) * HALF_OUT).astype(np.float32), masks={})
@@ -2991,7 +2996,7 @@ def test_a_cut_external_mask_keeps_its_own_retained_but_the_plan_is_not_counted_
     cells = series_cells(tmp_path / 'out')
     assert float(cells[pre.output_name('body.nii.gz', CUT)]) < 1.0
     assert [cells[pre.output_name(f'{n}.nii.gz', CUT)] for n in ('dose', 'ptv')] == ['1.0', '1.0']
-    assert '; 1 plans cropped, 0 with retained < 0.9; ' in caplog.records[-1].getMessage()
+    assert '; 1 plans cropped, 0 with retained < 0.9; ' in run_summary(caplog)
 
 
 def test_a_cut_non_external_mask_still_counts_in_the_low_retained_count(tmp_path, caplog):
@@ -2999,7 +3004,7 @@ def test_a_cut_non_external_mask_still_counts_in_the_low_retained_count(tmp_path
     with_roi_types(folder, {'body': 'ORGAN', 'ptv': 'PTV'})
     with caplog.at_level('INFO'):
         pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
-    assert '; 1 plans cropped, 1 with retained < 0.9; ' in caplog.records[-1].getMessage()
+    assert '; 1 plans cropped, 1 with retained < 0.9; ' in run_summary(caplog)
 
 
 @pytest.mark.parametrize(('types', 'warning'), [(None, '2 masks count toward retained'),  # a tree converted before dicom metadata
