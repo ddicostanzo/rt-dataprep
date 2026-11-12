@@ -355,6 +355,17 @@ def test_tm_extremes_compare_as_times_across_precision():
     assert metadata._aggregate(samples, True) == {'min': '0830', 'max': '10'}
 
 
+@pytest.mark.parametrize(('samples', 'expected'), [
+    ([('09:30:00', 'TM'), ('0945', 'TM')], {'distinct': ['09:30:00', '0945']}),  # ACR-NEMA TM: string order would put '0945' first (#258)
+    ([('2024.01.02', 'DA'), ('20240101', 'DA')], {'distinct': ['2024.01.02', '20240101']}),
+    ([('20240101120000+0100', 'DT'), ('20240101113000', 'DT')], {'distinct': ['20240101120000+0100', '20240101113000']}),  # an offset changes the instant
+    ([('20240102', 'DA'), ('20240101', 'DA')], {'min': '20240101', 'max': '20240102'}),
+    ([('2024010112', 'DT'), ('20240101113000.25', 'DT')], {'min': '20240101113000.25', 'max': '2024010112'}),
+])
+def test_da_tm_dt_give_min_max_only_when_every_value_is_in_standard_form(samples, expected):
+    assert metadata._aggregate(samples, True) == expected
+
+
 # ---- quiet ----------------------------------------------------------------------------------------------------------
 
 def test_collecting_emits_no_warning_and_no_log_record(tmp_path, caplog):
