@@ -219,6 +219,39 @@ beam-level fields repeat on every row. The columns and types are `rt_dataprep.pl
   `plan.parquet` that pyarrow cannot parse as Parquet, or that is not the table schema, is left out of the preprocessed plan (and its `plan` row), with one warning; any other read failure refuses the patient like other I/O errors.
 - Converted trees made before this version gain `plan.parquet` only on a run with `--overwrite`.
 
+### ion_plan.parquet
+
+A proton pencil-beam-scanning (PBS) RT Ion plan writes `ion_plan.parquet` in its plan folder (after the masks, before `series.json`) instead
+of `plan.parquet`, `beam_mu.nii.gz` and `fluence_mu.nii.gz`, which stay photon-only and are never written for an ion plan. Its `series.json` row has
+`kind` `ion_plan` (modality `RTPLAN`, the plan's FrameOfReferenceUID); `preprocess` copies or re-indexes it like `plan.parquet`, and `manifest`
+lists it in the plan line's `ion_plan` key. For such a plan the `dicom` object (on every row of the plan folder) now also holds `radiation_type`
+(`PROTON`), `beam_type` and `treatment_machine`, read from `IonBeamSequence`.
+
+The file has one row per spot with a non-zero weight. The columns and types are `rt_dataprep.ion_plan_table.ION_SCHEMA`; read them with
+`pyarrow.parquet.read_table`. Rows are in IonBeamSequence order, then control point, then spot map order. Beam and layer fields repeat on every row of their beam or layer.
+
+- Beam: `beam_number`, `beam_name` (nullable), `beam_type`, `radiation_type`, `treatment_machine` (nullable), `scan_mode`, `beam_meterset` (MU per
+  fraction, while `dose.nii.gz` may be the plan total over all fractions), `final_cumulative_meterset_weight`, `number_of_control_points`,
+  `virtual_sad_x`/`virtual_sad_y` (mm, nullable), `snout_id` (nullable), `range_shifter_ids` (list of strings, `[]` when none).
+- Layer (the spot's control point; values DICOM omits are filled forward from the earlier control point): `control_point_index`, `layer_index` (0-based among
+  the control points that carry a spot), `cumulative_meterset_weight`, `nominal_energy` (MeV), `gantry_angle` and `couch_angle` (degrees), `snout_position` (mm,
+  nullable), `scan_spot_tune_id` (nullable), `spot_size_x`/`spot_size_y` (mm, nullable), `number_of_paintings` (nullable),
+  `range_shifter_settings` (list of strings, `[]` when none), `range_shifter_wet` (list of floats, mm water equivalent; `[]` when no shifter, null when a
+  declared shifter has no value), `isocenter_x/y/z` (patient mm) and `isocenter_i/j/k` (the same point as a continuous voxel index of the CT in the same folder).
+- Spot: `spot_index`, `spot_x`/`spot_y` (mm), `spot_weight`, `spot_mu`. Every column not marked nullable is never null.
+- `spot_x` and `spot_y` are at the isocenter plane in the IEC gantry frame, stored as the plan gives them.
+- `spot_index` is the position in the control point's weight list (zero-weight spots keep their gap), i.e. map order, not delivery order (the plan may allow reordering).
+- `spot_mu` is `beam_meterset * spot_weight / final_cumulative_meterset_weight`, the total over all paintings (never divided by `number_of_paintings`).
+  The `spot_mu` of a beam sum to its `beam_meterset` within 1e-4 relative (`ION_WEIGHT_TOLERANCE`), not exactly: real files store spot weights as float32.
+- Only PBS (`ScanMode` MODULATED) proton beams with MU metersets get a table. A SETUP beam is dropped; any other treatment beam (passive scattering, uniform
+  or line scanning, another ion, a CONTINUATION or port-film beam, a Number-of-Pulses unit) gives the plan no table, silently. A proton PBS plan with a missing or inconsistent
+  value (weights that do not add up, a negative weight, a non-finite energy, a missing meterset, ...) gets no table and logs one fixed warning; the plan still converts.
+  The file is therefore absent, never empty, when the plan gets no table.
+- A `preprocess` run with `--initial-resample`, `--resample` or `--reshape` rewrites `isocenter_i/j/k` for the final CT (every other column is unchanged); a run
+  without those steps copies the file unchanged. An `ion_plan.parquet` that is not the table schema is left out with one warning, as for `plan.parquet`.
+- Converted trees made before this version gain `ion_plan.parquet`, and the new `radiation_type`/`beam_type`/`treatment_machine` values of proton plans in their
+  `series.json` `dicom` objects, only on a run with `convert --overwrite`.
+
 ### beam_mu.nii.gz
 
 A photon plan that gets a `plan.parquet` also gets `beam_mu.nii.gz` (after `plan.parquet`, before `series.json`), with a
@@ -406,7 +439,7 @@ these keys:
 | `fov_mask` (optional) | Planning-CT or study-image support-mask filename, relative to its case folder; blank when absent. |
 | `patient_age`, `patient_sex`, `patient_weight`, `study_date`, `series_date`, `manufacturer`, `model`, `institution_name` (all optional) | From the `dicom` object of the case's primary image (a plan's planning CT; an imaging line's own series), `series_date` from that image's `series_date` field. A key the image has no value for is left out of that line, so lines can differ in which of these they carry. A value that varied over the series is the `{"min": ..., "max": ...}` or `{"distinct": [...]}` object, copied as is. They follow the fixed keys (and `fov_mask`) in the order listed; a `series.json` without `dicom` gives only `series_date`. `split` ignores them. |
 | `retained` (optional, plans only) | The lowest dose/mask `retained` of a preprocessed plan (the fraction kept by `--allow-crop`), after the metadata keys; left out on a converted tree or a run without a geometric step. |
-| `plan`, `beam`, `fluence` (optional, plans only) | The file name of the plan's `plan` series.json row (`plan.parquet`), of its `beam` row (`beam_mu.nii.gz`, or its prefixed name after a geometric `preprocess` run) and of its `fluence` row (`fluence_mu.nii.gz`, never renamed); each is left out when the plan has no such row. They follow `retained`, in the order `plan`, `beam`, `fluence`. |
+| `plan`, `beam`, `fluence`, `ion_plan` (optional, plans only) | The file name of the plan's `plan` series.json row (`plan.parquet`), of its `beam` row (`beam_mu.nii.gz`, or its prefixed name after a geometric `preprocess` run), of its `fluence` row (`fluence_mu.nii.gz`, never renamed) and of its `ion_plan` row (`ion_plan.parquet`); each is left out when the plan has no such row. They follow `retained`, in the order `plan`, `beam`, `fluence`, `ion_plan`. |
 
 `masks` and `series` are native JSON lists, `patient_age` and `retained` are numbers, and the optional metadata values may be objects; every other value is a string. The `fov_mask` key appears on every line only
 when at least one usable primary-image mask is present in the tree. Without those masks, the original fourteen keys are
@@ -688,7 +721,7 @@ def load(case_dir):
 train = [load(case) for cases in splits['train'].values() for case in cases]
 ```
 
-In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, `plan`, `beam`, or `fluence`.
+In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, `plan`, `beam`, `fluence`, or `ion_plan`.
 Applicator and line files are gzip-compressed coordinate text, not NIfTI; see [Conversion behavior](#conversion-behavior).
 After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (summed dose) and mask (volume)
 kept on the final grid. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should

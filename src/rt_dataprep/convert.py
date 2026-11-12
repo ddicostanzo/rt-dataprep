@@ -25,7 +25,7 @@ import pydicom
 import SimpleITK as sitk
 from pydicom.datadict import tag_for_keyword
 
-from rt_dataprep import beam_volume, dicom_io, fluence, masks, metadata, plan_table, pool
+from rt_dataprep import beam_volume, dicom_io, fluence, ion_plan_table, masks, metadata, plan_table, pool
 from rt_dataprep import series as ser
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
 from rt_dataprep.series import DIRECTION_ATOL
@@ -36,6 +36,7 @@ PLAN_FOLDER = r'(plan|fx)_\d+'  # organize writes plan_<n>; a legacy tree (OSC r
 REPORT_NAME = 'convert_report.csv'
 CT_NAME, DOSE_NAME, SERIES_NAME = 'planning_ct.nii.gz', 'dose.nii.gz', 'series.json'
 PLAN_NAME, BEAM_NAME, FLUENCE_NAME = 'plan.parquet', 'beam_mu.nii.gz', 'fluence_mu.nii.gz'
+ION_PLAN_NAME = 'ion_plan.parquet'
 SERIES_COLUMNS = ['file', 'kind', 'modality', 'series_description', 'series_instance_uid', 'study_instance_uid',
                   'frame_of_reference_uid', 'series_date', 'roi_name', 'dose_summation_type', 'reg_matrix', 'rtplan_uid',
                   'rtplan_label', 'rtplan_date', 'fractions_planned']
@@ -484,6 +485,12 @@ def _convert_plan(headers, unreadable, case_dir):
             fluence_image, beam_numbers = fluence.fluence_mu(plan, rows)
         except CaseRefused:
             log.warning('convert: %s', fluence.REASON_FLUENCE)
+    try:  # the fourth catch: a malformed proton PBS plan only loses ion_plan.parquet (independent of the photon table; to_table stays outside)
+        ion_rows = _header_call(ion_plan_table.ion_plan_rows, plan, ct)
+    except CaseRefused:
+        log.warning('convert: %s', ion_plan_table.REASON_ION_PLAN)
+        ion_rows = None
+    ion_table = None if ion_rows is None else ion_plan_table.to_table(ion_rows)
     # Everything that can refuse has run: only now does the plan folder appear.
     case_dir.mkdir(parents=True)
     write_atomic(ct, case_dir / CT_NAME)
@@ -500,6 +507,9 @@ def _convert_plan(headers, unreadable, case_dir):
     if table is not None:
         _atomic(lambda temp: plan_table.write_plan_table(table, temp), case_dir / PLAN_NAME)
         files.append(PLAN_NAME)
+    if ion_table is not None:
+        _atomic(lambda temp: ion_plan_table.write_ion_plan_table(ion_table, temp), case_dir / ION_PLAN_NAME)
+        files.append(ION_PLAN_NAME)
     if beam is not None:
         write_atomic(beam, case_dir / BEAM_NAME)
         files.append(BEAM_NAME)
@@ -765,6 +775,8 @@ def _series_rows(plan, struct, ct_slices, dose_heads, rois, files, beam_numbers)
              for file in files if file in roi_names]
     if PLAN_NAME in files:
         rows.append(row(PLAN_NAME, 'plan', [plan], 'RTPLAN', _tag(plan, 'FrameOfReferenceUID'), (metadata.ALL, metadata.RTPLAN)))
+    if ION_PLAN_NAME in files:
+        rows.append(row(ION_PLAN_NAME, 'ion_plan', [plan], 'RTPLAN', _tag(plan, 'FrameOfReferenceUID'), (metadata.ALL, metadata.RTPLAN)))
     if BEAM_NAME in files:
         rows.append(row(BEAM_NAME, 'beam', [plan], 'RTPLAN', _tag(ct_head, 'FrameOfReferenceUID'), (metadata.ALL, metadata.RTPLAN)))
     if FLUENCE_NAME in files:
