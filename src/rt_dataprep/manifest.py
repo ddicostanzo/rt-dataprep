@@ -3,7 +3,7 @@ manifest.jsonl of a converted or preprocessed tree (spec: f3-manifest-split; JSO
 and one per series of each <patient>/study_<n>/ that holds one (imaging-cases spec D9, D14-D16).
 
 Each plan goes through preprocess.check_rows, which validates series.json and reads the CT header only; the `series` key (a list of objects) then
-reads the header of each identity series; an entry gains `fov_mask` when fovmask_<file> beside it is on the CT grid. A plan line ends with `retained`, the lowest dose/mask `retained` of its series.json, when a preprocess run set one (#225), then `plan`, `beam` and `fluence`, the file names of its `plan`, `beam` and `fluence` series.json rows, each only when that row exists (#280, #279). A plan check_rows refuses is left out and counted. A patient folder whose name is not UTF-8 is left out and counts 1 (#260). A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.json items, and a
+reads the header of each identity series; an entry gains `fov_mask` when fovmask_<file> beside it is on the CT grid. A plan line ends with `retained`, the lowest dose/mask `retained` of its series.json, when a preprocess run set one (#225), then `plan`, `beam`, `fluence` and `ion_plan`, the file names of its `plan`, `beam`, `fluence` and `ion_plan` series.json rows, each only when that row exists (#280, #279, #281). A plan check_rows refuses is left out and counted. A patient folder whose name is not UTF-8 is left out and counts 1 (#260). A study goes through preprocess.check_study_rows; one it refuses is left out and counts its series.json items, and a
 series whose header cannot be read is left out and counted on its own. The tree is only read; manifest.jsonl (and its dated copy, manifest_<UTC time>.jsonl) in the root is the one place the patient folder names
 appear. The log line carries counts only.
 """
@@ -46,8 +46,8 @@ def _retained(kept):
 
 
 def _files(kept):
-    """{'plan': file, 'beam': file, 'fluence': file} for the plan.parquet, beam volume and fluence map rows of a plan, in that order; a key is left out when its row is absent (#280, #279)."""
-    files = {kind: next((row['file'] for row in kept if row['kind'] == kind), None) for kind in ('plan', 'beam', 'fluence')}
+    """{'plan': file, 'beam': file, 'fluence': file, 'ion_plan': file} for the plan.parquet, beam volume, fluence map and ion_plan.parquet rows of a plan, in that order; a key is left out when its row is absent (#280, #279)."""
+    files = {kind: next((row['file'] for row in kept if row['kind'] == kind), None) for kind in ('plan', 'beam', 'fluence', 'ion_plan')}
     return {kind: file for kind, file in files.items() if file}
 
 

@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "metadata": {
+    "title": "convert: proton PBS RTPLAN as ion_plan.parquet, metadata IonBeamSequence fallback (#281)",
+    "spec": "docs/specs/2026-11-11-proton-plans.md",
+    "branch": "feat/proton-plans",
+    "profile": "project-profile.yml",
+    "created": "2026-11-11"
+  },
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "metadata: RTPLAN radiation_type, beam_type and treatment_machine fall back to IonBeamSequence",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/metadata.py",
+        "tests/test_metadata.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/metadata.py": "modify",
+        "tests/test_metadata.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_metadata.py with synthetic headers built through save_as/dcmread (existing helpers in that file and tests/synthetic_dicom.py). Change only the three RTPLAN catalog entries to tuples of paths (spec Integration, metadata bullet); metadata._compute already returns the first path with samples.",
+      "criteria": [
+        "metadata.collect on an RT Ion plan header with IonBeamSequence items (RadiationType PROTON, BeamType STATIC, TreatmentMachineName set) and no BeamSequence returns those values for radiation_type, beam_type and treatment_machine",
+        "treatment_machine paths are, in order: BeamSequence[*].TreatmentMachineName, IonBeamSequence[*].TreatmentMachineName, TreatmentMachineSequence[*].TreatmentMachineName; radiation_type and beam_type are (BeamSequence[*].X, IonBeamSequence[*].X)",
+        "For a photon plan and a brachy plan the three values are exactly what they were before the change (a test pins them)",
+        "metadata.keys(metadata.RTPLAN) is unchanged (same names, same order)",
+        "Every pre-existing test in tests/test_metadata.py passes unmodified"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "ion_plan_table module: ION_SCHEMA, REASON_ION_PLAN, ion_plan_rows(plan, ct) one row per non-zero PBS spot, plus a synthetic PBS plan writer",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/ion_plan_table.py",
+        "tests/test_ion_plan_table.py",
+        "tests/synthetic_dicom.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/ion_plan_table.py": "create",
+        "tests/test_ion_plan_table.py": "create",
+        "tests/synthetic_dicom.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_ion_plan_table.py, unit level, mirroring tests/test_plan_table.py (plans written with a new tests/synthetic_dicom.write_pbs_rtplan(path, struct_sop_uid, beams=None, fractions=1, sop_uid=None, frame_uid=None, **meta) and read back with dcmread through the same header reader test_plan_table uses; a small SimpleITK CT image for isocenter_i/j/k). write_ion_rtplan stays unchanged. Columns, None rules (order RadiationType, ScanMode, PrimaryDosimeterUnit; all treatment beams pass the None pass before any row is built), fill-forward and Malformed checks exactly per the spec. Rows are dicts keyed by ION_SCHEMA names, as plan_table does; tag reads with .get; module raises only CaseRefused(REASON_ION_PLAN), no try/except, no quieting. Compute the isocenter continuous index once per control point. The 50 000-spot timing test is marked slow; record its wall time in findings.md.",
+      "criteria": [
+        "AC1 spot MU: an Eclipse-style 2-beam plan, 3 layers per beam (even CP carries weights, odd CP all zeros, last CP zeros), binary-exact weights: one row per non-zero spot; per beam sum of spot_mu equals beam_meterset within 1e-9 relative; one spot's spot_mu equals beam_meterset * w / final computed by hand; layer_index runs 0..2; a zero-weight spot inside a carrying CP has no row and spot_index of the next spot skips over it; spot_x/spot_y are the map pairs as stored",
+        "AC1b: the same plan with float32-noise weights (weights cast through numpy float32) and cumulative weights written as decimal strings converts, and per-beam sum of spot_mu is within 1e-4 relative of beam_meterset",
+        "AC1c meterset by number: on a read-back 2-beam PBS plan whose FractionGroupSequence[0].ReferencedBeamSequence the test reorders to [beam 2: 300 MU, beam 1: 100 MU], beam 1's sum of spot_mu equals 100 and beam 2's equals 300 within 1e-9 relative",
+        "AC2 malformed: each of layer sum != next-CP weight step, last CP with non-zero weights, beam total sum of weights off final by more than 1e-4 relative while every CP passes, negative weight, odd ScanSpotPositionMap length, NumberOfScanSpotPositions != number of weights, missing BeamMeterset, duplicate BeamNumber, duplicate ReferencedBeamNumber, non-finite NominalBeamEnergy, CP 0 cumulative weight != 0, last CP weight != final, decreasing cumulative weight, final weight 0, missing PrimaryDosimeterUnit on a PROTON MODULATED beam, and a declared range shifter with no setting at CP 0 raises CaseRefused with str(reason) == REASON_ION_PLAN when ion_plan_rows is called directly (no _header_call), as test_plan_table.refused does",
+        "AC3 vendor variation: a RayStation-style beam (a single-spot layer whose weight reads back as a float not a MultiValue; NumberOfPaintings 2; odd CP repeats the spot map with zero weights) gives the same spot rows as its Eclipse-style twin, and number_of_paintings 2 does not change spot_mu; a range shifter set IN at CP 0 and absent from later CPs is filled forward; two range shifters keep RangeShifterSequence order in range_shifter_ids, range_shifter_settings and range_shifter_wet, joined on ReferencedRangeShifterNumber = RangeShifterNumber; two declared shifters, one without RangeShifterWaterEquivalentThickness: range_shifter_wet is null (not a shorter list, not refused) while range_shifter_settings keeps both values",
+        "AC4 None cases return None (no exception): no IonBeamSequence; both BeamSequence and IonBeamSequence; ScanMode NONE, UNIFORM, MODULATED_SPEC or absent; any present PrimaryDosimeterUnit other than MU (NP, MINUTE) - only absent/empty is malformed; RadiationType ION; a CONTINUATION beam; only SETUP beams; the unchanged write_ion_rtplan fixture. A SETUP beam with no BeamMeterset beside PBS treatment beams is ignored. The None pass covers all treatment beams before any row is built: a plan whose beam 1 is PROTON MODULATED with no PrimaryDosimeterUnit and whose beam 2 is PROTON MODULATED NP returns None (no CaseRefused), in either beam order",
+        "AC5 schema: to_table(rows).schema == ION_SCHEMA on a plan with no range shifter and no optional tags (range_shifter_ids, range_shifter_settings, range_shifter_wet are empty lists; nullable columns keep their declared types); columns are exactly those in the spec's three column tables, in that order; no lateral spreading device or range modulator column exists",
+        "AC6 isocenter_i/j/k equal ct.TransformPhysicalPointToContinuousIndex of the isocenter; fill-forward of energy, gantry, couch, snout position, tune id, spot size, paintings and isocenter from earlier CPs works when later CPs omit them; ScanSpotPositionMap and weights are never filled forward",
+        "AC7 (slow): a 2-beam plan with 50 000 non-zero spots builds ion_plan_rows plus to_table in under 5 s",
+        "AC8: an AST test shows ion_plan_table.py raises only CaseRefused(REASON_ION_PLAN), has no try/except and no quiet_call/_pydicom_quiet, and reads Dataset tags with .get (no ast.Attribute whose attr satisfies pydicom.datadict.tag_for_keyword(attr) is not None); REASON_ION_PLAN is the spec's fixed string",
+        "Every pre-existing test (tests/test_plan_table.py, tests/test_convert.py) still passes unmodified; ion_plan_table does not import plan_table, beam_volume or fluence"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "preprocess and manifest carry ion_plan.parquet: new kind, kept name, geometric re-index against ION_SCHEMA",
+      "depends_on": [
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "src/rt_dataprep/manifest.py",
+        "tests/test_preprocess.py",
+        "tests/test_manifest.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "src/rt_dataprep/manifest.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "tests/test_manifest.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_preprocess.py and tests/test_manifest.py following the existing plan.parquet / fluence kind tests there (a series.json row of kind ion_plan beside a CT, with an ion_plan.parquet written via ion_plan_table.to_table/write_ion_plan_table from synthetic rows). index_plan_table gains a schema argument (plan -> plan_table.SCHEMA, ion_plan -> ion_plan_table.ION_SCHEMA) and uses that schema's fields for the rewritten isocenter_i/j/k columns. REASON_PLAN_INDEX wording names a plan table rather than plan.parquet only. No convert change yet (task-04). Record in findings.md the wall time of a geometric run on a 50 000-row ion_plan.parquet (index_plan_table transforms per row); over ~2 s is a hardening issue, not a fix in this PR.",
+      "criteria": [
+        "'ion_plan' is in preprocess.KINDS, in both name/copy tuples (preprocess.py:767 and :775) and treated like 'plan' in the geometric re-index branch; a geometric run writes ion_plan.parquet under the same name with isocenter_i/j/k equal to the continuous index on the final CT grid and every other column unchanged",
+        "A non-geometric run copies ion_plan.parquet byte-identical under the same name",
+        "An ion_plan.parquet whose schema is not ION_SCHEMA (e.g. a photon plan table under that name) is skipped on a geometric run with the REASON_PLAN_INDEX warning, as plan.parquet is today; a plan.parquet still checks against plan_table.SCHEMA",
+        "manifest's file keys include ion_plan (optional, absent when there is no ion_plan row), after plan, beam and fluence",
+        "Every pre-existing test in tests/test_preprocess.py and tests/test_manifest.py passes, changing only assertions that pin the exact REASON_PLAN_INDEX text or the exact manifest key tuple"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "convert writes ion_plan.parquet and its series.json row; docs, .gitignore and compliance rule",
+      "depends_on": [
+        "task-01",
+        "task-02",
+        "task-03"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_convert.py",
+        "README.md",
+        ".gitignore",
+        "project-profile.yml"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_convert.py": "modify",
+        "README.md": "modify",
+        ".gitignore": "modify",
+        "project-profile.yml": "modify"
+      },
+      "test_approach": "TDD in tests/test_convert.py with full synthetic cases (the existing plan_writer parametrisation and fixtures) using tests/synthetic_dicom.write_pbs_rtplan. convert: ION_PLAN_NAME = 'ion_plan.parquet'; ion_plan_rows runs through _header_call in its own try/except CaseRefused (logging 'convert: %s', REASON_ION_PLAN) after the plan-table catch and before case_dir.mkdir; to_table outside _header_call; written after plan.parquet; _series_rows appends an ion_plan row like the plan row. Docs per spec Integration.",
+      "criteria": [
+        "A PBS plan case converts with files containing ion_plan.parquet and none of plan.parquet, beam_mu.nii.gz, fluence_mu.nii.gz; series.json has one row kind ion_plan, modality RTPLAN, file ion_plan.parquet, frame_of_reference_uid the plan's, with the same key set as every other row",
+        "The written ion_plan.parquet equals ion_plan_table.to_table(ion_plan_rows(header, read(planning_ct.nii.gz))), schema included, as the photon plan.parquet test at tests/test_convert.py:1895 does",
+        "The series.json dicom object of the PBS plan's ion_plan row and of its ct row has radiation_type PROTON, and beam_type and treatment_machine from IonBeamSequence",
+        "A malformed PBS plan (layer sum mismatch) converts without ion_plan.parquet and the log holds REASON_ION_PLAN and no SOPInstanceUID, label or patient id; a tag-level fault also logs REASON_ION_PLAN",
+        "A PBS plan with a malformed DS NominalBeamEnergy (whatever fault value the synthetic writer can store; nan is acceptable) converts without ion_plan.parquet; inside a warnings-recording scope around the convert call only, no warning and no log record contains the value (vault: pydicom-validates-lazily-on-first-tag-access)",
+        "The unchanged write_ion_rtplan case and a passive-scatter (ScanMode NONE) PBS-writer case convert with no ion_plan.parquet and no REASON_ION_PLAN in the log",
+        "Every pre-existing test in tests/test_convert.py, tests/test_plan_table.py, tests/test_beam_volume.py and tests/test_fluence.py passes unmodified (photon path unchanged)",
+        "README documents ion_plan.parquet: its columns with units and nullability, row order (IonBeamSequence order, then control point, then map order), that the file is absent (never empty) when the plan gets no table, PBS MODULATED only with MU metersets, spot_x/spot_y at the isocenter plane in the IEC gantry frame, spot_index is map order not delivery order, sum of spot_mu matches BeamMeterset within 1e-4 relative, preprocess re-indexes isocenter_i/j/k, and that it and the new dicom metadata values reach existing trees only via convert --overwrite",
+        ".gitignore and the project-profile.yml phi compliance rule list ion_plan.parquet beside plan.parquet",
+        "Full suite (uv run --group dev pytest -q --tb=short) and ruff pass"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01",
+      "task-02"
+    ],
+    [
+      "task-03"
+    ],
+    [
+      "task-04"
+    ]
+  ]
+}

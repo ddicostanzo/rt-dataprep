@@ -7,7 +7,7 @@ and the crop/pad follow torchio 1.2.1 (floor size, centre-preserving origin, cei
 CT image is the one reference grid: dose and masks are each resampled once onto it. Direction is never re-derived.
 Every compute call in the three process_* entry points runs inside dicom_io.quiet_call; a failure is one fixed REASON_.
 
-preprocess() reads each plan's series.json (kinds ct, dose, mask, applicator, line, plan, beam, fluence, and the registered series, each resampled once onto the final CT) and each study folder's
+preprocess() reads each plan's series.json (kinds ct, dose, mask, applicator, line, plan, beam, fluence, ion_plan, and the registered series, each resampled once onto the final CT) and each study folder's
 (<patient>/study_<n>/, one case per series: a CT through every step that is on, an MR or PT through all but the HU rescale),
 and writes a separate tree plus preprocess_report.csv in the output root. Log lines and exceptions carry fixed REASON_ constants only; the report
 is the one place the patient folder names appear.
@@ -28,7 +28,7 @@ import pyarrow.parquet as pq
 import SimpleITK as sitk
 
 from rt_dataprep import convert as conv
-from rt_dataprep import dicom_io, plan_table, pool
+from rt_dataprep import dicom_io, ion_plan_table, plan_table, pool
 from rt_dataprep.dicom_io import CaseRefused, quiet_call, write_report
 from rt_dataprep.series import DIRECTION_ATOL, IDENTITY, IMAGE_MODALITIES, reg_matrix_array
 
@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 
 REPORT_NAME = 'preprocess_report.csv'
 OUTCOME_PREPROCESSED = 'preprocessed'
-KINDS = ('ct', 'dose', 'mask', 'applicator', 'line', 'plan', 'beam', 'fluence')
+KINDS = ('ct', 'dose', 'mask', 'applicator', 'line', 'plan', 'beam', 'fluence', 'ion_plan')
 
 REASON_OUTSIDE_INPUT = 'output root is the converted root or inside it'
 REASON_NO_STEPS = 'no preprocessing step is on'
@@ -62,7 +62,7 @@ REASON_FILE_MISSING = 'a series.json row names a file that is not in the case fo
 REASON_STUDY_MODALITY = 'a series.json series row has a modality other than CT, MR or PT, or one that differs from its file name'
 REASON_STUDY_NAME = 'a series.json series row names a file that is not a series volume'
 REASON_GRID = 'a dose, mask or beam volume is not on the planning CT grid'
-REASON_PLAN_INDEX = 'plan.parquet is unreadable or not the plan table schema; left out of the output'
+REASON_PLAN_INDEX = 'a plan table (plan.parquet or ion_plan.parquet) is unreadable or not its schema; left out of the output'
 REASON_CROP = 'a dose or mask would lose voxels to the final grid'
 REASON_MASK_RETENTION = 'a resampled mask retains less than the configured minimum physical volume'
 REASON_MASK_RETENTION_LIMIT = 'minimum mask retention must be finite, greater than 0 and at most 1'
@@ -736,20 +736,20 @@ def native_retained(native, final):
     return quiet_call(run, REASON_INTERNAL)
 
 
-def index_plan_table(source, path, final):
-    """Write `source` (plan.parquet) to `path` with isocenter_i/j/k replaced by the continuous index of isocenter_x/y/z on `final`; False, nothing written, when it is
-    unreadable or not plan_table.SCHEMA (compared as fields: file metadata is not part of it). An OSError propagates."""
+def index_plan_table(source, path, final, schema=plan_table.SCHEMA):
+    """Write `source` (plan.parquet, or ion_plan.parquet with schema=ion_plan_table.ION_SCHEMA) to `path` with isocenter_i/j/k replaced by the continuous index of
+    isocenter_x/y/z on `final`; False, nothing written, when it is unreadable or not `schema` (compared as fields: file metadata is not part of it). An OSError propagates."""
     try:
         table = pq.read_table(source)
     except pa.ArrowInvalid:
         return False
-    if table.schema != plan_table.SCHEMA:
+    if table.schema != schema:
         return False
     points = zip(*(table[name].to_pylist() for name in ('isocenter_x', 'isocenter_y', 'isocenter_z')), strict=True)
     indices = list(zip(*(final.TransformPhysicalPointToContinuousIndex(p) for p in points), strict=True))
     for name, values in zip(('isocenter_i', 'isocenter_j', 'isocenter_k'), indices or [[]] * 3, strict=True):
-        table = table.set_column(table.schema.get_field_index(name), plan_table.SCHEMA.field(name), pa.array(values, pa.float64()))
-    conv._atomic(lambda temp: plan_table.write_plan_table(table, temp), path)
+        table = table.set_column(table.schema.get_field_index(name), schema.field(name), pa.array(values, pa.float64()))
+    conv._atomic(lambda temp: pq.write_table(table, temp), path)
     return True
 
 
@@ -764,15 +764,15 @@ def preprocess_plan(plan_dir, out_dir, steps):
     for row in kept:  # the CT first: its final grid is the reference of the rest
         kind, source = row['kind'], plan_dir / row['file']
         cell = ''  # series.json `retained`: only a dose or mask of a geometric run
-        name = row['file'] if kind in ('applicator', 'line', 'plan', 'fluence') else output_name(row['file'], steps, ct=kind == 'ct', image=kind == 'ct')
+        name = row['file'] if kind in ('applicator', 'line', 'plan', 'fluence', 'ion_plan') else output_name(row['file'], steps, ct=kind == 'ct', image=kind == 'ct')
         if kind == 'ct':
             final = process_ct(read_image(source), steps)
             conv.write_atomic(final, out_dir / name)
-        elif kind == 'plan' and geometric:  # isocenter_i/j/k always index the CT of the folder
-            if not index_plan_table(source, out_dir / name, final):
+        elif kind in ('plan', 'ion_plan') and geometric:  # isocenter_i/j/k always index the CT of the folder
+            if not index_plan_table(source, out_dir / name, final, plan_table.SCHEMA if kind == 'plan' else ion_plan_table.ION_SCHEMA):
                 log.warning('preprocess: %s', REASON_PLAN_INDEX)
                 continue
-        elif kind in ('applicator', 'line', 'plan', 'fluence') or not geometric:  # point text, fluence (a collimator-frame map, no CT grid) and (non-geometric) plan.parquet: copied unchanged
+        elif kind in ('applicator', 'line', 'plan', 'fluence', 'ion_plan') or not geometric:  # point text, fluence (a collimator-frame map, no CT grid) and (non-geometric) plan tables: copied unchanged
             shutil.copyfile(source, out_dir / name)
         else:  # one image at a time: read, resampled, written, released
             native = read_image(source)

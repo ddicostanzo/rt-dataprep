@@ -25,3 +25,4 @@ preprocess_report*.csv
 series.csv
 series.json
 plan.parquet
+ion_plan.parquet

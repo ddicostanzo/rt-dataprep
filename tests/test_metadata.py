@@ -268,6 +268,30 @@ def test_treatment_machine_falls_back_to_treatment_machine_sequence(tmp_path):
     assert got['treatment_machine'] == 'SYNTHETIC_LINAC'
 
 
+def test_ion_plan_falls_back_to_ion_beam_sequence(tmp_path):
+    got = plan_collect(tmp_path, IonBeamSequence=[dict(RadiationType='PROTON', BeamType='STATIC',
+                                                       TreatmentMachineName='SYNTHETIC_GANTRY')])
+    assert (got['radiation_type'], got['beam_type'], got['treatment_machine']) == ('PROTON', 'STATIC', 'SYNTHETIC_GANTRY')
+    got = plan_collect(tmp_path / 'b', IonBeamSequence=[dict(TreatmentMachineName='SYNTHETIC_GANTRY')],
+                       TreatmentMachineSequence=[dict(TreatmentMachineName='SYNTHETIC_OTHER')])
+    assert got['treatment_machine'] == 'SYNTHETIC_GANTRY'  # IonBeamSequence ranks above TreatmentMachineSequence
+    got = plan_collect(tmp_path / 'c', BeamSequence=[dict(RadiationType='PHOTON', BeamType='DYNAMIC', TreatmentMachineName='SYNTHETIC_LINAC')],
+                       IonBeamSequence=[dict(RadiationType='PROTON', BeamType='STATIC', TreatmentMachineName='SYNTHETIC_GANTRY')])
+    assert (got['radiation_type'], got['beam_type'], got['treatment_machine']) == ('PHOTON', 'DYNAMIC', 'SYNTHETIC_LINAC')  # BeamSequence first
+
+
+def test_photon_and_brachy_plans_keep_their_beam_values_and_key_order(tmp_path):
+    got = plan_collect(tmp_path, **PLAN_TAGS)
+    assert (got['radiation_type'], got['beam_type'], got['treatment_machine']) == ('PHOTON', 'STATIC', 'SYNTHETIC_LINAC')
+    got = plan_collect(tmp_path / 'b', TreatmentMachineSequence=[dict(TreatmentMachineName='SYNTHETIC_AFTERLOADER')])
+    assert 'radiation_type' not in got and 'beam_type' not in got
+    assert got['treatment_machine'] == 'SYNTHETIC_AFTERLOADER'
+    assert keys(RTPLAN) == (
+        'plan_time', 'plan_intent', 'approval_status', 'plan_description', 'prescription_dose', 'radiation_type',
+        'beam_type', 'treatment_machine', 'source_isotope', 'source_strength', 'source_strength_date',
+        'source_strength_time', 'number_of_beams', 'brachy_technique', 'brachy_type')
+
+
 def test_reg_keys_one_and_two_matrix_types(tmp_path):
     matrix = sd.transformation_matrix()
     tags = dict(Manufacturer='SYNTHETIC_REGMAKER', ContentDate='20240102', ContentTime='111111')

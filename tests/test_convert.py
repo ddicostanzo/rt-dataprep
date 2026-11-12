@@ -27,7 +27,7 @@ from test_dicom_io import fail_python_open as fail_open  # workers=1 where used:
 from rt_dataprep import beam_volume
 from rt_dataprep import convert as conv
 from rt_dataprep import dicom_io, fluence
-from rt_dataprep import masks, plan_table
+from rt_dataprep import ion_plan_table, masks, plan_table
 from rt_dataprep.organize import organize
 from rt_dataprep.dicom_io import CaseRefused
 
@@ -2165,6 +2165,119 @@ def test_a_bug_in_beam_mu_propagates_and_leaves_no_plan_folder(tree, monkeypatch
     def bug(*args):
         raise RuntimeError('SYNTHETIC bug')
     monkeypatch.setattr(beam_volume, 'beam_mu', bug)
+    case = org.parent / 'case'
+    with pytest.raises(RuntimeError):
+        run_plan(org / PID / 'plan_1', case)
+    assert not case.exists()
+
+
+# ---------------------------------------------------------------- ion_plan.parquet (proton-plans task-04)
+
+def pbs_plan(tree, beams=None, **kwargs):
+    """(plan, rows, out) of a converted tree whose plan is a proton PBS RT Ion plan of `beams` (default: the writer's two)."""
+    plan_meta = dict(tags=dict(RTPlanLabel='SYNTHETIC_PLAN'), **({'beams': beams} if beams else {}), **kwargs.pop('plan_meta', {}))  # no label argument
+    return one_plan(tree, plan_meta=plan_meta, plan_writer=sd.write_pbs_rtplan, **kwargs)
+
+
+def test_a_pbs_plan_converts_with_ion_plan_parquet_and_none_of_the_photon_files(tree):
+    plan, rows, out = pbs_plan(tree, rois=[BOX])
+    row = row_of(rows)
+    assert row.outcome == conv.OUTCOME_CONVERTED
+    assert row.files == ['planning_ct.nii.gz', 'liver.nii.gz', 'ion_plan.parquet', 'series.json']
+    folder = out / PID / 'plan_1'
+    assert sorted(p.name for p in folder.iterdir()) == sorted(row.files)
+    assert conv.ION_PLAN_NAME == 'ion_plan.parquet'
+    header = dicom_io.read_header_core(plan['folder'] / 'plan.dcm')
+    expected = ion_plan_table.to_table(ion_plan_table.ion_plan_rows(header, read(folder / 'planning_ct.nii.gz')))
+    assert pq.read_table(folder / 'ion_plan.parquet').equals(expected) and expected.num_rows == 16  # 2 beams x (2 + 3 + 3) non-zero spots
+    assert pq.read_schema(folder / 'ion_plan.parquet').equals(ion_plan_table.ION_SCHEMA)
+
+
+def test_a_pbs_plan_series_json_has_one_ion_plan_row_with_the_plan_frame_and_the_proton_metadata(tree):
+    plan, _, out = pbs_plan(tree, rois=[BOX], plan_meta=dict(frame_uid=sd.generate_uid()))
+    listed = series_rows(out)
+    assert [r['kind'] for r in listed] == ['ct', 'mask', 'ion_plan']
+    ion = listed[-1]
+    ds = pydicom.dcmread(plan['folder'] / 'plan.dcm')
+    assert (ion['file'], ion['modality'], ion['frame_of_reference_uid']) == ('ion_plan.parquet', 'RTPLAN', str(ds.FrameOfReferenceUID))
+    assert ion['frame_of_reference_uid'] != listed[0]['frame_of_reference_uid']
+    full = sf.read(out / PID / 'plan_1')
+    assert all(list(r) == [*SERIES_COLUMNS, 'dicom'] for r in full)
+    for r in (full[0], full[-1]):  # the ct row and the ion_plan row
+        assert (r['dicom']['radiation_type'], r['dicom']['beam_type'], r['dicom']['treatment_machine']) == ('PROTON', 'STATIC', 'SYNTHETIC_GANTRY')
+    assert full[-1]['dicom'] == conv.metadata.collect([ds], (conv.metadata.ALL, conv.metadata.RTPLAN)) | conv.metadata.collect(
+        [ds], (conv.metadata.RTPLAN,))
+
+
+def energy_nan():
+    beam = sd.pbs_beam(1, 100.0)
+    beam['IonControlPointSequence'][2]['NominalBeamEnergy'] = 'nan'
+    return beam
+
+
+def layer_sum_off():
+    beam = sd.pbs_beam(1, 100.0)
+    beam['IonControlPointSequence'][0]['ScanSpotMetersetWeights'] = [0.125, 0.0, 0.2]
+    return beam
+
+
+def test_a_malformed_pbs_plan_converts_without_ion_plan_parquet_and_logs_only_the_fixed_reason(tree, caplog):
+    caplog.set_level(logging.DEBUG)
+    plan, rows, out = pbs_plan(tree, beams=[layer_sum_off(), sd.pbs_beam(2, 300.0)], rois=[BOX])
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED and row_of(rows).files == ['planning_ct.nii.gz', 'liver.nii.gz', 'series.json']
+    assert not (out / PID / 'plan_1' / 'ion_plan.parquet').exists()
+    assert [r['kind'] for r in series_rows(out)] == ['ct', 'mask']
+    assert len(logged(caplog, ion_plan_table.REASON_ION_PLAN)) == 1
+    secrets = [plan['plan'], 'SYNTHETIC_PLAN', 'SYNTHETIC_B1', 'SYNTHETIC_GANTRY', plan['ct']['frame_uid'], PID]
+    assert all(secret not in caplog.text for secret in secrets)
+    assert plan_table.REASON_PLAN_TABLE not in caplog.text and beam_volume.REASON_BEAM_VOLUME not in caplog.text
+
+
+def test_a_nan_energy_is_neither_warned_nor_logged_by_the_convert_call(tree, caplog):
+    org, out = tree
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')  # the writer's own validation warning
+        make_plan(org / PID / 'plan_1', plan_writer=sd.write_pbs_rtplan, plan_meta=dict(beams=[energy_nan()]))
+    caplog.set_level(logging.DEBUG)
+    caplog.clear()  # the writer's own record names the value
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        rows = conv.convert(org, out).rows
+    assert row_of(rows).files == ['planning_ct.nii.gz', 'series.json']
+    assert caught == [] and 'nan' not in caplog.text.lower()
+    assert len(logged(caplog, ion_plan_table.REASON_ION_PLAN)) == 1
+
+
+def test_a_tag_level_fault_in_the_ion_table_logs_the_fixed_reason(tree, caplog, monkeypatch):
+    def fault(plan, ct):
+        return plan.IonBeamSequence[0].ScanSpotTuneID  # a keyword the beam item lacks: pydicom's AttributeError
+    monkeypatch.setattr(ion_plan_table, 'ion_plan_rows', fault)
+    caplog.set_level(logging.DEBUG)
+    plan, rows, out = pbs_plan(tree, rois=[BOX])
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED and not (out / PID / 'plan_1' / 'ion_plan.parquet').exists()
+    assert len(logged(caplog, ion_plan_table.REASON_ION_PLAN)) == 1
+    assert all(secret not in caplog.text for secret in [plan['plan'], 'SYNTHETIC_PLAN', 'SYNTHETIC_B1', PID])
+
+
+@pytest.mark.parametrize('kwargs', [dict(plan_writer=sd.write_ion_rtplan),
+                                    dict(plan_writer=sd.write_pbs_rtplan, plan_meta=dict(beams=[sd.pbs_beam(tags=dict(ScanMode='NONE'))]))],
+                         ids=['no-scan-mode', 'passive-scatter'])
+def test_ion_plans_that_are_not_pbs_get_no_ion_plan_parquet_and_no_log_line(tree, kwargs, caplog):
+    caplog.set_level(logging.DEBUG)
+    _, rows, out = one_plan(tree, rois=[BOX], **kwargs)
+    assert row_of(rows).files == ['planning_ct.nii.gz', 'liver.nii.gz', 'series.json']
+    assert ion_plan_table.REASON_ION_PLAN not in caplog.text and plan_table.REASON_PLAN_TABLE not in caplog.text
+    assert not (out / PID / 'plan_1' / 'ion_plan.parquet').exists()
+    assert [r['kind'] for r in series_rows(out)] == ['ct', 'mask']
+
+
+def test_a_bug_in_the_ion_table_builder_propagates_and_leaves_no_plan_folder(tree, monkeypatch):
+    org, _ = tree
+    make_plan(org / PID / 'plan_1', plan_writer=sd.write_pbs_rtplan)
+
+    def bug(plan, ct):
+        raise RuntimeError('SYNTHETIC bug')
+    monkeypatch.setattr(ion_plan_table, 'ion_plan_rows', bug)
     case = org.parent / 'case'
     with pytest.raises(RuntimeError):
         run_plan(org / PID / 'plan_1', case)

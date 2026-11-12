@@ -1691,6 +1691,85 @@ def test_a_tree_without_a_fluence_row_is_unaffected(tmp_path):
     assert not (done / FLUENCE_NAME).exists() and all(r['kind'] != 'fluence' for r in sf.read(done))
 
 
+# ---- proton-plans task-03: ion_plan.parquet is carried like plan.parquet, checked against ION_SCHEMA ----
+
+ION_NAME = conv.ION_PLAN_NAME
+
+
+def add_ion_plan(tmp_path, folder, kind='ion_plan', name=ION_NAME, table=None):
+    """A proton plan table (ion_plan_rows of a synthetic PBS plan on the folder's CT) and its series.json row; `table` replaces the parquet."""
+    import synthetic_dicom as sd
+
+    from rt_dataprep import ion_plan_table
+    path = tmp_path / 'ion.dcm'
+    sd.write_pbs_rtplan(path, sd.generate_uid())
+    rows = ion_plan_table.ion_plan_rows(dicom_io.read_header(path), sitk.ReadImage(str(folder / conv.CT_NAME)))
+    ion_plan_table.write_ion_plan_table(table if table is not None else ion_plan_table.to_table(rows), folder / name)
+    rows = sf.read(folder)
+    save_rows(folder, [*rows, {**rows[-1], **series_row(name, kind, modality='RTPLAN')}])  # a converted tree's rows also carry `dicom`
+
+
+@pytest.mark.parametrize('steps', [PreprocessSteps(rescale=True), PreprocessSteps(ahe=True)], ids=['rescale', 'ahe'])
+def test_an_ion_plan_parquet_is_copied_byte_identical_on_a_non_geometric_run(tmp_path, steps):
+    folder, _ = write_plan(tmp_path / 'converted')
+    add_ion_plan(tmp_path, folder)
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
+    assert plan_row(report).outcome == 'preprocessed' and ION_NAME in plan_row(report).files
+    assert (done / ION_NAME).read_bytes() == (folder / ION_NAME).read_bytes()
+    assert [(r['file'], r['retained']) for r in sf.read(done) if r['kind'] == 'ion_plan'] == [(ION_NAME, '')]
+
+
+@pytest.mark.parametrize('steps', GEOMETRIC, ids=['four_steps', 'resample', 'reshape'])
+def test_a_geometric_run_rewrites_the_ion_plan_parquet_isocenter_index_for_the_final_ct(tmp_path, steps):
+    import pyarrow.parquet as pq
+
+    from rt_dataprep import ion_plan_table
+    folder, _ = write_plan(tmp_path / 'converted')
+    add_ion_plan(tmp_path, folder)
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
+    assert plan_row(report).outcome == 'preprocessed' and ION_NAME in plan_row(report).files
+    final = sitk.ReadImage(str(done / pre.output_name(conv.CT_NAME, steps, ct=True, image=True)))
+    before, after = pq.read_table(folder / ION_NAME), pq.read_table(done / ION_NAME)
+    assert after.schema == ion_plan_table.ION_SCHEMA and after.num_rows == before.num_rows > 0
+    index_columns = ('isocenter_i', 'isocenter_j', 'isocenter_k')
+    for name in before.column_names:
+        if name not in index_columns:
+            assert after[name].equals(before[name]), name
+    for name in index_columns:
+        assert after[name].null_count == 0
+    points = zip(*(after[name].to_pylist() for name in ('isocenter_x', 'isocenter_y', 'isocenter_z')), strict=True)
+    expected = np.array([final.TransformPhysicalPointToContinuousIndex(p) for p in points])
+    assert np.allclose(np.column_stack([after[name].to_numpy() for name in index_columns]), expected, rtol=0, atol=1e-6)
+    if steps.reshape:  # the final grid is not the native one: the index really moved
+        assert not np.allclose(np.column_stack([after[n].to_numpy() for n in index_columns]), np.column_stack([before[n].to_numpy() for n in index_columns]))
+    assert sorted(p.name for p in done.iterdir() if p.name.startswith('.')) == []
+
+
+@pytest.mark.parametrize('kind', ['ion_plan', 'plan'])
+def test_a_geometric_run_leaves_out_a_plan_table_of_the_other_schema(tmp_path, caplog, kind):
+    """A photon table under the ion_plan name, and a proton table under the plan name, are skipped with the plan-table warning."""
+    from rt_dataprep import ion_plan_table, plan_table
+    folder, _ = write_plan(tmp_path / 'converted')
+    if kind == 'ion_plan':
+        other, name = plan_table.to_table([]), ION_NAME
+    else:
+        other, name = ion_plan_table.to_table([]), conv.PLAN_NAME
+    add_ion_plan(tmp_path, folder, kind=kind, name=name, table=other)
+    with caplog.at_level(logging.WARNING, logger='rt_dataprep.preprocess'):
+        report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', SMALL)
+    done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
+    assert plan_row(report).outcome == 'preprocessed'
+    assert not (done / name).exists() and name not in plan_row(report).files and [r for r in sf.read(done) if r['kind'] == kind] == []
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+
+
+def test_the_plan_index_reason_names_a_plan_table():
+    assert 'plan table' in pre.REASON_PLAN_INDEX
+
+
+
 def test_manifest_rows_are_unchanged_by_plan_parquet(tmp_path):
     import shutil
 
