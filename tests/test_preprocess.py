@@ -2975,9 +2975,14 @@ def test_an_integer_dose_is_thresholded_without_truncating_the_threshold(tmp_pat
     assert series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', CUT)] == '0.5'
 
 
-@pytest.mark.parametrize('values', [np.zeros((2, 2, 2)), -np.ones((2, 2, 2))])
-def test_a_dose_with_no_positive_voxel_has_an_empty_region(values):  # #311
+@pytest.mark.filterwarnings('error')  # an all-NaN dose must not warn
+@pytest.mark.parametrize('values', [np.zeros((2, 2, 2)), -np.ones((2, 2, 2)), np.full((2, 2, 2), np.nan)])
+def test_a_dose_with_no_positive_voxel_has_an_empty_region(values):  # #311, #314
     assert not pre.dose_region(values).any()
+
+
+def test_a_nan_voxel_never_counts_and_does_not_hide_the_max():  # #314: the threshold is 10% of 5, not NaN
+    assert pre.dose_region(np.array([np.nan, 0.4, 0.6, 5.0])).tolist() == [False, False, True, True]
 
 
 def with_roi_types(folder, types):
@@ -3007,11 +3012,14 @@ def test_a_cut_non_external_mask_still_counts_in_the_low_retained_count(tmp_path
     assert '; 1 plans cropped, 1 with retained < 0.9; ' in run_summary(caplog)
 
 
-@pytest.mark.parametrize(('types', 'warning'), [(None, '2 masks count toward retained'),  # a tree converted before dicom metadata
-                                               ({'body': {'distinct': ['EXTERNAL']}, 'ptv': 'PTV'}, '1 masks count toward retained'),
-                                               ({'body': 'EXTERNAL', 'ptv': 'PTV'}, None)])
-def test_the_run_log_warns_of_counted_masks_without_a_single_roi_interpreted_type(tmp_path, caplog, types, warning):
-    folder, _ = write_plan(tmp_path / 'converted', masks=EXTERNAL_CUT)
+@pytest.mark.parametrize(('masks', 'types', 'warning'), [
+    (EXTERNAL_CUT, None, '1 cut masks count toward retained'),  # a tree converted before dicom metadata: the cut body warns, the uncut ptv does not (#312)
+    (EXTERNAL_CUT | {'ptv': HALF_OUT}, None, '2 cut masks count toward retained'),
+    (EXTERNAL_CUT, {'body': {'distinct': ['EXTERNAL']}, 'ptv': 'PTV'}, '1 cut masks count toward retained'),
+    (EXTERNAL_CUT, {'body': 'EXTERNAL', 'ptv': 'PTV'}, None),
+    (DEFAULT_MASKS, None, None)])  # nothing cut: no warning however the masks are typed
+def test_the_run_log_warns_of_cut_counted_masks_without_a_single_roi_interpreted_type(tmp_path, caplog, masks, types, warning):
+    folder, _ = write_plan(tmp_path / 'converted', masks=masks)
     if types:
         with_roi_types(folder, types)
     with caplog.at_level('INFO'):
