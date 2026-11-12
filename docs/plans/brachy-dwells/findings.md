@@ -62,3 +62,9 @@ Files: `src/rt_dataprep/convert.py`, `tests/test_convert.py`, `tests/test_prepro
 ## review-3 (wave, task-03)
 PASS, no BLOCKING; no escape path from dwell_rows found. Deferred to 2.9 filing: N1 (tag-level fault test does not
 assert total WARNING count 1 / INFO REASON_MISSING_TAG).
+
+## task-04
+Files: `README.md`, `.gitignore`, `project-profile.yml`, this file.
+- README: new `### dwell.parquet` after `### ion_plan.parquet`; `dwell` added to the manifest-key row (and its order) and to the series.json `kind` list.
+  Column names are the `DWELL_SCHEMA` ones. The `retained` sentence (blank for CT, applicator, line, plan, beam and series) never listed ion_plan, so dwell was not added there.
+- `.gitignore`: `dwell.parquet`. `project-profile.yml` phi rule: dwell.parquet in the per-file metadata list, with applicator names, dwell positions and source calibration dates.
