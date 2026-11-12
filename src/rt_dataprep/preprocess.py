@@ -720,22 +720,33 @@ def check_crop(native, final):
         raise CaseRefused(REASON_CROP)
 
 
+def is_external(row):
+    """Whether a series.json row is a body outline: a mask typed exactly 'EXTERNAL'."""
+    return row['kind'] == 'mask' and row.get('dicom', {}).get('roi_interpreted_type') == 'EXTERNAL'
+
+
 def counts_toward_retained(row):
-    """Whether a series.json row sets a plan's lowest `retained`: a dose or mask with a value, except a body outline (mask typed exactly 'EXTERNAL')."""
-    external = row['kind'] == 'mask' and row.get('dicom', {}).get('roi_interpreted_type') == 'EXTERNAL'
-    return row['kind'] in ('dose', 'mask') and bool(row.get('retained')) and not external
+    """Whether a series.json row sets a plan's lowest `retained`: a dose or mask with a value, except a body outline (is_external)."""
+    return row['kind'] in ('dose', 'mask') and bool(row.get('retained')) and not is_external(row)
 
 
-def dose_region(dose):
-    """The 0/1 voxels a dose's `retained` counts: at or above the lesser of DOSE_RETAINED_GY and DOSE_RETAINED_FRACTION of its max (#307); never empty for a dose with a positive voxel."""
-    return dose >= min(DOSE_RETAINED_GY, DOSE_RETAINED_FRACTION * float(sitk.GetArrayViewFromImage(dose).max()))
+def dose_region(values):
+    """The voxels (a bool array of the dose array `values`) its `retained` counts: at or above the lesser of DOSE_RETAINED_GY and DOSE_RETAINED_FRACTION of its max (#307),
+    less a 1e-6 relative tolerance so a nominal 1.0 Gy float32 voxel (0.99999994 after DoseGridScaling) is kept (#309). Compared in numpy, so an integer dose is not truncated to
+    the threshold's pixel type (#311); a dose with no positive voxel has an empty region."""
+    peak = float(values.max())
+    return values >= min(DOSE_RETAINED_GY, DOSE_RETAINED_FRACTION * peak) * (1 - 1e-6) if peak > 0 else np.zeros(values.shape, bool)
 
 
-def native_retained(native, final):
+def native_retained(native, final, region=None):
     """The part of `native` (summed values, float64; a 0/1 image gives a voxel fraction) whose voxel centres fall inside final's buffer, over the whole; 1.0 for an empty image.
+    `region` (dose_region) maps the voxel array to the bool array that is summed instead, inside the same quiet_call.
     Same direction as the CT, so each native axis maps increasingly onto one final axis: bisect the first and last in-grid index per axis."""
     def run():
-        total = sitk.GetArrayViewFromImage(native).sum(dtype=np.float64)
+        values = sitk.GetArrayViewFromImage(native)
+        if region is not None:
+            values = region(values)
+        total = values.sum(dtype=np.float64)
         if not total:
             return 1.0
         def centre(axis, k):  # continuous final index along `axis` of native index k (the other axes at 0)
@@ -747,7 +758,7 @@ def native_retained(native, final):
             start = bisect.bisect_left(range(length), True, key=lambda k: centre(axis, k) >= -0.5)
             stop = bisect.bisect_left(range(length), True, key=lambda k: centre(axis, k) >= n - 0.5)
             bounds.append(slice(start, stop))
-        inside = sitk.GetArrayViewFromImage(native)[bounds[2], bounds[1], bounds[0]]  # array axes z, y, x
+        inside = values[bounds[2], bounds[1], bounds[0]]  # array axes z, y, x
         return float(inside.sum(dtype=np.float64) / total)
     return quiet_call(run, REASON_INTERNAL)
 
@@ -800,8 +811,8 @@ def preprocess_plan(plan_dir, out_dir, steps):
                     check_crop(native, final)
                     crossed = False
                 cropped += crossed
-                # a dose is judged on its dose_region (a 0/1 temporary, released at once); crosses_final, process_dose and has_voxels keep the unthresholded native
-                cell = repr(native_retained(dose_region(native) if kind == 'dose' else native, final) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
+                # a dose is judged on its dose_region; crosses_final, process_dose and has_voxels keep the unthresholded native
+                cell = repr(native_retained(native, final, dose_region if kind == 'dose' else None) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
             image = process_dose(native, final) if kind in ('dose', 'beam') else process_mask(native, final, steps)
             if kind != 'beam' and has_voxels(native) and not has_voxels(image):
                 raise CaseRefused(REASON_CROP)

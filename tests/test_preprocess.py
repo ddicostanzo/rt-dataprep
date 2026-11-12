@@ -2954,11 +2954,25 @@ def test_a_sub_threshold_tail_past_the_edge_counts_as_cropped_but_leaves_the_dos
 @pytest.mark.parametrize(('cut', 'kept', 'cell'), [(0.7, 2.0, '0.5'),  # one 2 Gy EBRT fraction: the threshold is 0.2 Gy (10% of max), so the cut half counts
                                                  (0.15, 2.0, '1.0'),  # ... and a cut half below 0.2 Gy does not
                                                  (0.2, 0.5, '0.5'),  # max 0.5 Gy: no voxel reaches 1 Gy, yet the cut half (>= 0.05 Gy) counts (#307)
-                                                 (0.5, 20.0, '1.0')])  # max >= 10 Gy: the threshold stays 1 Gy
+                                                 (0.5, 20.0, '1.0'),  # max >= 10 Gy: the threshold stays 1 Gy
+                                                 (0.2, 2.0, '0.5'),  # exactly at the threshold: inclusive
+                                                 (0.99999994, 20.0, '0.5')])  # a nominal 1.0 Gy float32 voxel after DoseGridScaling is kept (#309)
 def test_a_dose_threshold_is_the_lesser_of_1_gy_and_a_tenth_of_its_max(tmp_path, cut, kept, cell):
-    write_plan(tmp_path / 'converted', dose=np.where(np.arange(12)[:, None, None] < 3, cut, kept) * HALF_OUT, masks={})
+    write_plan(tmp_path / 'converted', dose=(np.where(np.arange(12)[:, None, None] < 3, cut, kept) * HALF_OUT).astype(np.float32), masks={})
     pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
     assert series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', CUT)] == cell
+
+
+def test_an_integer_dose_is_thresholded_without_truncating_the_threshold(tmp_path):  # #311: 10% of max 5 is 0.5, not 0 in the pixel type
+    folder, _ = write_plan(tmp_path / 'converted', dose=np.where(np.arange(12)[:, None, None] < 3, 1, 5) * HALF_OUT, masks={})
+    sitk.WriteImage(sitk.Cast(sitk.ReadImage(str(folder / conv.DOSE_NAME)), sitk.sitkInt16), str(folder / conv.DOSE_NAME))  # make_image writes float32
+    pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    assert series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', CUT)] == '0.5'
+
+
+@pytest.mark.parametrize('values', [np.zeros((2, 2, 2)), -np.ones((2, 2, 2))])
+def test_a_dose_with_no_positive_voxel_has_an_empty_region(values):  # #311
+    assert not pre.dose_region(values).any()
 
 
 def with_roi_types(folder, types):
