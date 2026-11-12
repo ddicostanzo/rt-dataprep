@@ -115,6 +115,19 @@ def _written(tmp_path, beams):
     return path
 
 
+@pytest.mark.parametrize(('numbers', 'edit'), [
+    ([3, 3], lambda refs: refs.pop()),  # one reference for two beams numbered 3: both would take its MU (plan_rows guard)
+    ([1, 2], lambda refs: refs.append(copy.deepcopy(refs[0]))),  # a second reference to beam 1: the last would win (_metersets guard)
+])
+def test_each_duplicate_number_guard_refuses_on_its_own(tmp_path, numbers, edit):  # #273
+    path = _written(tmp_path, [sd.photon_beam(n) for n in numbers])
+    plan = read_header(path)
+    edit(plan.FractionGroupSequence[0].ReferencedBeamSequence)
+    with pytest.raises(CaseRefused) as raised:
+        plan_table.plan_rows(plan, ct_image())
+    assert str(raised.value) == REASON_PLAN_TABLE
+
+
 def test_cumulative_weight_is_never_filled_forward(tmp_path):
     beam = sd.photon_beam()
     del beam['ControlPointSequence'][2]['CumulativeMetersetWeight']
