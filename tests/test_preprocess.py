@@ -3026,6 +3026,85 @@ def test_a_nan_voxel_never_counts_and_does_not_hide_the_max():  # #314: the thre
     assert pre.dose_region(np.array([np.nan, 0.4, 0.6, 5.0])).tolist() == [False, False, True, True]
 
 
+def dose_cell(tmp_path, cut, kept, steps, workers=1):
+    write_plan(tmp_path / 'converted', dose=(np.where(np.arange(12)[:, None, None] < 3, cut, kept) * HALF_OUT).astype(np.float32), masks={})
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps, workers=workers)
+    return series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', steps)], plan_row(report).cropped
+
+
+@pytest.mark.parametrize('workers', [1, 2])
+def test_ac2_a_changed_gy_floor_changes_the_dose_retained_and_not_cropped(tmp_path, workers):  # workers=2: the values reach a spawned worker
+    default = dose_cell(tmp_path / 'a', 0.7, 20.0, CUT, workers)
+    changed = dose_cell(tmp_path / 'b', 0.7, 20.0, dataclasses.replace(CUT, dose_retained_gy=0.5), workers)
+    assert default[0] == '1.0' and changed[0] == '0.5' and default[1] == changed[1] == 1
+
+
+def test_ac3_a_changed_fraction_changes_the_dose_retained(tmp_path):
+    assert dose_cell(tmp_path / 'a', 0.15, 2.0, CUT)[0] == '1.0'  # threshold min(1, 0.2) = 0.2
+    assert dose_cell(tmp_path / 'b', 0.15, 2.0, dataclasses.replace(CUT, dose_retained_fraction=0.05))[0] == '0.5'  # threshold 0.1
+
+
+def test_the_threshold_fields_default_to_the_module_constants():
+    steps = PreprocessSteps()
+    assert (steps.dose_retained_gy, steps.dose_retained_fraction) == (pre.DOSE_RETAINED_GY, pre.DOSE_RETAINED_FRACTION) == (1.0, 0.1)
+
+
+def test_ac4_dose_region_takes_explicit_gy_and_fraction():
+    values = np.array([0.04, 0.3, 0.5, 2.0, 10.0])
+    assert pre.dose_region(values).tolist() == [False, False, False, True, True]  # defaults: min(1, 1)
+    assert pre.dose_region(values, gy=0.5).tolist() == [False, False, True, True, True]
+    assert pre.dose_region(values, fraction=0.03).tolist() == [False, True, True, True, True]  # min(1, 0.3)
+    assert pre.dose_region(values, gy=5, fraction=0.5).tolist() == [False, False, False, False, True]  # min(5, 5)
+    assert pre.dose_region(np.array([0.2, 0.5, 0.5]), fraction=1).tolist() == [False, True, True]  # max below the Gy floor: only the peak voxels count
+
+
+@pytest.mark.parametrize(('field', 'bad'), [('dose_retained_gy', v) for v in (0, -1, np.nan, np.inf)] + [('dose_retained_fraction', v) for v in (0, 1.5, np.nan, np.inf)])
+def test_ac5_a_bad_dose_retained_value_fails_before_creating_output(tmp_path, field, bad):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    with pytest.raises(ValueError) as caught:
+        pre.preprocess(converted, out, dataclasses.replace(CUT, **{field: bad}))
+    assert str(caught.value) == pre.REASON_DOSE_RETAINED_LIMIT and not out.exists()
+
+
+def test_ac5_the_dose_retained_check_does_not_need_allow_crop(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    with pytest.raises(ValueError) as caught:
+        pre.preprocess(converted, out, PreprocessSteps(rescale=True, dose_retained_gy=0))
+    assert str(caught.value) == pre.REASON_DOSE_RETAINED_LIMIT and not out.exists()
+
+
+def retained_log_lines(caplog):
+    return [r.getMessage() for r in caplog.records if r.name == 'rt_dataprep.preprocess' and 'dose retained' in r.getMessage()]
+
+
+@pytest.mark.parametrize(('steps', 'line'), [(CUT, 'preprocess: dose retained counts voxels at or above min(1 Gy, 0.1 of the dose max)'),
+                                           (dataclasses.replace(CUT, dose_retained_gy=0.5, dose_retained_fraction=0.25), 'preprocess: dose retained counts voxels at or above min(0.5 Gy, 0.25 of the dose max)')])
+def test_ac8_the_run_log_names_the_dose_threshold_once_on_an_allow_crop_run(tmp_path, caplog, steps, line):
+    write_plan(tmp_path / 'converted')
+    write_plan(tmp_path / 'converted', patient='SYNTHETICPTB')
+    with caplog.at_level('INFO'):
+        pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    assert retained_log_lines(caplog) == [line]  # once, not per patient
+    assert 'plan rows' in caplog.records[-1].getMessage()  # the closing summary is still the last record
+
+
+def test_ac8_a_run_without_allow_crop_logs_no_dose_threshold(tmp_path, caplog):
+    write_plan(tmp_path / 'converted')
+    with caplog.at_level('INFO'):
+        pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT_OFF)
+    assert caplog.records and not retained_log_lines(caplog)
+
+
+def test_ac9_the_written_dose_is_byte_identical_whatever_the_threshold(tmp_path):
+    written = []
+    for label, steps in (('a', CUT), ('b', dataclasses.replace(CUT, dose_retained_gy=0.5, dose_retained_fraction=0.05))):
+        dose_cell(tmp_path / label, 0.7, 20.0, steps)
+        written.append((tmp_path / label / 'out' / 'SYNTHETICPTA' / 'plan_1' / pre.output_name('dose.nii.gz', steps)).read_bytes())
+    assert written[0] == written[1] and written[0]
+
+
 def with_roi_types(folder, types):
     """Give every series.json row a `dicom` object (all-or-none per file); a mask gets its roi_interpreted_type from `types`."""
     sf.write([r | {'dicom': {'roi_interpreted_type': types[r['roi_name']]} if r['kind'] == 'mask' else {}} for r in sf.read(folder)], folder / conv.SERIES_NAME)

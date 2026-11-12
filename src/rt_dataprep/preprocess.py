@@ -13,6 +13,7 @@ and writes a separate tree plus preprocess_report.csv in the output root. Log li
 is the one place the patient folder names appear.
 """
 import bisect
+import functools
 import json
 import logging
 import os
@@ -51,8 +52,8 @@ REASON_NO_CT = 'series.json does not list exactly one ct file'
 REASON_DOSE_COUNT = 'series.json lists more than one dose file'
 REASON_KIND = 'series.json has a row of an unknown kind'
 LOW_RETAINED = 0.9  # the run log counts preprocessed plans whose lowest `retained` (dose in its dose_region, non-EXTERNAL mask) is below this (#226)
-DOSE_RETAINED_GY = 1.0  # a dose file's `retained` is the in-grid fraction of its voxels at or above this, or DOSE_RETAINED_FRACTION of its max when lower (inclusive; dose is always Gy)
-DOSE_RETAINED_FRACTION = 0.1  # of a dose's max: the threshold of a dose whose max is below 10 Gy, e.g. one EBRT fraction (#307)
+DOSE_RETAINED_GY = 1.0  # the PreprocessSteps.dose_retained_gy default: a dose file's `retained` is the in-grid fraction of its voxels at or above this, or DOSE_RETAINED_FRACTION of its max when lower (inclusive; dose is always Gy)
+DOSE_RETAINED_FRACTION = 0.1  # the PreprocessSteps.dose_retained_fraction default, of a dose's max: the threshold of a dose whose max is below 10 Gy, e.g. one EBRT fraction (#307)
 REASON_SERIES_CSV = 'series.json is malformed: not valid JSON, not an array of objects of strings with the expected keys, or one file named twice'
 LEGACY_SERIES_NAME = 'series.csv'  # what convert v0.1.x wrote; never read
 REASON_LEGACY_SERIES = 'converted by an older version (series.csv); reconvert with --overwrite'
@@ -68,6 +69,7 @@ REASON_PLAN_INDEX = 'a plan table (plan.parquet, ion_plan.parquet or dwell.parqu
 REASON_CROP = 'a dose or mask would lose voxels to the final grid'
 REASON_MASK_RETENTION = 'a resampled mask retains less than the configured minimum physical volume'
 REASON_MASK_RETENTION_LIMIT = 'minimum mask retention must be finite, greater than 0 and at most 1'
+REASON_DOSE_RETAINED_LIMIT = 'dose retained threshold must be finite: the Gy floor greater than 0, the fraction greater than 0 and at most 1'
 REASON_IO_ERROR = 'file system error while reading or writing; nothing kept for this patient'
 REASON_FILE_UNREADABLE = 'an input NIfTI file is unreadable'
 REASON_INTERNAL = 'an unexpected error stopped the preprocessing; the report lists what was finished'
@@ -86,6 +88,8 @@ class PreprocessSteps:
     min_mask_retention: float | None = None  # optional minimum output/input physical foreground volume; no clinical default
     legacy_linear_masks: bool = False
     allow_crop: bool = False  # crop a dose or mask that extends past the final grid instead of refusing the plan; `retained` records how much is kept (a dose: its dose_region)
+    dose_retained_gy: float = DOSE_RETAINED_GY  # with allow_crop: the Gy floor of a dose's `retained` threshold (finite, > 0)
+    dose_retained_fraction: float = DOSE_RETAINED_FRACTION  # with allow_crop: the fraction of the dose's max below which that threshold drops (0 < F <= 1)
     series_fov_mask: bool = False  # not a step: uint8 support masks for planning CT, study and aligned plan images
     new_spacing: tuple = (1, 1, 1)  # mm, (x, y, z)
     final_spacing: tuple = (1.25, 1.25, 1.25)
@@ -410,7 +414,11 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
     if steps.min_mask_retention is not None:
         if not np.isfinite(steps.min_mask_retention) or not 0 < steps.min_mask_retention <= 1:
             raise ValueError(REASON_MASK_RETENTION_LIMIT)
+    if not np.isfinite(steps.dose_retained_gy) or steps.dose_retained_gy <= 0 or not np.isfinite(steps.dose_retained_fraction) or not 0 < steps.dose_retained_fraction <= 1:
+        raise ValueError(REASON_DOSE_RETAINED_LIMIT)
     folders = sorted(p for p in converted_root.iterdir() if p.is_dir() and not p.name.startswith('.'))  # a missing root fails before the mkdir
+    if steps.allow_crop:  # once from the parent, never per patient
+        log.info('preprocess: dose retained counts voxels at or above min(%g Gy, %g of the dose max)', steps.dose_retained_gy, steps.dose_retained_fraction)
     out_root.mkdir(parents=True, exist_ok=True)
     patient_fn = _patient_fn or preprocess_patient
     # The parent owns the claims, as in convert: an undispatched refusal under overwrite, a hold on the casefolded name otherwise.
@@ -739,12 +747,12 @@ def counts_toward_retained(row):
     return row['kind'] in ('dose', 'mask') and bool(row.get('retained')) and not is_external(row)
 
 
-def dose_region(values):
-    """The voxels (a bool array of the dose array `values`) its `retained` counts: at or above the lesser of DOSE_RETAINED_GY and DOSE_RETAINED_FRACTION of its max (#307),
+def dose_region(values, gy=DOSE_RETAINED_GY, fraction=DOSE_RETAINED_FRACTION):
+    """The voxels (a bool array of the dose array `values`) its `retained` counts: at or above the lesser of `gy` and `fraction` of its max (#307; the PreprocessSteps fields, defaulting to DOSE_RETAINED_GY and DOSE_RETAINED_FRACTION),
     less a 1e-6 relative tolerance so a nominal 1.0 Gy float32 voxel (0.99999994 after DoseGridScaling) is kept (#309). Compared in numpy, so an integer dose is not truncated to
     the threshold's pixel type (#311); a dose with no positive voxel has an empty region. A NaN voxel is skipped by the max and never counts (#314)."""
     peak = float(np.fmax.reduce(values, axis=None))  # fmax ignores NaN; an all-NaN dose gives NaN, so an empty region
-    return values >= min(DOSE_RETAINED_GY, DOSE_RETAINED_FRACTION * peak) * (1 - 1e-6) if peak > 0 else np.zeros(values.shape, bool)
+    return values >= min(gy, fraction * peak) * (1 - 1e-6) if peak > 0 else np.zeros(values.shape, bool)
 
 
 def native_retained(native, final, region=None):
@@ -821,7 +829,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
                     crossed = False
                 cropped += crossed and not is_external(row)  # a cut body outline is not counted, as in `retained` (#310)
                 # a dose is judged on its dose_region; crosses_final, process_dose and has_voxels keep the unthresholded native
-                cell = repr(native_retained(native, final, dose_region if kind == 'dose' else None) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
+                cell = repr(native_retained(native, final, functools.partial(dose_region, gy=steps.dose_retained_gy, fraction=steps.dose_retained_fraction) if kind == 'dose' else None) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
             image = process_dose(native, final) if kind in ('dose', 'beam') else process_mask(native, final, steps)
             if kind != 'beam' and has_voxels(native) and not has_voxels(image):
                 raise CaseRefused(REASON_CROP)
