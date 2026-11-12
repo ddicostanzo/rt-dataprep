@@ -72,3 +72,8 @@ shifter ignored; strict-decrease check has no tolerance.
   `ION_PLAN_NAME` arrives in task-04; swap it then. It spreads the last series.json row so a converted tree's `dicom` key is kept.
 - Pre-existing assertions changed: only tests/test_manifest.py `read()` key tuple (adds 'ion_plan'). No test pinned the old
   REASON_PLAN_INDEX text (they use `pre.REASON_PLAN_INDEX`).
+
+## review-group-2
+Opus wave review of task-03: no BLOCKING, no WARNING. Notes: the 'plan'/'ion_plan' entries of the copy tuple
+(preprocess.py:775) are unreachable (kept for symmetry, as planned); test ION_NAME stays a literal (task-04's 5-file
+commit leaves test_preprocess/test_manifest alone).
