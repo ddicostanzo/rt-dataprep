@@ -448,10 +448,11 @@ def test_a_legacy_study_is_counted_without_reading_anything(converted, monkeypat
     assert man._study_rows(converted / PID, converted / PID / 'study_2') == ([], 1)
 
 
-def test_images_and_misc_files_with_a_series_csv_are_not_counted(converted):
+def test_images_and_misc_files_with_a_series_csv_and_json_are_not_counted(converted):
     for name in ('images', 'misc_files'):
         (converted / PID / name).mkdir()
         (converted / PID / name / pre.LEGACY_SERIES_NAME).write_text('file,kind\n', encoding='utf-8')
+        (converted / PID / name / conv.SERIES_NAME).write_text('[]', encoding='utf-8')  # as the preprocess test does (#250)
     assert man.manifest(converted) == (4, 0)
 
 

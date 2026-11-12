@@ -25,7 +25,7 @@ systems. A software issue report is not a substitute for that process.
 | --- | --- |
 | Source and organized DICOM trees | Treat as original patient data; organization copies files without de-identifying them. |
 | Converted/preprocessed volumes and applicator coordinates | Treat as sensitive derived medical data, including possible identifying image content. |
-| Patient folders, reports, `series.json`, `manifest.jsonl`, `splits.json` and dated copies | Treat as sensitive metadata: identifiers, dates, labels, descriptions, or linkage can remain. |
+| Patient folders, reports, `series.json`, `manifest.jsonl` and its dated copies `manifest_<UTC time>.jsonl`, `splits.json` | Treat as sensitive metadata: identifiers, dates, labels, descriptions, or linkage can remain. |
 | Logs and exception text | Intended to contain counts, fixed reasons, and safe class/site details; inspect before sharing. |
 | Synthetic examples and tests | Generate at runtime; keep the synthetic naming convention and do not replace them with clinical files. |
 
