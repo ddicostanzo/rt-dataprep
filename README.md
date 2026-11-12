@@ -205,7 +205,7 @@ A photon external-beam RTPLAN also writes `plan.parquet` in its plan folder (aft
 `series.json` row of `kind` `plan`; `preprocess` writes it under the same name (copied unchanged on a run with no geometric step), and `manifest`
 lists it in the plan line's `plan` key. Brachy and RT Ion plans, a plan mixing photon with other beams, and a photon plan with a missing or inconsistent
 value get no `plan.parquet` (the plan still converts; a malformed photon plan logs a warning). A treatment beam with an empty
-`RadiationType` or a cone (`ApplicatorSequence`) counts as malformed, and so does a table Arrow cannot build; none stops the run (the same holds for `ion_plan.parquet` and `dwell.parquet`). The file has one row per control point of each
+`RadiationType`, a cone (`ApplicatorSequence`) or a negative `BeamMeterset` counts as malformed, and so does a table Arrow cannot build; none stops the run (the same holds for `ion_plan.parquet` and `dwell.parquet`). The file has one row per control point of each
 treatment beam (SETUP beams are dropped; a plan with a CONTINUATION, TRMT_PORTFILM or OPEN_PORTFILM beam gets no
 `plan.parquet`, since that beam's dose is in `dose.nii.gz`), values DICOM omits are filled forward from the earlier control point, and the
 beam-level fields repeat on every row. The columns and types are `rt_dataprep.plan_table.SCHEMA`; read them with
@@ -249,7 +249,7 @@ The file has one row per spot with a non-zero weight. The columns and types are 
   The `spot_mu` of a beam sum to its `beam_meterset` within 1e-4 relative (`ION_WEIGHT_TOLERANCE`), not exactly: real files store spot weights as float32.
 - Only PBS (`ScanMode` MODULATED) proton beams with MU metersets get a table. A SETUP beam is dropped; any other treatment beam (passive scattering, uniform
   or line scanning, another ion, a CONTINUATION or port-film beam, a Number-of-Pulses unit) gives the plan no table, silently. A proton PBS plan with a missing or inconsistent
-  value (weights that do not add up, a negative weight, a non-finite energy, a missing meterset, ...) gets no table and logs one fixed warning; the plan still converts.
+  value (weights that do not add up, a negative weight or meterset, a non-finite energy, a missing meterset, a `NumberOfControlPoints` or `ControlPointIndex` that disagrees with the sequence, ...) gets no table and logs one fixed warning; the plan still converts.
   The file is therefore absent, never empty, when the plan gets no table.
 - A `preprocess` run with `--initial-resample`, `--resample` or `--reshape` rewrites `isocenter_i/j/k` for the final CT (every other column is unchanged); a run
   without those steps copies the file unchanged. An `ion_plan.parquet` that is not the table schema is left out with one warning, as for `plan.parquet`.
@@ -288,7 +288,7 @@ order, then channel order, then dwell index. Setup, channel and source fields re
 - For PDR, `channel_total_time` is stored as-is next to `number_of_pulses` and `pulse_repetition_interval`. Reading it as the time of one pulse (per fraction:
   multiply by `number_of_pulses`) is a vendor convention, not DICOM, and is unverified on a real PDR export.
 - A plan with a missing or inconsistent value (an odd control point count, the two control points of a dwell apart, weights that do not add up or that rise while the source
-  moves, a missing position or weight, a duplicate channel number, a PDR channel without pulse values, ...) gets no table and logs the single fixed warning
+  moves, a missing position or weight, a `ControlPointIndex` that is not its place in the sequence, a duplicate channel number, a PDR channel without pulse values, ...) gets no table and logs the single fixed warning
   `convert: the brachy RTPLAN has a missing or inconsistent value; no dwell table written` (`REASON_DWELL`); the CT, dose, masks, applicator files and the rest of the plan folder are unaffected.
   The file is therefore absent, never empty, when the plan gets no table.
 - A `preprocess` run with `--initial-resample`, `--resample` or `--reshape` rewrites `position_i/j/k` for the final CT (every other column is unchanged); a run
@@ -307,7 +307,7 @@ square and no dependence on the CT values. The beam geometry follows IEC 61217 a
 
 A plan the volume does not model gets no `beam_mu.nii.gz` and no `beam` row, and logs one warning (the plan still converts, with
 its `plan.parquet`): any beam with blocks, an MLC that is not `MLCX`, an `MLCX` without leaf boundaries, a treatment beam without a
-positive `SourceAxisDistance`, another or missing `PatientPosition`, or a control point with no jaw or MLC bounding an axis.
+positive `SourceAxisDistance`, another or missing `PatientPosition`, a `PatientSetupSequence` item stating a `PatientPosition` other than the CT's, or a control point with no jaw or MLC bounding an axis.
 Wedges are ignored. Plans without a `plan.parquet` (brachy, RT Ion, mixed, CONTINUATION or port-film, malformed) get none either.
 Trees converted before this version gain `beam_mu.nii.gz` only on a run with `convert --overwrite`.
 
