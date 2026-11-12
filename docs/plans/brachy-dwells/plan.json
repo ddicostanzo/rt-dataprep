@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "metadata": {
+    "title": "convert: brachy HDR/PDR dwells as dwell.parquet (#282)",
+    "spec": "docs/specs/2026-11-11-brachy-dwells.md",
+    "branch": "feat/brachy-dwell",
+    "profile": "project-profile.yml",
+    "created": "2026-11-11"
+  },
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "dwell_table module: DWELL_SCHEMA, REASON_DWELL, dwell_rows(plan, ct) one row per paired-CP dwell, plus synthetic brachy writer extensions",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/dwell_table.py",
+        "tests/test_dwell_table.py",
+        "tests/synthetic_dicom.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/dwell_table.py": "create",
+        "tests/test_dwell_table.py": "create",
+        "tests/synthetic_dicom.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_dwell_table.py on synthetic brachy RTPLANs written with save_as and read back with dcmread (dicom_io.read_header_core where the existing ion tests do), modelled on tests/test_ion_plan_table.py. Extend tests/synthetic_dicom.write_rtplan/_channel with treatment_type (default None), per-channel total_time, final_weight, source_number, movement_type, pulses/pulse_interval, and a SourceSequence; DS values written as DS-legal strings (<= 16 chars). Module mirrors ion_plan_table.py structure (spec: Which plans, Columns, Malformed). The AST test names dicom_io private helpers (_pydicom_quiet); commit with CLAUDE_ALLOW_PRIVATE_API=1 and list them in the commit body, as tests/test_ion_plan_table.py's AST test did.",
+      "criteria": [
+        "An HDR plan with 2 STEPWISE channels of 3 paired-CP dwells each (one zero-time) gives 6 rows in setup, channel, dwell_index order; the zero-time dwell is present with dwell_weight 0 and dwell_time_s 0",
+        "dwell_time_s equals channel_total_time x dwell_weight / final_cumulative_time_weight for a hand-computed dwell, and per channel sum(dwell_time_s) equals ChannelTotalTime within rel 1e-9 for binary-exact weights and within rel 1e-4 for DS-rounded weights",
+        "position_x/y/z equal ControlPoint3DPosition of CP 2k and position_i/j/k equal ct.TransformPhysicalPointToContinuousIndex of that point; control_point_index is the ControlPointIndex of CP 2k",
+        "Setup, channel, source (isotope, half-life, RAKR, strength reference date/time via ReferencedSourceNumber), source_movement_type and pulse columns hold the plan's values; nullable columns absent from the plan are null",
+        "A PDR plan fills number_of_pulses and pulse_repetition_interval and stores dwell_time_s from ChannelTotalTime unchanged",
+        "dwell_rows returns None (and the module logs nothing) for: BrachyTreatmentType LDR, MDR, MANUAL or absent; a channel with SourceMovementType OSCILLATING or UNIDIRECTIONAL; a plan with BeamSequence or IonBeamSequence; a plan where no channel in any setup has control points",
+        "Each malformed case listed in spec acceptance test 5 alone raises CaseRefused(REASON_DWELL) (one parametrized test), including the channel-sum drift fixture of many sub-tolerance inter-pair gaps",
+        "to_table(rows) has schema equal to DWELL_SCHEMA and null_count 0 in every non-nullable column for the valid fixtures (vault: Patterns/python/pyarrow-schema-does-not-enforce-non-nullable-fields.md)",
+        "An AST test shows dwell_table.py raises only CaseRefused(REASON_DWELL), has no try/except, no reference to quiet_call or _pydicom_quiet, and imports none of plan_table, ion_plan_table, beam_volume, fluence",
+        "Multi-valued FL/DS tags are accepted both as pydicom MultiValue and as list (vault: Patterns/medical-imaging/pydicom-binary-vr-multivalue-reads-back-as-list.md)",
+        "Every pre-existing test using write_rtplan passes unmodified (treatment_type defaults to None)",
+        "A channel with FinalCumulativeTimeWeight 0, ChannelTotalTime 0 and all weights 0 gives its rows with dwell_weight 0 and dwell_time_s 0 (no division); final 0 with ChannelTotalTime != 0 raises CaseRefused(REASON_DWELL)",
+        "A decrease between consecutive CPs of at most DWELL_WEIGHT_TOLERANCE x final passes, and a dwell whose w_{2k+1} < w_{2k} by that much gets dwell_weight 0; a larger decrease is refused; the same tolerance applies to CP 0 vs 0, last vs final, and w_{2k+2} vs w_{2k+1}",
+        "REASON_DWELL equals the spec string verbatim; DWELL_WEIGHT_TOLERANCE == 1e-4; PAIR_ATOL_MM == 0.1, and a pair 0.1 mm apart on one axis passes while 0.1001 mm is refused",
+        "Tests read every fixture through dicom_io.read_header_core (vault: Patterns/python/pydicom-validates-lazily-on-first-tag-access.md)"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "preprocess and manifest carry dwell.parquet: new kind, kept name, geometric re-index of position_i/j/k",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "src/rt_dataprep/manifest.py",
+        "tests/test_preprocess.py",
+        "tests/test_manifest.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "src/rt_dataprep/manifest.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "tests/test_manifest.py": "modify"
+      },
+      "test_approach": "TDD following the existing ion_plan tests in tests/test_preprocess.py and tests/test_manifest.py (spec: Integration, preprocess and manifest bullets).",
+      "criteria": [
+        "dwell is in preprocess.KINDS and in both keep-the-name tuples; series.json rows of kind dwell pass check_rows",
+        "index_plan_table takes a point-column prefix defaulting to 'isocenter'; existing plan and ion_plan calls and tests are unchanged",
+        "On a geometric run, dwell.parquet's position_i/j/k are rewritten to the continuous index of position_x/y/z on the final CT and every other column is unchanged; on a non-geometric run the file is copied byte-identical",
+        "A dwell.parquet that is unreadable or not DWELL_SCHEMA is skipped with the REASON_PLAN_INDEX warning, whose text keeps 'plan table' and names plan.parquet, ion_plan.parquet and dwell.parquet; the docstrings at preprocess.py:10 and manifest.py:6,49 list dwell",
+        "manifest adds a 'dwell' key with the file name when the plan has a dwell series.json row, after ion_plan, and omits it otherwise"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "convert writes dwell.parquet and its series.json row",
+      "depends_on": [
+        "task-01",
+        "task-02"
+      ],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_convert.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_convert.py": "modify"
+      },
+      "test_approach": "TDD in tests/test_convert.py following the ion_plan convert tests (spec: Integration, convert bullet; acceptance tests 5 and 6).",
+      "criteria": [
+        "convert on a synthetic HDR brachy case writes dwell.parquet (schema DWELL_SCHEMA) in the plan folder and a series.json row of kind dwell, modality RTPLAN, with the same string-valued key set as every other row and dicom from (metadata.ALL, metadata.RTPLAN); frame_of_reference_uid is the plan's FrameOfReferenceUID, '' when absent (one fixture without it)",
+        "The dwell call runs in its own (fifth) catch before case_dir.mkdir, independent of the ion catch, with to_table outside _header_call",
+        "A malformed HDR plan converts without dwell.parquet, with CT, dose, masks and applicator files unchanged, and logs exactly one WARNING 'convert: <REASON_DWELL>' with no UID, label or value",
+        "Existing brachy fixtures (no BrachyTreatmentType), photon and ion plans produce no dwell.parquet and no new log line",
+        "The full suite passes: uv run --group dev pytest -q --tb=short, and ruff check is clean"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "README, .gitignore and phi compliance rule list dwell.parquet",
+      "depends_on": [
+        "task-03"
+      ],
+      "files": [
+        "README.md",
+        ".gitignore",
+        "project-profile.yml"
+      ],
+      "file_ops": {
+        "README.md": "modify",
+        ".gitignore": "modify",
+        "project-profile.yml": "modify"
+      },
+      "test_approach": "Docs and config only, following the ion_plan.parquet sections of README.md, .gitignore and project-profile.yml; verified by reading the diff and the full suite (tests/test_examples.py and any README tests stay green). Split from task-03 to stay within the 5-files-per-commit gate.",
+      "criteria": [
+        "README documents dwell.parquet columns, zero-time dwells, the unverified strength-date and PDR per-pulse readings, a possibly empty frame, and that existing trees need convert --overwrite; .gitignore and the project-profile.yml phi rule list dwell.parquet",
+        "The full suite passes: uv run --group dev pytest -q --tb=short, and ruff check is clean"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ],
+    [
+      "task-03"
+    ],
+    [
+      "task-04"
+    ]
+  ]
+}

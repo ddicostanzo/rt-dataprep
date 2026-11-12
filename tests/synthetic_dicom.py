@@ -182,7 +182,8 @@ def _image_reference(sop_uid):
 
 
 def write_rtplan(path, struct_sop_uid, positions_mm, times=None, fractions=1, sop_uid=None, frame_uid=None,
-                  dose_references=None, channels=None, plan_date=None, plan_time=None, label=None, **meta):
+                  dose_references=None, channels=None, plan_date=None, plan_time=None, label=None, treatment_type=None,
+                  sources=None, **meta):
     """
     A brachy RTPLAN: ReferencedStructureSetSequence -> `struct_sop_uid`, one fraction group with `fractions`
     NumberOfFractionsPlanned (None writes it empty), one channel whose control points are `positions_mm` (N, 3) patient
@@ -192,7 +193,11 @@ def write_rtplan(path, struct_sop_uid, positions_mm, times=None, fractions=1, so
     SourceApplicatorID), dwells_mm (N, 3), times (default 1 each), roi (ReferencedROINumber, default the channel
     number), step_size (SourceApplicatorStepSize, omitted when None), paired (default True: control points 2k and 2k+1
     both at dwell k, the time passing between them). plan_date / plan_time / label set RTPlanDate / RTPlanTime / RTPlanLabel
-    (omitted when None).
+    (omitted when None). treatment_type sets BrachyTreatmentType (omitted when None). sources: a list of dicts of
+    SourceSequence tags (see `brachy_source`; omitted when None). A channel dict also takes total_time
+    (ChannelTotalTime), final_weight (FinalCumulativeTimeWeight), source_number (ReferencedSourceNumber), movement_type
+    (SourceMovementType), pulses (NumberOfPulses, PulseRepetitionInterval), each omitted when None, and tags (channel
+    tags, `_apply_tags` rules) and point_tags ({control point index: tags}). Weights, times and positions are written as DS strings.
     Returns its SOPInstanceUID.
     """
     ds = _dataset(path, pydicom.uid.RTPlanStorage, 'RTPLAN', sop_uid=sop_uid, frame_uid=frame_uid, **meta)
@@ -217,6 +222,10 @@ def write_rtplan(path, struct_sop_uid, positions_mm, times=None, fractions=1, so
     setup.ApplicationSetupNumber = 1
     setup.ChannelSequence = channel_datasets
     ds.ApplicationSetupSequence = [setup]
+    if treatment_type is not None:
+        ds.BrachyTreatmentType = treatment_type
+    if sources is not None:
+        _apply_tags(ds, dict(SourceSequence=sources))
     if dose_references is not None:
         references = []
         for i, (description, point) in enumerate(dose_references):
@@ -232,7 +241,21 @@ def write_rtplan(path, struct_sop_uid, positions_mm, times=None, fractions=1, so
     return ds.SOPInstanceUID
 
 
-def _channel(number, dwells_mm, times=None, applicator_id=None, roi=None, step_size=None, paired=True):
+def brachy_source(number=1, **tags):
+    """A SourceSequence item (tag dict) for write_rtplan(sources=...): a synthetic Ir-192 source; `tags` override or (None) delete."""
+    item = dict(SourceNumber=number, SourceIsotopeName='SYNTHETIC_Ir-192', SourceIsotopeHalfLife='73.81',
+                ReferenceAirKermaRate='40000', SourceStrengthReferenceDate='20240105', SourceStrengthReferenceTime='101515')
+    return item | tags
+
+
+def _ds(value):
+    """A DS-legal string (<= 16 characters): a raw float sum such as 0.30000000000000004 would fail validation."""
+    text = repr(float(value))
+    return text if len(text) <= 16 else f'{float(value):.10g}'
+
+
+def _channel(number, dwells_mm, times=None, applicator_id=None, roi=None, step_size=None, paired=True, total_time=None,
+             final_weight=None, source_number=None, movement_type=None, pulses=None, tags=None, point_tags=None):
     positions = np.asarray(dwells_mm, dtype=float).reshape(-1, 3)
     times = np.ones(len(positions)) if times is None else np.asarray(times, dtype=float)
     if paired:
@@ -246,8 +269,11 @@ def _channel(number, dwells_mm, times=None, applicator_id=None, roi=None, step_s
     for i, (position, weight) in enumerate(rows):
         point = Dataset()
         point.ControlPointIndex = i
-        point.ControlPoint3DPosition = [float(v) for v in position]
-        point.CumulativeTimeWeight = float(weight)
+        point.ControlPoint3DPosition = [_ds(v) for v in position]
+        point.CumulativeTimeWeight = _ds(weight)
+        if i in (point_tags or {}):
+            with _writing_unvalidated():
+                _apply_tags(point, point_tags[i])
         points.append(point)
     channel = Dataset()
     channel.ChannelNumber = number
@@ -258,6 +284,18 @@ def _channel(number, dwells_mm, times=None, applicator_id=None, roi=None, step_s
         channel.ReferencedROINumber = number if roi is None else roi
     if step_size is not None:
         channel.SourceApplicatorStepSize = float(step_size)
+    if total_time is not None:
+        channel.ChannelTotalTime = _ds(total_time)
+    if final_weight is not None:
+        channel.FinalCumulativeTimeWeight = _ds(final_weight)
+    if source_number is not None:
+        channel.ReferencedSourceNumber = source_number
+    if movement_type is not None:
+        channel.SourceMovementType = movement_type
+    if pulses is not None:
+        channel.NumberOfPulses, channel.PulseRepetitionInterval = pulses[0], _ds(pulses[1])
+    with _writing_unvalidated():
+        _apply_tags(channel, tags or {})
     return channel
 
 

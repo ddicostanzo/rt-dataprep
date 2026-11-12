@@ -252,6 +252,43 @@ The file has one row per spot with a non-zero weight. The columns and types are 
 - Converted trees made before this version gain `ion_plan.parquet`, and the new `radiation_type`/`beam_type`/`treatment_machine` values of proton plans in their
   `series.json` `dicom` objects, only on a run with `convert --overwrite`.
 
+### dwell.parquet
+
+A brachytherapy RT Plan with `BrachyTreatmentType` HDR or PDR (and `SourceMovementType` STEPWISE or FIXED on every channel that has control points) writes
+`dwell.parquet` in its plan folder (after `ion_plan.parquet`, before `series.json`). Its `series.json` row has `kind` `dwell` (modality `RTPLAN`, the plan's
+FrameOfReferenceUID, which may be empty: brachy RTPLANs often omit it); `preprocess` copies or re-indexes it like `plan.parquet`, and `manifest` lists it in
+the plan line's `dwell` key. LDR, MDR, MANUAL and plans with no `BrachyTreatmentType` get no table, silently, as does a plan with any channel whose source is
+OSCILLATING or UNIDIRECTIONAL (moving sources are not handled).
+
+The file has one row per dwell: control points 2k and 2k+1 of a channel, at one position, form dwell k. Dwells with zero time are kept (inactive positions show the
+activatable path). The columns and types are `rt_dataprep.dwell_table.DWELL_SCHEMA`; read them with `pyarrow.parquet.read_table`. Rows are in application setup
+order, then channel order, then dwell index. Setup, channel and source fields repeat on every row of their channel.
+
+- Setup and channel: `brachy_treatment_type`, `setup_number`, `setup_name`, `setup_type`, `channel_number`, `source_movement_type`, `source_applicator_id`,
+  `source_applicator_type`, `source_applicator_step_size` (mm), `source_applicator_length` (mm), `transfer_tube_length` (mm), `referenced_roi_number`
+  (nullable: `setup_name`, `setup_type` and the `source_applicator_*`,
+  `transfer_tube_length` and `referenced_roi_number` columns),
+  `channel_total_time` (s), `final_cumulative_time_weight`, `number_of_control_points`, `number_of_pulses` and `pulse_repetition_interval` (s; PDR only, else null).
+- Source (the `SourceSequence` item the channel references): `source_number`, `source_isotope_name`, `source_isotope_half_life` (days), `reference_air_kerma_rate`
+  (µGy/h at 1 m), `source_strength_reference_date` and `source_strength_reference_time` (DICOM DA and TM strings, as stored); all but `source_number` nullable.
+- Dwell: `dwell_index` (0-based within the channel, zero-time dwells counted), `control_point_index`, `relative_position` (mm, nullable),
+  `position_x/y/z` (patient mm, control point 2k), `position_i/j/k` (the same point as a continuous voxel index of the CT in the same folder), `cumulative_time_weight`,
+  `dwell_weight` and `dwell_time_s`. Every column not marked nullable is never null.
+- `dwell_weight` is `max(0, w(2k+1) - w(2k))` of the cumulative time weights; `dwell_time_s` is `channel_total_time * dwell_weight / final_cumulative_time_weight`
+  (the DICOM definition), and 0 when both the final weight and the total time are 0. The `dwell_weight`s of a channel sum to its final weight within 1e-4 relative
+  (`DWELL_WEIGHT_TOLERANCE`), not exactly.
+- The times are as exported in `ChannelTotalTime`. **Which date's source strength those times assume is not established** (DICOM ties the air kerma rate to its
+  reference date, not to the treatment time); it stays open until a TG-43 point dose from this table is compared with RTDOSE on a real export. No decay correction is applied.
+- For PDR, `channel_total_time` is stored as-is next to `number_of_pulses` and `pulse_repetition_interval`. Reading it as the time of one pulse (per fraction:
+  multiply by `number_of_pulses`) is a vendor convention, not DICOM, and is unverified on a real PDR export.
+- A plan with a missing or inconsistent value (an odd control point count, the two control points of a dwell apart, weights that do not add up or that rise while the source
+  moves, a missing position or weight, a duplicate channel number, a PDR channel without pulse values, ...) gets no table and logs the single fixed warning
+  `convert: the brachy RTPLAN has a missing or inconsistent value; no dwell table written` (`REASON_DWELL`); the CT, dose, masks, applicator files and the rest of the plan folder are unaffected.
+  The file is therefore absent, never empty, when the plan gets no table.
+- A `preprocess` run with `--initial-resample`, `--resample` or `--reshape` rewrites `position_i/j/k` for the final CT (every other column is unchanged); a run
+  without those steps copies the file unchanged. A `dwell.parquet` that is not the table schema is left out with one warning, as for `plan.parquet`.
+- Converted trees made before this version gain `dwell.parquet` only on a run with `convert --overwrite`.
+
 ### beam_mu.nii.gz
 
 A photon plan that gets a `plan.parquet` also gets `beam_mu.nii.gz` (after `plan.parquet`, before `series.json`), with a
@@ -439,7 +476,7 @@ these keys:
 | `fov_mask` (optional) | Planning-CT or study-image support-mask filename, relative to its case folder; blank when absent. |
 | `patient_age`, `patient_sex`, `patient_weight`, `study_date`, `series_date`, `manufacturer`, `model`, `institution_name` (all optional) | From the `dicom` object of the case's primary image (a plan's planning CT; an imaging line's own series), `series_date` from that image's `series_date` field. A key the image has no value for is left out of that line, so lines can differ in which of these they carry. A value that varied over the series is the `{"min": ..., "max": ...}` or `{"distinct": [...]}` object, copied as is. They follow the fixed keys (and `fov_mask`) in the order listed; a `series.json` without `dicom` gives only `series_date`. `split` ignores them. |
 | `retained` (optional, plans only) | The lowest dose/mask `retained` of a preprocessed plan (the fraction kept by `--allow-crop`), after the metadata keys; left out on a converted tree or a run without a geometric step. |
-| `plan`, `beam`, `fluence`, `ion_plan` (optional, plans only) | The file name of the plan's `plan` series.json row (`plan.parquet`), of its `beam` row (`beam_mu.nii.gz`, or its prefixed name after a geometric `preprocess` run), of its `fluence` row (`fluence_mu.nii.gz`, never renamed) and of its `ion_plan` row (`ion_plan.parquet`); each is left out when the plan has no such row. They follow `retained`, in the order `plan`, `beam`, `fluence`, `ion_plan`. |
+| `plan`, `beam`, `fluence`, `ion_plan`, `dwell` (optional, plans only) | The file name of the plan's `plan` series.json row (`plan.parquet`), of its `beam` row (`beam_mu.nii.gz`, or its prefixed name after a geometric `preprocess` run), of its `fluence` row (`fluence_mu.nii.gz`, never renamed) of its `ion_plan` row (`ion_plan.parquet`) and of its `dwell` row (`dwell.parquet`); each is left out when the plan has no such row. They follow `retained`, in the order `plan`, `beam`, `fluence`, `ion_plan`, `dwell`. |
 
 `masks` and `series` are native JSON lists, `patient_age` and `retained` are numbers, and the optional metadata values may be objects; every other value is a string. The `fov_mask` key appears on every line only
 when at least one usable primary-image mask is present in the tree. Without those masks, the original fourteen keys are
@@ -721,7 +758,7 @@ def load(case_dir):
 train = [load(case) for cases in splits['train'].values() for case in cases]
 ```
 
-In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, `plan`, `beam`, `fluence`, or `ion_plan`.
+In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, `plan`, `beam`, `fluence`, `ion_plan`, or `dwell`.
 Applicator and line files are gzip-compressed coordinate text, not NIfTI; see [Conversion behavior](#conversion-behavior).
 After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (summed dose) and mask (volume)
 kept on the final grid. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should

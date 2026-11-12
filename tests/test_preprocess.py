@@ -3178,3 +3178,82 @@ def test_the_legacy_check_comes_before_any_read(tmp_path, monkeypatch):
         with pytest.raises(CaseRefused) as caught:
             check(path)
         assert str(caught.value) == pre.REASON_LEGACY_SERIES
+
+
+# ---- brachy-dwells task-02: dwell.parquet is carried like ion_plan.parquet, checked against DWELL_SCHEMA ----
+
+DWELL_NAME = conv.DWELL_NAME
+
+
+def add_dwell(tmp_path, folder, kind='dwell', name=DWELL_NAME, table=None):
+    """A brachy dwell table (dwell_rows of a synthetic HDR plan on the folder's CT) and its series.json row; `table` replaces the parquet."""
+    from test_dwell_table import plan_of
+
+    from rt_dataprep import dwell_table
+    rows = dwell_table.dwell_rows(plan_of(tmp_path), sitk.ReadImage(str(folder / conv.CT_NAME)))
+    dwell_table.write_dwell_table(table if table is not None else dwell_table.to_table(rows), folder / name)
+    rows = sf.read(folder)
+    save_rows(folder, [*rows, {**rows[-1], **series_row(name, kind, modality='RTPLAN')}])
+
+
+@pytest.mark.parametrize('steps', [PreprocessSteps(rescale=True), PreprocessSteps(ahe=True)], ids=['rescale', 'ahe'])
+def test_a_dwell_parquet_is_copied_byte_identical_on_a_non_geometric_run(tmp_path, steps):
+    folder, _ = write_plan(tmp_path / 'converted')
+    add_dwell(tmp_path, folder)
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
+    assert plan_row(report).outcome == 'preprocessed' and DWELL_NAME in plan_row(report).files
+    assert (done / DWELL_NAME).read_bytes() == (folder / DWELL_NAME).read_bytes()
+    assert [(r['file'], r['retained']) for r in sf.read(done) if r['kind'] == 'dwell'] == [(DWELL_NAME, '')]
+
+
+@pytest.mark.parametrize('steps', GEOMETRIC, ids=['four_steps', 'resample', 'reshape'])
+def test_a_geometric_run_rewrites_the_dwell_parquet_position_index_for_the_final_ct(tmp_path, steps):
+    import pyarrow.parquet as pq
+
+    from rt_dataprep import dwell_table
+    folder, _ = write_plan(tmp_path / 'converted')
+    add_dwell(tmp_path, folder)
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
+    assert plan_row(report).outcome == 'preprocessed' and DWELL_NAME in plan_row(report).files
+    final = sitk.ReadImage(str(done / pre.output_name(conv.CT_NAME, steps, ct=True, image=True)))
+    before, after = pq.read_table(folder / DWELL_NAME), pq.read_table(done / DWELL_NAME)
+    assert after.schema == dwell_table.DWELL_SCHEMA and after.num_rows == before.num_rows > 0
+    index_columns = ('position_i', 'position_j', 'position_k')
+    for name in before.column_names:
+        if name not in index_columns:
+            assert after[name].equals(before[name]), name
+    for name in index_columns:
+        assert after[name].null_count == 0
+    points = zip(*(after[name].to_pylist() for name in ('position_x', 'position_y', 'position_z')), strict=True)
+    expected = np.array([final.TransformPhysicalPointToContinuousIndex(p) for p in points])
+    assert np.allclose(np.column_stack([after[name].to_numpy() for name in index_columns]), expected, rtol=0, atol=1e-6)
+    if steps.reshape:  # the final grid is not the native one: the index really moved
+        assert not np.allclose(np.column_stack([after[n].to_numpy() for n in index_columns]), np.column_stack([before[n].to_numpy() for n in index_columns]))
+    assert sorted(p.name for p in done.iterdir() if p.name.startswith('.')) == []
+
+
+@pytest.mark.parametrize('content', ['other_schema', 'unreadable'])
+def test_a_geometric_run_leaves_out_a_dwell_parquet_that_is_not_the_dwell_schema(tmp_path, caplog, content):
+    from rt_dataprep import plan_table
+    folder, _ = write_plan(tmp_path / 'converted')
+    add_dwell(tmp_path, folder, table=plan_table.to_table([]))
+    if content == 'unreadable':
+        (folder / DWELL_NAME).write_bytes(b'not a parquet file')
+    with caplog.at_level(logging.WARNING, logger='rt_dataprep.preprocess'):
+        report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', SMALL)
+    done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
+    assert plan_row(report).outcome == 'preprocessed'
+    assert not (done / DWELL_NAME).exists() and DWELL_NAME not in plan_row(report).files and [r for r in sf.read(done) if r['kind'] == 'dwell'] == []
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+
+
+def test_the_plan_index_reason_names_all_three_plan_tables():
+    assert 'plan table' in pre.REASON_PLAN_INDEX
+    assert all(name in pre.REASON_PLAN_INDEX for name in ('plan.parquet', 'ion_plan.parquet', 'dwell.parquet'))
+
+
+def test_index_plan_table_prefix_defaults_to_isocenter():
+    import inspect
+    assert inspect.signature(pre.index_plan_table).parameters['prefix'].default == 'isocenter'

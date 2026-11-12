@@ -11,7 +11,7 @@ import pytest
 import series_files as sf
 import SimpleITK as sitk
 from test_convert import BOX, PID, dose_spec, make_plan
-from test_preprocess import (AHE_MR_OUT, ION_NAME, add_ion_plan, AHE_STUDY_CT, CUT, DOSE_SPLIT, HALF_OUT, MR_OUT, MR_RAMP, MR_SIZE, SMALL, SMALL_AHE, box, grid, landmark,
+from test_preprocess import (AHE_MR_OUT, DWELL_NAME, ION_NAME, add_dwell, add_ion_plan, AHE_STUDY_CT, CUT, DOSE_SPLIT, HALF_OUT, MR_OUT, MR_RAMP, MR_SIZE, SMALL, SMALL_AHE, box, grid, landmark,
                              mr_spec, photon_converted, rigid, run_plan, save_rows, series_row, state, write_plan, write_study_tree)
 from test_series import STUDY_D1, STUDY_D2, STUDY_T1, STUDY_T2, put
 
@@ -47,8 +47,8 @@ def read(root):
     rows = [json.loads(line) for line in (root / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]
     for row in rows:  # the optional keys (task-04) follow the fixed ones, in order; this helper's callers compare the fixed part
         base = [*COLUMNS, 'fov_mask'] if 'fov_mask' in row else COLUMNS
-        assert list(row) == [*base, *(key for key in [*OPTIONAL, 'retained', 'plan', 'beam', 'fluence', 'ion_plan'] if key in row)]
-    return [{key: value for key, value in row.items() if key not in [*OPTIONAL, 'retained', 'plan', 'beam', 'fluence', 'ion_plan']} for row in rows]
+        assert list(row) == [*base, *(key for key in [*OPTIONAL, 'retained', 'plan', 'beam', 'fluence', 'ion_plan', 'dwell'] if key in row)]
+    return [{key: value for key, value in row.items() if key not in [*OPTIONAL, 'retained', 'plan', 'beam', 'fluence', 'ion_plan', 'dwell']} for row in rows]
 
 
 def test_rows_columns_and_values_on_a_converted_tree(tmp_path):
@@ -695,3 +695,25 @@ def test_a_non_photon_plan_line_has_neither_key(tmp_path):
     assert man.manifest(converted) == (1, 0)
     line = plan_line(converted)
     assert 'plan' not in line and 'beam' not in line
+
+
+def test_a_dwell_key_follows_ion_plan_exactly_when_its_row_exists(tmp_path):
+    converted, folder = photon_converted(tmp_path)
+    assert man.manifest(converted) == (1, 0)
+    assert 'dwell' not in plan_line(converted)  # no dwell row, no key
+    add_ion_plan(tmp_path, folder)
+    add_dwell(tmp_path, folder)
+    assert man.manifest(converted) == (1, 0)
+    line = plan_line(converted)
+    assert list(line)[-5:] == ['plan', 'beam', 'fluence', 'ion_plan', 'dwell'] and line['dwell'] == DWELL_NAME
+
+
+def test_a_geometric_run_lists_the_dwell_under_its_kept_name(tmp_path):
+    converted, folder = photon_converted(tmp_path)
+    add_dwell(tmp_path, folder)
+    out = tmp_path / 'out'
+    pre.preprocess(converted, out, dataclasses.replace(SMALL, new_shape=(8, 8, 8)))
+    assert man.manifest(out) == (1, 0)
+    line = plan_line(out)
+    assert list(line)[-5:] == ['retained', 'plan', 'beam', 'fluence', 'dwell'] and line['dwell'] == DWELL_NAME
+    assert (out / folder.parent.name / 'plan_1' / DWELL_NAME).is_file()

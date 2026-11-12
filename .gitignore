@@ -26,3 +26,4 @@ series.csv
 series.json
 plan.parquet
 ion_plan.parquet
+dwell.parquet
