@@ -50,8 +50,9 @@ PREPROCESSED_SERIES_COLUMNS = [*conv.SERIES_COLUMNS, 'retained']  # preprocess's
 REASON_NO_CT = 'series.json does not list exactly one ct file'
 REASON_DOSE_COUNT = 'series.json lists more than one dose file'
 REASON_KIND = 'series.json has a row of an unknown kind'
-LOW_RETAINED = 0.9  # the run log counts preprocessed plans whose lowest `retained` (dose at or above DOSE_RETAINED_GY, non-EXTERNAL mask) is below this (#226)
-DOSE_RETAINED_GY = 1.0  # a dose file's `retained` is the in-grid fraction of its voxels at or above this (inclusive; dose is always Gy)
+LOW_RETAINED = 0.9  # the run log counts preprocessed plans whose lowest `retained` (dose in its dose_region, non-EXTERNAL mask) is below this (#226)
+DOSE_RETAINED_GY = 1.0  # a dose file's `retained` is the in-grid fraction of its voxels at or above this, or DOSE_RETAINED_FRACTION of its max when lower (inclusive; dose is always Gy)
+DOSE_RETAINED_FRACTION = 0.1  # of a dose's max: the threshold of a dose whose max is below 10 Gy, e.g. one EBRT fraction (#307)
 REASON_SERIES_CSV = 'series.json is malformed: not valid JSON, not an array of objects of strings with the expected keys, or one file named twice'
 LEGACY_SERIES_NAME = 'series.csv'  # what convert v0.1.x wrote; never read
 REASON_LEGACY_SERIES = 'converted by an older version (series.csv); reconvert with --overwrite'
@@ -84,7 +85,7 @@ class PreprocessSteps:
     ahe_clip_limit: float = 0.05
     min_mask_retention: float | None = None  # optional minimum output/input physical foreground volume; no clinical default
     legacy_linear_masks: bool = False
-    allow_crop: bool = False  # crop a dose or mask that extends past the final grid instead of refusing the plan; `retained` records how much is kept (a dose: its voxels at or above DOSE_RETAINED_GY)
+    allow_crop: bool = False  # crop a dose or mask that extends past the final grid instead of refusing the plan; `retained` records how much is kept (a dose: its dose_region)
     series_fov_mask: bool = False  # not a step: uint8 support masks for planning CT, study and aligned plan images
     new_spacing: tuple = (1, 1, 1)  # mm, (x, y, z)
     final_spacing: tuple = (1.25, 1.25, 1.25)
@@ -722,6 +723,11 @@ def counts_toward_retained(row):
     return row['kind'] in ('dose', 'mask') and bool(row.get('retained')) and not external
 
 
+def dose_region(dose):
+    """The 0/1 voxels a dose's `retained` counts: at or above the lesser of DOSE_RETAINED_GY and DOSE_RETAINED_FRACTION of its max (#307); never empty for a dose with a positive voxel."""
+    return dose >= min(DOSE_RETAINED_GY, DOSE_RETAINED_FRACTION * float(sitk.GetArrayViewFromImage(dose).max()))
+
+
 def native_retained(native, final):
     """The part of `native` (summed values, float64; a 0/1 image gives a voxel fraction) whose voxel centres fall inside final's buffer, over the whole; 1.0 for an empty image.
     Same direction as the CT, so each native axis maps increasingly onto one final axis: bisect the first and last in-grid index per axis."""
@@ -791,8 +797,8 @@ def preprocess_plan(plan_dir, out_dir, steps):
                     check_crop(native, final)
                     crossed = False
                 cropped += crossed
-                # a dose is judged on its voxels at or above DOSE_RETAINED_GY (a 0/1 temporary, released at once); crosses_final, process_dose and has_voxels keep the unthresholded native
-                cell = repr(native_retained(native >= DOSE_RETAINED_GY if kind == 'dose' else native, final) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
+                # a dose is judged on its dose_region (a 0/1 temporary, released at once); crosses_final, process_dose and has_voxels keep the unthresholded native
+                cell = repr(native_retained(dose_region(native) if kind == 'dose' else native, final) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
             image = process_dose(native, final) if kind in ('dose', 'beam') else process_mask(native, final, steps)
             if kind != 'beam' and has_voxels(native) and not has_voxels(image):
                 raise CaseRefused(REASON_CROP)

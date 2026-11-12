@@ -52,6 +52,6 @@ object (all-or-none per series.json) with the mask's `roi_interpreted_type`.
 ## Deferred
 - A mask whose `dicom` is missing or whose `roi_interpreted_type` aggregates to `{"distinct": [...]}` counts as non-EXTERNAL.
 - Excluding EXTERNAL masks from the `cropped` count/report column.
-- Dose files that are one fraction or one beam (`DoseSummationType` FRACTION/BEAM): 1 Gy means something different there.
+- Dose files that are one fraction or one beam (`DoseSummationType` FRACTION/BEAM): 1 Gy means something different there. Superseded by #307: the threshold is now min(1 Gy, 10% of the dose's max).
 - Configurable dose threshold (CLI/`PreprocessSteps`), or a relative (% of max / prescription) threshold.
 - Refusing a plan when the crop cuts dose above the threshold.

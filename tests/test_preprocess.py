@@ -2951,6 +2951,16 @@ def test_a_sub_1_gy_tail_past_the_edge_counts_as_cropped_but_leaves_the_dose_ret
     assert series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', CUT)] == '1.0'
 
 
+@pytest.mark.parametrize(('cut', 'kept', 'cell'), [(0.7, 2.0, '0.5'),  # one 2 Gy EBRT fraction: the threshold is 0.2 Gy (10% of max), so the cut half counts
+                                                 (0.15, 2.0, '1.0'),  # ... and a cut half below 0.2 Gy does not
+                                                 (0.2, 0.5, '0.5'),  # max 0.5 Gy: no voxel reaches 1 Gy, yet the cut half (>= 0.05 Gy) counts (#307)
+                                                 (0.5, 20.0, '1.0')])  # max >= 10 Gy: the threshold stays 1 Gy
+def test_a_dose_threshold_is_the_lesser_of_1_gy_and_a_tenth_of_its_max(tmp_path, cut, kept, cell):
+    write_plan(tmp_path / 'converted', dose=np.where(np.arange(12)[:, None, None] < 3, cut, kept) * HALF_OUT, masks={})
+    pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    assert series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', CUT)] == cell
+
+
 def with_roi_types(folder, types):
     """Give every series.json row a `dicom` object (all-or-none per file); a mask gets its roi_interpreted_type from `types`."""
     sf.write([r | {'dicom': {'roi_interpreted_type': types[r['roi_name']]} if r['kind'] == 'mask' else {}} for r in sf.read(folder)], folder / conv.SERIES_NAME)
