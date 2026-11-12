@@ -2091,7 +2091,6 @@ def _off_grid(beam):  # no MLC: the X2 jaw alone bounds the open edge
 FLUENCE_ONLY = {
     'aperture': NOT_MODELLED['blocks'],
     'off-grid': dict(plan_meta=_beam_edit(_off_grid, sd.photon_beam(mlc=False, kind='3d'))),
-    'duplicate-numbers': dict(plan_meta=dict(beams=[sd.photon_beam(3), sd.photon_beam(3)])),
 }
 
 
@@ -2151,6 +2150,15 @@ def test_a_bug_in_fluence_mu_propagates_and_leaves_no_plan_folder(tree, monkeypa
     with pytest.raises(RuntimeError):
         run_plan(org / PID / 'plan_1', case)
     assert not case.exists()
+
+
+def test_duplicate_beam_numbers_refuse_plan_parquet_and_with_it_the_fluence_map(tree, caplog):  # #273: plan_rows refuses before fluence sees the rows
+    caplog.set_level(logging.DEBUG)
+    plan, rows, out = photon_plan(tree, rois=[BOX], beams=[sd.photon_beam(3), sd.photon_beam(3)])
+    folder = out / PID / 'plan_1'
+    assert not (folder / 'plan.parquet').exists() and not (folder / 'fluence_mu.nii.gz').exists()
+    assert len(logged(caplog, plan_table.REASON_PLAN_TABLE)) == 1 and logged(caplog, fluence.REASON_FLUENCE) == []
+    assert_no_leak(caplog, out, secrets_of(plan, tree))
 
 
 def test_a_malformed_plan_table_logs_no_beam_line(tree, caplog):
