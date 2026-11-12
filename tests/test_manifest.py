@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 
 import numpy as np
 import pytest
@@ -661,6 +662,21 @@ def test_a_non_geometric_run_leaves_the_plan_line_retained_out(tmp_path):  # #26
     assert plan_retained(tmp_path / 'out') is None
 
 
+@pytest.mark.parametrize('key', ['roi_name', 'series_instance_uid'])
+def test_a_plan_whose_series_json_holds_a_lone_surrogate_is_refused_and_its_sibling_is_written(tmp_path, key):  # #268
+    converted = tmp_path / 'converted'
+    for plan in ('plan_1', 'plan_2'):
+        write_plan(converted, plan=plan)
+    path = converted / 'SYNTHETICPTA' / 'plan_1' / conv.SERIES_NAME
+    text = path.read_text(encoding='utf-8')
+    rows = json.loads(text)
+    next(row for row in rows if row[key])[key] = 'SYNTHETIC_\udcff'
+    path.write_text(json.dumps(rows), encoding='utf-8')  # ensure_ascii spells it as the \\udcff escape
+    assert man.manifest(converted) == (1, 1)
+    assert json.loads((converted / 'manifest.jsonl').read_text(encoding='utf-8'))['case_dir'].endswith('plan_2')
+
+
+@pytest.mark.skipif(sys.platform == 'darwin', reason='APFS refuses a file name that is not UTF-8')  # #268
 def test_a_patient_folder_whose_name_is_not_utf8_is_refused_and_the_rest_still_splits(tmp_path):
     root = tree(tmp_path / 'converted')
     write_plan(root, 'SYNTHETIC_C')
