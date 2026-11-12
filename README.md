@@ -180,7 +180,8 @@ Values are the DICOM values as written: strings (raw DA/TM/DT text such as `2024
 multi-valued element (`pixel_spacing`, `image_type`), and two numbers, `patient_age` (years, from `PatientAge` or from the
 birth date and study date; the birth date itself is not written) and `slices` (the count of slice headers). When the
 headers of a row (every slice of a series, every file of a multi-file dose) disagree, the value is
-`{"min": a, "max": b}` for a single numeric element or a DA/TM/DT (the first-seen texts of the extremes), and
+`{"min": a, "max": b}` for a single numeric element or a DA/TM/DT whose values are all in standard form (the first-seen texts of the extremes;
+an ACR-NEMA `HH:MM:SS` or `YYYY.MM.DD`, or a DT with a UTC offset, gives `distinct`), and
 `{"distinct": [v1, v2, ...]}` otherwise (first-seen order); equal numbers such as `3` and `3.0` are one value.
 Which keys a row carries depends on its kind: patient, study, device and acquisition keys (`manufacturer`, `model`,
 `institution_name`, `study_date`, ...) on every row; image, CT, MR and PET keys (`rows`, `kvp`, `echo_time`,

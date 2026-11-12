@@ -17,7 +17,11 @@ from pydicom.multival import MultiValue
 ALL, IMAGES, RTPLAN, RTSTRUCT, RTDOSE, REG = 'all', 'images', 'rtplan', 'rtstruct', 'rtdose', 'reg'
 
 NUMERIC_VRS = frozenset(('DS', 'IS', 'FL', 'FD', 'US', 'UL', 'SS', 'SL'))
-TEXT_ORDER_VRS = frozenset(('DA', 'TM', 'DT'))
+TEXT_ORDER = {  # the standard forms, fixed width from the left, whose string order is time order; any other value (ACR-NEMA HH:MM:SS or YYYY.MM.DD, a DT offset) makes the set distinct (#258)
+    'DA': re.compile(r'[0-9]{8}'),
+    'TM': re.compile(r'[0-9]{2}([0-9]{2}([0-9]{2}(\.[0-9]{1,6})?)?)?'),
+    'DT': re.compile(r'[0-9]{4}([0-9]{2}([0-9]{2}([0-9]{2}([0-9]{2}([0-9]{2}(\.[0-9]{1,6})?)?)?)?)?)?'),
+}
 _GUARDED = (AttributeError, KeyError, IndexError, TypeError, ValueError)  # as series._or_none
 _PET = 'RadiopharmaceuticalInformationSequence[0].'
 
@@ -206,7 +210,7 @@ def _floats(texts):
 def _aggregate(samples, minmax):
     """
     One value from the (value, VR) samples of all headers, in first-seen order: none -> None; one distinct value -> it;
-    several -> {'min', 'max'} (when `minmax`, for a VM 1 numeric element that parses or a DA/TM/DT) else {'distinct': [...]}.
+    several -> {'min', 'max'} (when `minmax`, for a VM 1 numeric element that parses or a DA/TM/DT all in standard form) else {'distinct': [...]}.
     """
     if not samples:
         return None
@@ -221,8 +225,8 @@ def _aggregate(samples, minmax):
         return values[0]
     if minmax and numbers:
         return {'min': distinct[min(distinct)], 'max': distinct[max(distinct)]}
-    if minmax and scalar and len(vrs) == 1 and vrs <= TEXT_ORDER_VRS:
-        return {'min': min(values), 'max': max(values)}  # standard (colon-free) TM is fixed width from the left: string order is time order
+    if minmax and scalar and len(vrs) == 1 and (pattern := TEXT_ORDER.get(next(iter(vrs)))) and all(pattern.fullmatch(value) for value in values):
+        return {'min': min(values), 'max': max(values)}
     return {'distinct': values}
 
 
