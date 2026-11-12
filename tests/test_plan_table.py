@@ -253,6 +253,10 @@ def _index_out_of_order(beam):  # #272
     beam['ControlPointSequence'][2]['ControlPointIndex'] = 5
 
 
+def _negative_meterset(beam):  # #325, as ion_plan_table since #297
+    beam['BeamMeterset'] = -100.0
+
+
 def _empty_radiation_type(beam):  # #275: Type 2, so legal, but not silently skipped
     beam['RadiationType'] = ''
 
@@ -264,7 +268,7 @@ def _cone(beam):  # #277: an SRS cone sets the field, not the jaws/MLC in the ro
 @pytest.mark.filterwarnings('ignore:Invalid value for VR DS')  # the 'nan' gantry case
 @pytest.mark.parametrize('mutate', [
     _bad_gantry, _beam_type_gone, _energy_gone, _no_meterset, _short_mlc, _short_boundaries, _decreasing, _final_zero,
-    _first_weight, _last_weight, _empty_weight, _two_mlcs, _jaw_missing_at_cp0, _mlc_missing_at_cp0, _truncated, _index_out_of_order, _empty_radiation_type, _cone])
+    _first_weight, _last_weight, _empty_weight, _two_mlcs, _jaw_missing_at_cp0, _mlc_missing_at_cp0, _truncated, _index_out_of_order, _empty_radiation_type, _cone, _negative_meterset])
 def test_malformed_photon_plan_is_refused(tmp_path, mutate):
     beam = vmat()
     mutate(beam)

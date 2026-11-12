@@ -238,6 +238,14 @@ def _duplicate_shifter(beam):  # #297
     beam['RangeShifterSequence'].append(dict(beam['RangeShifterSequence'][0]))
 
 
+def _truncated(beam):  # #325: NumberOfControlPoints says one more than the sequence holds
+    beam['NumberOfControlPoints'] = len(points_of(beam)) + 1
+
+
+def _index_out_of_order(beam):  # #325
+    points_of(beam)[1]['ControlPointIndex'] = 5
+
+
 def _undeclared_shifter_setting(beam):  # #297
     points_of(beam)[0]['RangeShifterSettingsSequence'].append(dict(points_of(beam)[0]['RangeShifterSettingsSequence'][0], ReferencedRangeShifterNumber=9))
 
@@ -246,7 +254,7 @@ def _undeclared_shifter_setting(beam):  # #297
 @pytest.mark.parametrize('mutate', [
     _layer_sum_off, _last_cp_weights, _layer_shifted, _last_cp_moved, _total_drifts, _negative, _odd_map, _spot_count, _no_meterset, _energy_nan, _energy_gone,
     _gantry_gone, _isocenter_gone, _first_weight, _last_weight, _decreasing, _final_zero, _no_unit, _shifter_without_setting,
-    _weights_absent, _bad_spot_size, _negative_meterset, _duplicate_shifter, _undeclared_shifter_setting])
+    _weights_absent, _bad_spot_size, _negative_meterset, _duplicate_shifter, _undeclared_shifter_setting, _truncated, _index_out_of_order])
 def test_malformed_pbs_plan_is_refused(tmp_path, mutate):
     beam = sd.pbs_beam(range_shifters=1)
     mutate(beam)

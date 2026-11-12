@@ -113,6 +113,7 @@ def _beam_rows(beam, meterset, ct):
     _check(int(_need(beam.get('NumberOfControlPoints'))) == len(points))  # a truncated sequence (#272)
     weights = _weights(points, final)
     beam_meterset = _num(_need(meterset))
+    _check(beam_meterset >= 0)  # else negative mu, as ion_plan_table (#325)
 
     devices = beam.get('BeamLimitingDeviceSequence') or []
     mlcs = [d for d in devices if str(d.get('RTBeamLimitingDeviceType')).startswith('MLC')]
