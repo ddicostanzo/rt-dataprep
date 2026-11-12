@@ -41,3 +41,8 @@ Files: `src/rt_dataprep/preprocess.py`, `src/rt_dataprep/manifest.py`, `tests/te
 - manifest `_files` gains `dwell` after `ion_plan`.
 - Tests: `add_dwell(tmp_path, folder, kind, name, table)` in test_preprocess builds the table from `test_dwell_table.plan_of` (HDR, positions on the
   CT grid of `write_plan`); `DWELL_NAME` is a literal there because `conv.DWELL_NAME` arrives in task-03 (switch to it then).
+
+## review-2 (wave, task-02)
+PASS, no BLOCKING. W1 (phi rule lacks dwell.parquet) is task-04's criterion. Deferred to 2.9 filing: N1 (signature-only
+prefix-default test), N2 (no manifest test with both ion_plan and dwell rows). task-03: switch the test literal
+DWELL_NAME in tests/test_preprocess.py to conv.DWELL_NAME if convenient.
