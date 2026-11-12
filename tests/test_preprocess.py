@@ -2796,7 +2796,7 @@ def test_preprocessing_a_preprocessed_tree_succeeds_and_sets_retained_from_this_
 CUT = PreprocessSteps(reshape=True, new_shape=(6, 6, 6), allow_crop=True)  # a centred crop of the 12^3 plan: native indices 3..8 stay
 CUT_OFF = dataclasses.replace(CUT, allow_crop=False)
 HALF_OUT = box((3, 3, 0), (9, 9, 6))  # z indices 0..5: half of them (0..2) are outside the final grid
-# 1 on z 0..2 (outside), 3 on z 3..5 (inside): the in-grid share of the summed dose is 9 / 12
+# 1 on z 0..2 (outside), 3 on z 3..5 (inside): both are >= 1 Gy, so the in-grid share of that region is 3 / 6 (the summed dose would give 9 / 12)
 DOSE_SPLIT = np.where(np.arange(12)[:, None, None] < 3, 1.0, 3.0) * HALF_OUT
 
 
@@ -2830,11 +2830,11 @@ def test_allow_crop_writes_a_plan_whose_dose_and_mask_are_cut_on_the_final_ct_gr
     assert not any('SYNTHETIC' in record.getMessage() for record in caplog.records)
 
 
-def test_retained_is_the_native_in_grid_fraction_of_the_summed_dose_and_of_the_mask(tmp_path):
+def test_retained_is_the_native_in_grid_voxel_fraction_of_the_dose_at_or_above_1_gy_and_of_the_mask(tmp_path):
     write_plan(tmp_path / 'converted', dose=DOSE_SPLIT, masks={'ptv': HALF_OUT, 'bladder': box((5, 5, 5), (8, 8, 8))})
     report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
     cells = series_cells(tmp_path / 'out')
-    assert cells == {pre.output_name(conv.CT_NAME, CUT, ct=True, image=True): '', pre.output_name('dose.nii.gz', CUT): '0.75',
+    assert cells == {pre.output_name(conv.CT_NAME, CUT, ct=True, image=True): '', pre.output_name('dose.nii.gz', CUT): '0.5',
                      pre.output_name('ptv.nii.gz', CUT): '0.5', pre.output_name('bladder.nii.gz', CUT): '1.0', 'applicator_a.txt': ''}
     assert all('np.' not in cell and (not cell or float(cell) == float(cell)) for cell in cells.values())
     assert plan_row(report).cropped == 2  # the dose and the ptv
@@ -2942,13 +2942,55 @@ def test_a_native_dose_grid_larger_than_the_final_grid_with_values_only_inside_h
     assert plan_row(report).cropped == 0
 
 
-def test_a_negligible_tail_past_the_edge_counts_as_cropped_even_when_retained_rounds_to_one(tmp_path):
+def test_a_sub_1_gy_tail_past_the_edge_counts_as_cropped_but_leaves_the_dose_retained_exactly_one(tmp_path):
     tail = box((3, 3, 3), (9, 9, 9), value=1.0)
     tail[3, 6, 2] = 1e-9  # one native voxel centre just outside the kept indices 3..8
     write_plan(tmp_path / 'converted', dose=tail, masks={})
     report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
     assert plan_row(report).cropped == 1
-    assert 0.99999 < float(series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', CUT)]) <= 1.0
+    assert series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', CUT)] == '1.0'
+
+
+def with_roi_types(folder, types):
+    """Give every series.json row a `dicom` object (all-or-none per file); a mask gets its roi_interpreted_type from `types`."""
+    sf.write([r | {'dicom': {'roi_interpreted_type': types[r['roi_name']]} if r['kind'] == 'mask' else {}} for r in sf.read(folder)], folder / conv.SERIES_NAME)
+
+
+EXTERNAL_CUT = {'body': box((0, 0, 0), (12, 12, 12)), 'ptv': box((4, 4, 4), (8, 8, 8))}  # the body is cut by the 6^3 final grid, the ptv and the default dose are not
+
+
+def test_a_cut_external_mask_keeps_its_own_retained_but_the_plan_is_not_counted_as_low(tmp_path, caplog):
+    folder, _ = write_plan(tmp_path / 'converted', masks=EXTERNAL_CUT)
+    with_roi_types(folder, {'body': 'EXTERNAL', 'ptv': 'PTV'})
+    with caplog.at_level('INFO'):
+        pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    cells = series_cells(tmp_path / 'out')
+    assert float(cells[pre.output_name('body.nii.gz', CUT)]) < 1.0
+    assert [cells[pre.output_name(f'{n}.nii.gz', CUT)] for n in ('dose', 'ptv')] == ['1.0', '1.0']
+    assert '; 1 plans cropped, 0 with retained < 0.9; ' in caplog.records[-1].getMessage()
+
+
+def test_a_cut_non_external_mask_still_counts_in_the_low_retained_count(tmp_path, caplog):
+    folder, _ = write_plan(tmp_path / 'converted', masks=EXTERNAL_CUT)
+    with_roi_types(folder, {'body': 'ORGAN', 'ptv': 'PTV'})
+    with caplog.at_level('INFO'):
+        pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    assert '; 1 plans cropped, 1 with retained < 0.9; ' in caplog.records[-1].getMessage()
+
+
+@pytest.mark.parametrize(('row', 'counts'), [
+    (series_row('d.nii.gz', 'dose', retained='0.5'), True),
+    (series_row('m.nii.gz', 'mask', retained='0.5', dicom={'roi_interpreted_type': 'PTV'}), True),
+    (series_row('m.nii.gz', 'mask', retained='0.5'), True),
+    (series_row('m.nii.gz', 'mask', retained='0.5', dicom={'roi_interpreted_type': 'EXTERNAL'}), False),
+    (series_row('m.nii.gz', 'mask', retained='0.5', dicom={'roi_interpreted_type': 'external'}), True),
+    (series_row('m.nii.gz', 'mask', retained='0.5', dicom={'roi_interpreted_type': {'distinct': ['EXTERNAL', 'PTV']}}), True),
+    (series_row('d.nii.gz', 'dose', retained='', dicom={}), False),
+    (series_row('b.nii.gz', 'beam', retained='0.5'), False),
+    (series_row('d.nii.gz', 'dose', retained='0.5', dicom={'roi_interpreted_type': 'EXTERNAL'}), True),  # only a mask is left out
+])
+def test_counts_toward_retained_says_which_rows_set_the_plan_minimum(row, counts):
+    assert pre.counts_toward_retained(row) is counts
 
 
 def test_native_retained_of_an_empty_image_is_one_and_of_a_cut_box_the_in_grid_share():
