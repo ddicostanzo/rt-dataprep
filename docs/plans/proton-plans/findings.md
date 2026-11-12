@@ -48,3 +48,14 @@ Carry-over gotchas:
 - AC7 (slow, 50 000 spots, 2 beams x 5 layers x 5000): `ion_plan_rows` 0.10 s + `to_table` 0.35 s = 0.45 s (pytest wall 0.92 s);
   limit 5 s.
 - Full suite: 1801 passed, 4 skipped, 3 deselected (245 s); ruff clean.
+
+## review-group-1
+Opus wave review of task-01/02: no BLOCKING. Fixed in the PR (clinical-output test gaps, orchestrator):
+- W1 spot_mu's `/ final` was untested (every fixture had final = 1): added a final = 37 test; removing `/ final` fails it.
+- W2 per-CP sum check had no isolated test (the beam-total check masked it): added total-preserving mutators
+  `_layer_shifted`, `_last_cp_moved`; removing the per-CP check fails both.
+- W3 range_shifter_wet carried an old thickness onto a new setting: a new RangeShifterSetting now drops the stored
+  thickness (spec Filling forward updated).
+- N4 metadata BeamSequence-over-IonBeamSequence order now tested.
+Deferred (hardening at 2.9): negative BeamMeterset accepted; duplicate RangeShifterNumber; settings item for an undeclared
+shifter ignored; strict-decrease check has no tolerance.

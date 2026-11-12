@@ -125,6 +125,14 @@ def test_float32_weights_and_decimal_string_cumulative_weights_convert(tmp_path)
     assert not math.isclose(rows[0]['spot_weight'], 0.1, rel_tol=1e-12)  # stored as float32
 
 
+def test_spot_mu_divides_by_a_final_weight_other_than_one(tmp_path):
+    weights = [[37 * w for w in layer] for layer in ([0.125, 0.0, 0.125], [0.125, 0.0625, 0.0625], [0.25, 0.125, 0.125])]
+    rows = rows_of(tmp_path, [sd.pbs_beam(spot_weights=weights)])
+    assert rows[0]['final_cumulative_meterset_weight'] == 37.0
+    assert math.isclose(rows[2]['spot_mu'], 100.0 * rows[2]['spot_weight'] / 37.0, rel_tol=1e-12)
+    assert math.isclose(sum(r['spot_mu'] for r in rows), 100.0, rel_tol=1e-9)
+
+
 def test_meterset_is_matched_by_beam_number(tmp_path):
     def reorder(plan):
         plan.FractionGroupSequence[0].ReferencedBeamSequence.reverse()
@@ -138,6 +146,16 @@ def _layer_sum_off(beam):
 
 
 def _last_cp_weights(beam):
+    points_of(beam)[-1]['ScanSpotMetersetWeights'][0] = 0.25
+
+
+def _layer_shifted(beam):  # CP 0 is 0.05 over its step, CP 2 0.05 under: the beam total is unchanged
+    points_of(beam)[0]['ScanSpotMetersetWeights'][0] += 0.05
+    points_of(beam)[2]['ScanSpotMetersetWeights'][0] -= 0.05
+
+
+def _last_cp_moved(beam):  # spot weight moved from CP 4 onto the last CP: the beam total is unchanged
+    points_of(beam)[4]['ScanSpotMetersetWeights'][0] = 0.0
     points_of(beam)[-1]['ScanSpotMetersetWeights'][0] = 0.25
 
 
@@ -214,7 +232,7 @@ def _bad_spot_size(beam):
 
 @pytest.mark.filterwarnings('ignore:Invalid value for VR DS')  # the 'nan' energy case
 @pytest.mark.parametrize('mutate', [
-    _layer_sum_off, _last_cp_weights, _total_drifts, _negative, _odd_map, _spot_count, _no_meterset, _energy_nan, _energy_gone,
+    _layer_sum_off, _last_cp_weights, _layer_shifted, _last_cp_moved, _total_drifts, _negative, _odd_map, _spot_count, _no_meterset, _energy_nan, _energy_gone,
     _gantry_gone, _isocenter_gone, _first_weight, _last_weight, _decreasing, _final_zero, _no_unit, _shifter_without_setting,
     _weights_absent, _bad_spot_size])
 def test_malformed_pbs_plan_is_refused(tmp_path, mutate):
@@ -272,7 +290,8 @@ def test_two_range_shifters_keep_sequence_order_and_join_on_number(tmp_path):
     assert {tuple(r['range_shifter_ids']) for r in rows} == {('SYNTHETIC_A', 'SYNTHETIC_B')}
     assert [r['range_shifter_settings'] for r in rows if r['control_point_index'] < 4] == [['IN', 'OUT']] * 5
     assert [r['range_shifter_settings'] for r in rows if r['control_point_index'] == 4] == [['IN', 'IN']] * 3
-    assert {tuple(r['range_shifter_wet']) for r in rows} == {(70.0, 30.0)}  # a later setting without a value keeps it
+    assert {tuple(r['range_shifter_wet']) for r in rows if r['control_point_index'] < 4} == {(70.0, 30.0)}
+    assert {r['range_shifter_wet'] for r in rows if r['control_point_index'] == 4} == {None}  # a new setting drops the old value
 
 
 def test_missing_water_equivalent_thickness_makes_the_list_null(tmp_path):

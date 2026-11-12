@@ -90,7 +90,8 @@ Spot-level:
 ### Filling forward
 As plan.parquet: a per-beam running state starts empty at CP 0 and each CP updates only what it carries — scalars by
 tag (energy, gantry, couch, snout position, tune id, spot size, paintings, isocenter), range shifter settings by
-referenced range shifter number. `ScanSpotPositionMap` / `ScanSpotMetersetWeights` are **never** filled forward: a CP without weights
+referenced range shifter number. A settings item that gives a new `RangeShifterSetting` replaces that shifter's whole entry: an
+earlier water-equivalent thickness never carries over to a new setting (wave review, 2026-11-11). `ScanSpotPositionMap` / `ScanSpotMetersetWeights` are **never** filled forward: a CP without weights
 carries no spots. A present-but-empty value counts as missing.
 
 ## Malformed PBS plans → `CaseRefused(REASON_ION_PLAN)`

@@ -275,6 +275,9 @@ def test_ion_plan_falls_back_to_ion_beam_sequence(tmp_path):
     got = plan_collect(tmp_path / 'b', IonBeamSequence=[dict(TreatmentMachineName='SYNTHETIC_GANTRY')],
                        TreatmentMachineSequence=[dict(TreatmentMachineName='SYNTHETIC_OTHER')])
     assert got['treatment_machine'] == 'SYNTHETIC_GANTRY'  # IonBeamSequence ranks above TreatmentMachineSequence
+    got = plan_collect(tmp_path / 'c', BeamSequence=[dict(RadiationType='PHOTON', BeamType='DYNAMIC', TreatmentMachineName='SYNTHETIC_LINAC')],
+                       IonBeamSequence=[dict(RadiationType='PROTON', BeamType='STATIC', TreatmentMachineName='SYNTHETIC_GANTRY')])
+    assert (got['radiation_type'], got['beam_type'], got['treatment_machine']) == ('PHOTON', 'DYNAMIC', 'SYNTHETIC_LINAC')  # BeamSequence first
 
 
 def test_photon_and_brachy_plans_keep_their_beam_values_and_key_order(tmp_path):

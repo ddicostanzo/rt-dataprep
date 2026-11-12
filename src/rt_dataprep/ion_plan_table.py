@@ -148,8 +148,9 @@ def _beam_rows(beam, meterset, ct):
             number = item.get('ReferencedRangeShifterNumber')
             if _missing(number):
                 continue
-            if not _missing(item.get('RangeShifterSetting')):
+            if not _missing(item.get('RangeShifterSetting')):  # a new setting replaces the whole entry: an old thickness never carries over
                 settings[int(number)] = str(item.get('RangeShifterSetting'))
+                thicknesses.pop(int(number), None)
             if not _missing(item.get('RangeShifterWaterEquivalentThickness')):
                 thicknesses[int(number)] = _num(item.get('RangeShifterWaterEquivalentThickness'))
         if i == 0:  # a declared range shifter must have its setting at CP 0
