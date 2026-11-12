@@ -2975,6 +2975,7 @@ def test_an_integer_dose_is_thresholded_without_truncating_the_threshold(tmp_pat
     assert series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', CUT)] == '0.5'
 
 
+@pytest.mark.filterwarnings('error')  # an all-NaN dose must not warn
 @pytest.mark.parametrize('values', [np.zeros((2, 2, 2)), -np.ones((2, 2, 2)), np.full((2, 2, 2), np.nan)])
 def test_a_dose_with_no_positive_voxel_has_an_empty_region(values):  # #311, #314
     assert not pre.dose_region(values).any()
