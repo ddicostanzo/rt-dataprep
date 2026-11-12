@@ -2796,7 +2796,7 @@ def test_preprocessing_a_preprocessed_tree_succeeds_and_sets_retained_from_this_
 CUT = PreprocessSteps(reshape=True, new_shape=(6, 6, 6), allow_crop=True)  # a centred crop of the 12^3 plan: native indices 3..8 stay
 CUT_OFF = dataclasses.replace(CUT, allow_crop=False)
 HALF_OUT = box((3, 3, 0), (9, 9, 6))  # z indices 0..5: half of them (0..2) are outside the final grid
-# 1 on z 0..2 (outside), 3 on z 3..5 (inside): both are >= 1 Gy, so the in-grid share of that region is 3 / 6 (the summed dose would give 9 / 12)
+# 1 on z 0..2 (outside), 3 on z 3..5 (inside): both are >= 0.3 Gy (10% of max), so the in-grid share of that region is 3 / 6 (the summed dose would give 9 / 12)
 DOSE_SPLIT = np.where(np.arange(12)[:, None, None] < 3, 1.0, 3.0) * HALF_OUT
 
 
@@ -2942,7 +2942,7 @@ def test_a_native_dose_grid_larger_than_the_final_grid_with_values_only_inside_h
     assert plan_row(report).cropped == 0
 
 
-def test_a_sub_1_gy_tail_past_the_edge_counts_as_cropped_but_leaves_the_dose_retained_exactly_one(tmp_path):
+def test_a_sub_threshold_tail_past_the_edge_counts_as_cropped_but_leaves_the_dose_retained_exactly_one(tmp_path):
     tail = box((3, 3, 3), (9, 9, 9), value=1.0)
     tail[3, 6, 2] = 1e-9  # one native voxel centre just outside the kept indices 3..8
     write_plan(tmp_path / 'converted', dose=tail, masks={})

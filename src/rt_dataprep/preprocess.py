@@ -449,7 +449,7 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
     plan_rows = [r for r in rows if r.folder and not r.folder.startswith('study_')]
     patient_rows = [r for r in rows if r.folder == '']
     if untyped := sum(r.untyped_masks for r in rows):  # before the summary, which stays the last line
-        log.warning('preprocess: %d masks count toward retained without a single dicom.roi_interpreted_type, so a body outline among them is not left out; re-convert to add dicom metadata', untyped)
+        log.warning('preprocess: %d masks count toward retained without a single dicom.roi_interpreted_type, so a body outline among them is not left out; a missing type needs a re-convert with dicom metadata', untyped)
     log.info('preprocess: %d plan rows (%d preprocessed, %d refused), %d imaging rows (%d preprocessed, %d refused), %d patient rows (%d refused, %d skipped); %d registered series skipped; %d plans cropped, %d with retained < %g; %d replaced, %d kept',
              len(plan_rows), *(sum(r.outcome == o for r in plan_rows) for o in (OUTCOME_PREPROCESSED, conv.OUTCOME_REFUSED)),
              len(imaging_rows), *(sum(r.outcome == o for r in imaging_rows) for o in (OUTCOME_PREPROCESSED, conv.OUTCOME_REFUSED)),
