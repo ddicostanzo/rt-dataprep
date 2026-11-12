@@ -41,7 +41,7 @@ def _no_duplicate_keys(pairs):
 def _read(manifest_path):
     rows, reason = [], None
     manifest_path = Path(manifest_path)
-    if not manifest_path.exists() and manifest_path.with_name('manifest.csv').is_file():
+    if manifest_path.name == 'manifest.jsonl' and not manifest_path.exists() and manifest_path.with_name('manifest.csv').is_file():  # another missing name keeps its file error
         raise ValueError(REASON_LEGACY)
     with open(manifest_path, encoding='utf-8-sig') as handle:  # -sig: a BOM, as an editor may save it; iterating the handle splits on \n and \r only
         try:

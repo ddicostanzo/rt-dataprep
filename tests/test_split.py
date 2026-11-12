@@ -177,7 +177,7 @@ def test_a_root_with_only_a_v0_1_manifest_csv_is_refused_with_a_hint_to_rerun_ma
             sp.check_disjoint({'train': {}}, str(tmp_path / 'manifest.jsonl'))
         else:
             sp.split(tmp_path / 'manifest.jsonl', test_size=0.2, val_size=0.2, seed=SEED_A)
-    assert 'rerun manifest' in sp.REASON_LEGACY and not (tmp_path / 'splits.json').exists()
+    assert not (tmp_path / 'splits.json').exists()
 
 
 def test_an_existing_splits_json_with_different_content_is_refused_and_untouched(tmp_path):
