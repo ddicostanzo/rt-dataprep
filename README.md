@@ -219,7 +219,8 @@ beam-level fields repeat on every row. The columns and types are `rt_dataprep.pl
   the CT in the same folder (invariant: `isocenter_i/j/k` always index the CT in the same folder). A preprocess run with `--initial-resample`, `--resample` or
   `--reshape` rewrites them for the final CT (every other column is unchanged); a run without those steps copies the file unchanged. A
   `plan.parquet` that pyarrow cannot parse as Parquet, or that is not the table schema, is left out of the preprocessed plan (and its `plan` row), with one warning; any other read failure refuses the patient like other I/O errors.
-- Converted trees made before this version gain `plan.parquet` only on a run with `--overwrite`.
+- Converted trees made before this version gain `plan.parquet` only on a run with `--overwrite`. Since 0.4.0 `wedge_orientation` is a
+  float (DS degrees); a tree converted with 0.3.0 needs `convert --overwrite` before preprocess keeps its `plan.parquet` (schema check).
 
 ### ion_plan.parquet
 

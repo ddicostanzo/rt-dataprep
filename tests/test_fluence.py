@@ -183,9 +183,11 @@ def test_ac8_table_top_angle_and_missing_sad_are_accepted(tmp_path):
     assert array(tmp_path, beam).any()
 
 
-def test_ac8_duplicate_beam_numbers_are_refused(tmp_path):
-    refused(tmp_path, [static(number=1), static(number=1)])
-    refused(tmp_path, [static(number=1), static(number=2), static(number=1)])
+def test_ac8_duplicate_beam_numbers_are_refused(tmp_path):  # by plan_rows since #273, before fluence sees the rows
+    for beams in ([static(number=1), static(number=1)], [static(number=1), static(number=2), static(number=1)]):
+        with pytest.raises(CaseRefused) as raised:
+            maps(tmp_path, beams)
+        assert str(raised.value) == plan_table.REASON_PLAN_TABLE
 
 
 def off_grid_mlc(x1=-250.0, x2=250.0, jaws=(-100.0, 100.0, -100.0, 100.0)):

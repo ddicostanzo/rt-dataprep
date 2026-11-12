@@ -49,7 +49,8 @@ Beam-level (repeated on each row):
 | mlc_type | string (n) | the one `BeamLimitingDeviceSequence` item of type MLCX or MLCY |
 | leaf_position_boundaries | list<float64> (n) | that item's `LeafPositionBoundaries` (mm) |
 | number_of_wedges | int64 | `NumberOfWedges` (absent → 0) |
-| wedge_id, wedge_type, wedge_orientation | string (n) | first `WedgeSequence` item |
+| wedge_id, wedge_type | string (n) | first `WedgeSequence` item |
+| wedge_orientation | float64 (n) | first `WedgeSequence` item, degrees (DS; #274) |
 | wedge_angle | float64 (n) | first `WedgeSequence` item |
 | number_of_blocks, number_of_boli | int64 | `NumberOfBlocks`, `NumberOfBoli` (absent → 0) |
 

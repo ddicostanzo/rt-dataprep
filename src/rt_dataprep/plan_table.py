@@ -24,7 +24,7 @@ def _columns():
     required = [('beam_number', i64), ('beam_name?', text), ('beam_type', text), ('treatment_machine?', text),
                 ('beam_meterset', f64), ('final_cumulative_meterset_weight', f64), ('number_of_control_points', i64),
                 ('fluence_mode?', text), ('mlc_type?', text), ('leaf_position_boundaries?', floats),
-                ('number_of_wedges', i64), ('wedge_id?', text), ('wedge_type?', text), ('wedge_orientation?', text),
+                ('number_of_wedges', i64), ('wedge_id?', text), ('wedge_type?', text), ('wedge_orientation?', f64),
                 ('wedge_angle?', f64), ('number_of_blocks', i64), ('number_of_boli', i64),
                 ('control_point_index', i64), ('cumulative_meterset_weight', f64), ('mu', f64), ('mu_cumulative', f64),
                 ('nominal_energy', f64), ('dose_rate?', f64), ('gantry_angle', f64),
@@ -84,11 +84,13 @@ def _count(value):
 
 
 def _metersets(plan):
-    """BeamMeterset (raw) per ReferencedBeamNumber of the first fraction group."""
+    """BeamMeterset (raw) per ReferencedBeamNumber of the first fraction group; a repeated number is malformed (#273)."""
     groups = plan.get('FractionGroupSequence') or []
     references = (groups[0].get('ReferencedBeamSequence') or []) if groups else []
-    return {int(r.get('ReferencedBeamNumber')): r.get('BeamMeterset') for r in references
-            if not _missing(r.get('ReferencedBeamNumber'))}
+    references = [r for r in references if not _missing(r.get('ReferencedBeamNumber'))]
+    numbers = [int(r.get('ReferencedBeamNumber')) for r in references]
+    _check(len(set(numbers)) == len(numbers))
+    return {n: r.get('BeamMeterset') for n, r in zip(numbers, references, strict=True)}
 
 
 def _device_type(devices, kinds):
@@ -108,6 +110,7 @@ def _beam_rows(beam, meterset, ct):
     final = _num(_need(beam.get('FinalCumulativeMetersetWeight')))
     points = beam.get('ControlPointSequence') or []
     _check(len(points) > 0)
+    _check(int(_need(beam.get('NumberOfControlPoints'))) == len(points))  # a truncated sequence (#272)
     weights = _weights(points, final)
     beam_meterset = _num(_need(meterset))
 
@@ -136,7 +139,7 @@ def _beam_rows(beam, meterset, ct):
         fluence_mode=None if fluence is None else _text(fluence.get('FluenceModeID')) or _text(fluence.get('FluenceMode')),
         mlc_type=mlc_type, leaf_position_boundaries=boundaries, number_of_wedges=_count(beam.get('NumberOfWedges')),
         wedge_id=wedge and _text(wedge.get('WedgeID')), wedge_type=wedge and _text(wedge.get('WedgeType')),
-        wedge_orientation=wedge and _text(wedge.get('WedgeOrientation')),
+        wedge_orientation=wedge and _optional_num(wedge.get('WedgeOrientation')),  # DS degrees (#274)
         wedge_angle=wedge and _optional_num(wedge.get('WedgeAngle')),
         number_of_blocks=_count(beam.get('NumberOfBlocks')), number_of_boli=_count(beam.get('NumberOfBoli')))
 
@@ -153,7 +156,8 @@ def _beam_rows(beam, meterset, ct):
                 wedge_positions[int(item.get('ReferencedWedgeNumber'))] = str(item.get('WedgePosition'))
         if i == 0:  # a declared jaw/MLC device must be listed at CP 0
             _check(all(t is None or t in positions for t in (*jaw_type.values(), mlc_type)))
-        row = dict(fixed, control_point_index=int(_need(point.get('ControlPointIndex'))),
+        _check(int(_need(point.get('ControlPointIndex'))) == i)  # the rows' order is the sequence's (#272)
+        row = dict(fixed, control_point_index=i,
                    cumulative_meterset_weight=weights[i],
                    mu=0.0 if i == 0 else beam_meterset * (weights[i] - weights[i - 1]) / final,
                    mu_cumulative=beam_meterset * weights[i] / final,
@@ -193,10 +197,12 @@ def plan_rows(plan, ct):
     treatment = [b for b in beams if b.get('TreatmentDeliveryType') != 'SETUP']  # SETUP beams drop first
     if not treatment or any(b.get('RadiationType') != 'PHOTON' for b in treatment):
         return None
+    numbers = [int(_need(b.get('BeamNumber'))) for b in treatment]
+    _check(len(set(numbers)) == len(numbers))  # else a beam could take another beam's MU (#273)
     metersets = _metersets(plan)
     rows = []
-    for beam in treatment:
-        rows += _beam_rows(beam, metersets.get(int(_need(beam.get('BeamNumber')))), ct)
+    for beam, number in zip(treatment, numbers, strict=True):
+        rows += _beam_rows(beam, metersets.get(number), ct)
     return rows
 
 
