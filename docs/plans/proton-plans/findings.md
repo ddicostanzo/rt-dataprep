@@ -37,8 +37,8 @@ Carry-over gotchas:
 - Decisions: the None pass (`_treatment_beams`) covers all treatment beams before `_need` runs; a missing `PrimaryDosimeterUnit`
   passes it and is refused in `_beam_rows`. Cumulative-weight and per-CP checks are validated on every CP (also those with no
   spots), so a non-finite or missing required scalar on an odd CP is refused too. `RangeShifterID` is treated as required
-  (`_need`) because `range_shifter_ids` is a non-null list<string>; it is DICOM Type 3, so a real plan that omits it would be
-  refused (a deferred question, not a plan gap). `final > 0` is checked (covers "final = 0").
+  (`_need`) because `range_shifter_ids` is a non-null list<string>; the orchestrator and both reviewers recall it as
+  Type 1 in the Ion Beam Range Shifter Sequence (not checked against PS3.3 text), so requiring it is correct. `final > 0` is checked (covers "final = 0").
 - Fixture: `pbs_beam(number, meterset, layers, spot_weights, paintings, range_shifters, tags)`: 2 CPs per layer, odd CP repeats the
   map with zero weights; default layer 0 is `[w/2, 0, w/2]` (a zero spot in a carrying CP). `write_pbs_rtplan` default beams are
   beam 1 at 100 MU and beam 2 at 300 MU.
@@ -88,3 +88,15 @@ commit leaves test_preprocess/test_manifest alone).
 - Tag-level fault test monkeypatches ion_plan_rows to read an absent keyword (file mutations are refused by our own checks
   first): REASON_MISSING_TAG then one REASON_ION_PLAN.
 - tests/test_preprocess.py ION_NAME stays a literal (5-file limit).
+
+## review-integration
+Thin pass folded into the spec-axis review: ION_SCHEMA single definition; ion_plan kind flows convert → preprocess KINDS
+and tuples → manifest _files; metadata fallback reaches every row; README and compliance match the code. No findings.
+
+## review-loop-pass-1
+/code-review (Opus, bugs) and spec axis (Opus): no BLOCKING. Trivial, fixed in 12dcb93: stale kind lists in the
+convert/preprocess/manifest docstrings, test ION_NAME from conv.ION_PLAN_NAME, spot_mu unit in README. Not changed: a
+redundant `| collect(RTPLAN)` in the new convert test mirrors the existing photon test. Deferred: #297 (negative
+BeamMeterset, duplicate RangeShifterNumber, undeclared-shifter settings, decrease tolerance), #298 (re-listed unchanged
+range shifter setting nulls range_shifter_wet), #299 (pin to_table outside _header_call). No blocking fix, so no
+verification pass.
