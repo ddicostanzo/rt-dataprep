@@ -377,7 +377,7 @@ class PreprocessRow:
     reason: str = ''
     files: list = field(default_factory=list)
     skipped_series: int = 0  # registered series left out of a plan (unusable matrix, no overlap, unreadable file)
-    cropped: int | str = ''  # preprocessed plan row of a geometric run: its dose and mask files that extend past the final grid; blank otherwise
+    cropped: int | str = ''  # preprocessed plan row of a geometric run: its dose and mask files that extend past the final grid, a body outline (is_external) left out; blank otherwise
     retained: float | None = None  # its lowest `retained` over counts_toward_retained files (run log only, #226); None when no file has one
     untyped_masks: int = 0  # its counted, cut masks with no single roi_interpreted_type, so a body outline among them is not recognised (run log only, #308)
 
@@ -790,7 +790,7 @@ def index_plan_table(source, path, final, schema=plan_table.SCHEMA, prefix='isoc
 
 
 def preprocess_plan(plan_dir, out_dir, steps):
-    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run; the lowest `retained` of the rows counts_toward_retained accepts, None when none is set; how many of those are cut masks with no single roi_interpreted_type). CaseRefused on a refusal."""
+    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid except a body outline (is_external), '' on a non-geometric run; the lowest `retained` of the rows counts_toward_retained accepts, None when none is set; how many of those are cut masks with no single roi_interpreted_type). CaseRefused on a refusal."""
     kept, ct, series = check_rows(plan_dir)
     if too_small(ct, steps):
         raise CaseRefused(REASON_TOO_SMALL)
@@ -819,7 +819,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
                 else:
                     check_crop(native, final)
                     crossed = False
-                cropped += crossed
+                cropped += crossed and not is_external(row)  # a cut body outline is not counted, as in `retained` (#310)
                 # a dose is judged on its dose_region; crosses_final, process_dose and has_voxels keep the unthresholded native
                 cell = repr(native_retained(native, final, dose_region if kind == 'dose' else None) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
             image = process_dose(native, final) if kind in ('dose', 'beam') else process_mask(native, final, steps)

@@ -405,7 +405,7 @@ By default a plan whose dose or mask extends past the final CT grid is refused. 
 dose, the fraction of its voxels at or above the lesser of 1 Gy and 10% of its max (so a 2 Gy fraction is judged at 0.2 Gy); for a mask, its volume. It is exactly `1.0` when nothing is cut, and blank for CT, applicator, line, plan, beam and series entries and on runs
 without a geometric step. In `preprocess_report.csv`, the `cropped` column counts the dose and mask files the final grid cut; a
 dose cut only below that threshold counts as cropped but has `retained` `1.0`. A mask whose `dicom.roi_interpreted_type` is `EXTERNAL` (the body outline) keeps its own
-`retained`, but is left out of the plan's lowest `retained`. A mask without a single `roi_interpreted_type` (a tree converted before dicom metadata) still counts, and the run log warns how many such masks the final grid cut. The run's closing log line counts the cropped plans and how many of them have a
+`retained`, but is left out of the plan's lowest `retained` and of `cropped`. A mask without a single `roi_interpreted_type` (a tree converted before dicom metadata) still counts, and the run log warns how many such masks the final grid cut. The run's closing log line counts the cropped plans and how many of them have a
 lowest `retained` below 0.9. A dose or mask that the final grid empties entirely refuses the plan, with or without `--allow-crop`.
 
 CT study series receive all enabled steps. MR/PT study series receive geometric steps and optional AHE, and skip HU rescaling. `--rescale`
@@ -768,7 +768,7 @@ Applicator and line files are gzip-compressed coordinate text, not NIfTI; see [C
 After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (its voxels >= min(1 Gy, 10% of its max)) and mask (volume)
 kept on the final grid. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should
 not be used. EXTERNAL masks (the body outline) keep their own value in `series.json` but are left out of the manifest's plan-level
-`retained` and of the run log's low-`retained` count. The optional `fov_mask` manifest key and `fov_mask` entries in
+`retained`, of the run log's low-`retained` count and of `cropped`. The optional `fov_mask` manifest key and `fov_mask` entries in
 the `series` JSON name support masks for excluding fill voxels from losses or metrics.
 
 ## Development

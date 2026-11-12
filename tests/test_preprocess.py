@@ -3034,7 +3034,7 @@ def with_roi_types(folder, types):
 EXTERNAL_CUT = {'body': box((0, 0, 0), (12, 12, 12)), 'ptv': box((4, 4, 4), (8, 8, 8))}  # the body is cut by the 6^3 final grid, the ptv and the default dose are not
 
 
-def test_a_cut_external_mask_keeps_its_own_retained_but_the_plan_is_not_counted_as_low(tmp_path, caplog):
+def test_a_cut_external_mask_keeps_its_own_retained_but_the_plan_is_neither_cropped_nor_low(tmp_path, caplog):
     folder, _ = write_plan(tmp_path / 'converted', masks=EXTERNAL_CUT)
     with_roi_types(folder, {'body': 'EXTERNAL', 'ptv': 'PTV'})
     with caplog.at_level('INFO'):
@@ -3042,7 +3042,7 @@ def test_a_cut_external_mask_keeps_its_own_retained_but_the_plan_is_not_counted_
     cells = series_cells(tmp_path / 'out')
     assert float(cells[pre.output_name('body.nii.gz', CUT)]) < 1.0
     assert [cells[pre.output_name(f'{n}.nii.gz', CUT)] for n in ('dose', 'ptv')] == ['1.0', '1.0']
-    assert '; 1 plans cropped, 0 with retained < 0.9; ' in run_summary(caplog)
+    assert '; 0 plans cropped, 0 with retained < 0.9; ' in run_summary(caplog)  # #310
 
 
 def test_a_cut_non_external_mask_still_counts_in_the_low_retained_count(tmp_path, caplog):
@@ -3068,6 +3068,7 @@ def test_the_run_log_warns_of_cut_counted_masks_without_a_single_roi_interpreted
     found = [r.getMessage() for r in caplog.records if 'roi_interpreted_type' in r.getMessage()]
     assert [m.split(' without')[0] for m in found] == ([f'preprocess: {warning}'] if warning else [])
     assert 'plan rows' in caplog.records[-1].getMessage()
+    assert f'; {int(bool(warning))} plans cropped, ' in run_summary(caplog)  # only a typed body outline is left out of `cropped` (#310)
 
 
 @pytest.mark.parametrize(('row', 'counts'), [
