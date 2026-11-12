@@ -574,7 +574,7 @@ def test_a_series_json_without_dicom_still_gives_lines_with_only_series_date(met
 
 def test_a_plan_line_carries_the_lowest_dose_or_mask_retained_of_a_cut_plan_and_none_on_a_converted_tree(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
-    write_plan(converted, dose=DOSE_SPLIT, masks={'ptv': HALF_OUT, 'bladder': box((5, 5, 5), (8, 8, 8))})  # retained 0.5 (dose, >= 1 Gy), 0.5, 1.0
+    write_plan(converted, dose=DOSE_SPLIT, masks={'ptv': HALF_OUT, 'bladder': box((5, 5, 5), (8, 8, 8))})  # retained 0.5 (dose, >= its threshold), 0.5, 1.0
     pre.preprocess(converted, out, CUT)
     assert man.manifest(out) == (1, 0) and man.manifest(converted) == (1, 0)
     line = json.loads((out / 'manifest.jsonl').read_text(encoding='utf-8'))

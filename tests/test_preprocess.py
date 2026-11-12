@@ -1596,7 +1596,7 @@ def test_a_geometric_run_leaves_out_an_unreadable_or_non_schema_plan_parquet(tmp
         done = out / folder.parent.name / 'plan_1'
         assert not (done / conv.PLAN_NAME).exists() and conv.PLAN_NAME not in plan_row(report).files
         assert [r for r in sf.read(done) if r['kind'] == 'plan'] == []
-        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and 'roi_interpreted_type' not in r.getMessage()] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
 
 
 BEAM_FILE = pre.output_name(conv.BEAM_NAME, SMALL)
@@ -1762,7 +1762,7 @@ def test_a_geometric_run_leaves_out_a_plan_table_of_the_other_schema(tmp_path, c
     done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
     assert plan_row(report).outcome == 'preprocessed'
     assert not (done / name).exists() and name not in plan_row(report).files and [r for r in sf.read(done) if r['kind'] == kind] == []
-    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and 'roi_interpreted_type' not in r.getMessage()] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
 
 
 def test_the_plan_index_reason_names_a_plan_table():
@@ -2796,7 +2796,7 @@ def test_preprocessing_a_preprocessed_tree_succeeds_and_sets_retained_from_this_
 CUT = PreprocessSteps(reshape=True, new_shape=(6, 6, 6), allow_crop=True)  # a centred crop of the 12^3 plan: native indices 3..8 stay
 CUT_OFF = dataclasses.replace(CUT, allow_crop=False)
 HALF_OUT = box((3, 3, 0), (9, 9, 6))  # z indices 0..5: half of them (0..2) are outside the final grid
-# 1 on z 0..2 (outside), 3 on z 3..5 (inside): both are >= 1 Gy, so the in-grid share of that region is 3 / 6 (the summed dose would give 9 / 12)
+# 1 on z 0..2 (outside), 3 on z 3..5 (inside): both are >= 0.3 Gy (10% of max), so the in-grid share of that region is 3 / 6 (the summed dose would give 9 / 12)
 DOSE_SPLIT = np.where(np.arange(12)[:, None, None] < 3, 1.0, 3.0) * HALF_OUT
 
 
@@ -2942,13 +2942,23 @@ def test_a_native_dose_grid_larger_than_the_final_grid_with_values_only_inside_h
     assert plan_row(report).cropped == 0
 
 
-def test_a_sub_1_gy_tail_past_the_edge_counts_as_cropped_but_leaves_the_dose_retained_exactly_one(tmp_path):
+def test_a_sub_threshold_tail_past_the_edge_counts_as_cropped_but_leaves_the_dose_retained_exactly_one(tmp_path):
     tail = box((3, 3, 3), (9, 9, 9), value=1.0)
     tail[3, 6, 2] = 1e-9  # one native voxel centre just outside the kept indices 3..8
     write_plan(tmp_path / 'converted', dose=tail, masks={})
     report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
     assert plan_row(report).cropped == 1
     assert series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', CUT)] == '1.0'
+
+
+@pytest.mark.parametrize(('cut', 'kept', 'cell'), [(0.7, 2.0, '0.5'),  # one 2 Gy EBRT fraction: the threshold is 0.2 Gy (10% of max), so the cut half counts
+                                                 (0.15, 2.0, '1.0'),  # ... and a cut half below 0.2 Gy does not
+                                                 (0.2, 0.5, '0.5'),  # max 0.5 Gy: no voxel reaches 1 Gy, yet the cut half (>= 0.05 Gy) counts (#307)
+                                                 (0.5, 20.0, '1.0')])  # max >= 10 Gy: the threshold stays 1 Gy
+def test_a_dose_threshold_is_the_lesser_of_1_gy_and_a_tenth_of_its_max(tmp_path, cut, kept, cell):
+    write_plan(tmp_path / 'converted', dose=np.where(np.arange(12)[:, None, None] < 3, cut, kept) * HALF_OUT, masks={})
+    pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    assert series_cells(tmp_path / 'out')[pre.output_name('dose.nii.gz', CUT)] == cell
 
 
 def with_roi_types(folder, types):
@@ -2976,6 +2986,20 @@ def test_a_cut_non_external_mask_still_counts_in_the_low_retained_count(tmp_path
     with caplog.at_level('INFO'):
         pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
     assert '; 1 plans cropped, 1 with retained < 0.9; ' in caplog.records[-1].getMessage()
+
+
+@pytest.mark.parametrize(('types', 'warning'), [(None, '2 masks count toward retained'),  # a tree converted before dicom metadata
+                                               ({'body': {'distinct': ['EXTERNAL']}, 'ptv': 'PTV'}, '1 masks count toward retained'),
+                                               ({'body': 'EXTERNAL', 'ptv': 'PTV'}, None)])
+def test_the_run_log_warns_of_counted_masks_without_a_single_roi_interpreted_type(tmp_path, caplog, types, warning):
+    folder, _ = write_plan(tmp_path / 'converted', masks=EXTERNAL_CUT)
+    if types:
+        with_roi_types(folder, types)
+    with caplog.at_level('INFO'):
+        pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    found = [r.getMessage() for r in caplog.records if 'roi_interpreted_type' in r.getMessage()]
+    assert [m.split(' without')[0] for m in found] == ([f'preprocess: {warning}'] if warning else [])
+    assert 'plan rows' in caplog.records[-1].getMessage()
 
 
 @pytest.mark.parametrize(('row', 'counts'), [
@@ -3288,7 +3312,7 @@ def test_a_geometric_run_leaves_out_a_dwell_parquet_that_is_not_the_dwell_schema
     done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
     assert plan_row(report).outcome == 'preprocessed'
     assert not (done / DWELL_NAME).exists() and DWELL_NAME not in plan_row(report).files and [r for r in sf.read(done) if r['kind'] == 'dwell'] == []
-    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and 'roi_interpreted_type' not in r.getMessage()] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
 
 
 def test_the_plan_index_reason_names_all_three_plan_tables():

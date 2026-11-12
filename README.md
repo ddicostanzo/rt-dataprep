@@ -398,10 +398,10 @@ pad a large extent at native spacing.
 By default a plan whose dose or mask extends past the final CT grid is refused. `--allow-crop` (needs at least one of
 `--initial-resample`, `--resample`, `--reshape`) writes the plan anyway, with the dose and masks cut to the final grid. In
 `series.json`, the `retained` key of each dose and mask object is the fraction of that file's native-grid content kept by the crop: for a
-dose, the fraction of its voxels >= 1 Gy; for a mask, its volume. It is exactly `1.0` when nothing is cut, and blank for CT, applicator, line, plan, beam and series entries and on runs
+dose, the fraction of its voxels at or above the lesser of 1 Gy and 10% of its max (so a 2 Gy fraction is judged at 0.2 Gy); for a mask, its volume. It is exactly `1.0` when nothing is cut, and blank for CT, applicator, line, plan, beam and series entries and on runs
 without a geometric step. In `preprocess_report.csv`, the `cropped` column counts the dose and mask files the final grid cut; a
-dose cut only below 1 Gy counts as cropped but has `retained` `1.0`. A mask whose `dicom.roi_interpreted_type` is `EXTERNAL` (the body outline) keeps its own
-`retained`, but is left out of the plan's lowest `retained`. The run's closing log line counts the cropped plans and how many of them have a
+dose cut only below that threshold counts as cropped but has `retained` `1.0`. A mask whose `dicom.roi_interpreted_type` is `EXTERNAL` (the body outline) keeps its own
+`retained`, but is left out of the plan's lowest `retained`. A mask without a single `roi_interpreted_type` (a tree converted before dicom metadata) still counts, and the run log warns how many there are. The run's closing log line counts the cropped plans and how many of them have a
 lowest `retained` below 0.9. A dose or mask that the final grid empties entirely refuses the plan, with or without `--allow-crop`.
 
 CT study series receive all enabled steps. MR/PT study series receive geometric steps and optional AHE, and skip HU rescaling. `--rescale`
@@ -761,7 +761,7 @@ train = [load(case) for cases in splits['train'].values() for case in cases]
 
 In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, `plan`, `beam`, `fluence`, `ion_plan`, or `dwell`.
 Applicator and line files are gzip-compressed coordinate text, not NIfTI; see [Conversion behavior](#conversion-behavior).
-After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (its voxels >= 1 Gy) and mask (volume)
+After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (its voxels >= min(1 Gy, 10% of its max)) and mask (volume)
 kept on the final grid. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should
 not be used. EXTERNAL masks (the body outline) keep their own value in `series.json` but are left out of the manifest's plan-level
 `retained` and of the run log's low-`retained` count. The optional `fov_mask` manifest key and `fov_mask` entries in

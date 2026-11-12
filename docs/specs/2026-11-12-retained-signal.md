@@ -12,7 +12,7 @@ The plan-level value (manifest.jsonl `retained`, the run log's low-retained coun
 today it flags plans that are fine.
 
 ## Decisions (owner, 2026-11-12)
-1. **Dose `retained` measures the region at or above 1 Gy.** A dose file's series.json `retained` is the fraction of its
+1. **Dose `retained` measures the region at or above 1 Gy.** (Superseded by #307: at or above min(1 Gy, 10% of the dose's max).) A dose file's series.json `retained` is the fraction of its
    native-grid voxels with dose >= 1 Gy whose centres fall inside the final grid (1 Gy is a module constant). Dose is
    always Gy (convert refuses other `DoseUnits`). A dose with no voxel >= 1 Gy, or that does not cross the final grid, is
    exactly `1.0`, as today for an uncut file. `crosses_final` still decides `cropped` on any nonzero voxel, so a dose cut
@@ -52,6 +52,6 @@ object (all-or-none per series.json) with the mask's `roi_interpreted_type`.
 ## Deferred
 - A mask whose `dicom` is missing or whose `roi_interpreted_type` aggregates to `{"distinct": [...]}` counts as non-EXTERNAL.
 - Excluding EXTERNAL masks from the `cropped` count/report column.
-- Dose files that are one fraction or one beam (`DoseSummationType` FRACTION/BEAM): 1 Gy means something different there.
-- Configurable dose threshold (CLI/`PreprocessSteps`), or a relative (% of max / prescription) threshold.
+- Dose files that are one fraction or one beam (`DoseSummationType` FRACTION/BEAM): 1 Gy means something different there. Superseded by #307: the threshold is now min(1 Gy, 10% of the dose's max).
+- Configurable dose threshold (CLI/`PreprocessSteps`), or a relative (% of max / prescription) threshold (a % of max floor came with #307).
 - Refusing a plan when the crop cuts dose above the threshold.

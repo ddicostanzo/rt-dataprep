@@ -50,8 +50,9 @@ PREPROCESSED_SERIES_COLUMNS = [*conv.SERIES_COLUMNS, 'retained']  # preprocess's
 REASON_NO_CT = 'series.json does not list exactly one ct file'
 REASON_DOSE_COUNT = 'series.json lists more than one dose file'
 REASON_KIND = 'series.json has a row of an unknown kind'
-LOW_RETAINED = 0.9  # the run log counts preprocessed plans whose lowest `retained` (dose at or above DOSE_RETAINED_GY, non-EXTERNAL mask) is below this (#226)
-DOSE_RETAINED_GY = 1.0  # a dose file's `retained` is the in-grid fraction of its voxels at or above this (inclusive; dose is always Gy)
+LOW_RETAINED = 0.9  # the run log counts preprocessed plans whose lowest `retained` (dose in its dose_region, non-EXTERNAL mask) is below this (#226)
+DOSE_RETAINED_GY = 1.0  # a dose file's `retained` is the in-grid fraction of its voxels at or above this, or DOSE_RETAINED_FRACTION of its max when lower (inclusive; dose is always Gy)
+DOSE_RETAINED_FRACTION = 0.1  # of a dose's max: the threshold of a dose whose max is below 10 Gy, e.g. one EBRT fraction (#307)
 REASON_SERIES_CSV = 'series.json is malformed: not valid JSON, not an array of objects of strings with the expected keys, or one file named twice'
 LEGACY_SERIES_NAME = 'series.csv'  # what convert v0.1.x wrote; never read
 REASON_LEGACY_SERIES = 'converted by an older version (series.csv); reconvert with --overwrite'
@@ -84,7 +85,7 @@ class PreprocessSteps:
     ahe_clip_limit: float = 0.05
     min_mask_retention: float | None = None  # optional minimum output/input physical foreground volume; no clinical default
     legacy_linear_masks: bool = False
-    allow_crop: bool = False  # crop a dose or mask that extends past the final grid instead of refusing the plan; `retained` records how much is kept (a dose: its voxels at or above DOSE_RETAINED_GY)
+    allow_crop: bool = False  # crop a dose or mask that extends past the final grid instead of refusing the plan; `retained` records how much is kept (a dose: its dose_region)
     series_fov_mask: bool = False  # not a step: uint8 support masks for planning CT, study and aligned plan images
     new_spacing: tuple = (1, 1, 1)  # mm, (x, y, z)
     final_spacing: tuple = (1.25, 1.25, 1.25)
@@ -378,6 +379,7 @@ class PreprocessRow:
     skipped_series: int = 0  # registered series left out of a plan (unusable matrix, no overlap, unreadable file)
     cropped: int | str = ''  # preprocessed plan row of a geometric run: its dose and mask files that extend past the final grid; blank otherwise
     retained: float | None = None  # its lowest `retained` over counts_toward_retained files (run log only, #226); None when no file has one
+    untyped_masks: int = 0  # its counted masks with no single roi_interpreted_type, so a body outline among them is not recognised (run log only, #308)
 
 
 @dataclass
@@ -446,6 +448,8 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
     imaging_rows = [r for r in rows if r.folder.startswith('study_')]
     plan_rows = [r for r in rows if r.folder and not r.folder.startswith('study_')]
     patient_rows = [r for r in rows if r.folder == '']
+    if untyped := sum(r.untyped_masks for r in rows):  # before the summary, which stays the last line
+        log.warning('preprocess: %d masks count toward retained without a single dicom.roi_interpreted_type, so a body outline among them is not left out; a missing type needs a re-convert with dicom metadata', untyped)
     log.info('preprocess: %d plan rows (%d preprocessed, %d refused), %d imaging rows (%d preprocessed, %d refused), %d patient rows (%d refused, %d skipped); %d registered series skipped; %d plans cropped, %d with retained < %g; %d replaced, %d kept',
              len(plan_rows), *(sum(r.outcome == o for r in plan_rows) for o in (OUTCOME_PREPROCESSED, conv.OUTCOME_REFUSED)),
              len(imaging_rows), *(sum(r.outcome == o for r in imaging_rows) for o in (OUTCOME_PREPROCESSED, conv.OUTCOME_REFUSED)),
@@ -506,7 +510,7 @@ def preprocess_one(plan_dir, out_dir, steps):
     """The PreprocessRow of one plan. A refusal leaves no `out_dir`; an OSError or REASON_INTERNAL is the patient's and propagates."""
     reason = None
     try:
-        files, skipped, cropped, retained = preprocess_plan(plan_dir, out_dir, steps)
+        files, skipped, cropped, retained, untyped = preprocess_plan(plan_dir, out_dir, steps)
     except CaseRefused as exc:
         if str(exc) == REASON_INTERNAL:
             raise
@@ -517,7 +521,7 @@ def preprocess_one(plan_dir, out_dir, steps):
         log.warning('preprocess: plan refused: %s', reason)
         return PreprocessRow(plan_dir.parent.name, plan_dir.name, conv.OUTCOME_REFUSED, reason)
     return PreprocessRow(plan_dir.parent.name, plan_dir.name, OUTCOME_PREPROCESSED, files=files, skipped_series=skipped, cropped=cropped,
-                         retained=retained)
+                         retained=retained, untyped_masks=untyped)
 
 
 def preprocess_study(study_dir, out_dir, steps):
@@ -722,6 +726,11 @@ def counts_toward_retained(row):
     return row['kind'] in ('dose', 'mask') and bool(row.get('retained')) and not external
 
 
+def dose_region(dose):
+    """The 0/1 voxels a dose's `retained` counts: at or above the lesser of DOSE_RETAINED_GY and DOSE_RETAINED_FRACTION of its max (#307); never empty for a dose with a positive voxel."""
+    return dose >= min(DOSE_RETAINED_GY, DOSE_RETAINED_FRACTION * float(sitk.GetArrayViewFromImage(dose).max()))
+
+
 def native_retained(native, final):
     """The part of `native` (summed values, float64; a 0/1 image gives a voxel fraction) whose voxel centres fall inside final's buffer, over the whole; 1.0 for an empty image.
     Same direction as the CT, so each native axis maps increasingly onto one final axis: bisect the first and last in-grid index per axis."""
@@ -761,7 +770,7 @@ def index_plan_table(source, path, final, schema=plan_table.SCHEMA, prefix='isoc
 
 
 def preprocess_plan(plan_dir, out_dir, steps):
-    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run; the lowest `retained` of the rows counts_toward_retained accepts, None when none is set). CaseRefused on a refusal."""
+    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run; the lowest `retained` of the rows counts_toward_retained accepts, None when none is set; how many of those are masks with no single roi_interpreted_type). CaseRefused on a refusal."""
     kept, ct, series = check_rows(plan_dir)
     if too_small(ct, steps):
         raise CaseRefused(REASON_TOO_SMALL)
@@ -791,8 +800,8 @@ def preprocess_plan(plan_dir, out_dir, steps):
                     check_crop(native, final)
                     crossed = False
                 cropped += crossed
-                # a dose is judged on its voxels at or above DOSE_RETAINED_GY (a 0/1 temporary, released at once); crosses_final, process_dose and has_voxels keep the unthresholded native
-                cell = repr(native_retained(native >= DOSE_RETAINED_GY if kind == 'dose' else native, final) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
+                # a dose is judged on its dose_region (a 0/1 temporary, released at once); crosses_final, process_dose and has_voxels keep the unthresholded native
+                cell = repr(native_retained(dose_region(native) if kind == 'dose' else native, final) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
             image = process_dose(native, final) if kind in ('dose', 'beam') else process_mask(native, final, steps)
             if kind != 'beam' and has_voxels(native) and not has_voxels(image):
                 raise CaseRefused(REASON_CROP)
@@ -833,5 +842,6 @@ def preprocess_plan(plan_dir, out_dir, steps):
             del image
         del native, fov
     conv.write_series_json(series_rows, out_dir / conv.SERIES_NAME)
-    retained = [float(row['retained']) for row in series_rows if counts_toward_retained(row)]
-    return [*files, conv.SERIES_NAME], skipped, cropped if geometric else '', min(retained, default=None)
+    counted = [row for row in series_rows if counts_toward_retained(row)]
+    untyped = sum(row['kind'] == 'mask' and not isinstance(row.get('dicom', {}).get('roi_interpreted_type'), str) for row in counted)
+    return [*files, conv.SERIES_NAME], skipped, cropped if geometric else '', min((float(row['retained']) for row in counted), default=None), untyped
