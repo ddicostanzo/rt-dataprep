@@ -3182,7 +3182,7 @@ def test_the_legacy_check_comes_before_any_read(tmp_path, monkeypatch):
 
 # ---- brachy-dwells task-02: dwell.parquet is carried like ion_plan.parquet, checked against DWELL_SCHEMA ----
 
-DWELL_NAME = 'dwell.parquet'
+DWELL_NAME = conv.DWELL_NAME
 
 
 def add_dwell(tmp_path, folder, kind='dwell', name=DWELL_NAME, table=None):

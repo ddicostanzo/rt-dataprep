@@ -23,11 +23,12 @@ import series_files as sf
 import SimpleITK as sitk
 import synthetic_dicom as sd
 from test_dicom_io import fail_python_open as fail_open  # workers=1 where used: a worker process would not see the patch
+from test_dwell_table import default_channels
 
 from rt_dataprep import beam_volume
 from rt_dataprep import convert as conv
 from rt_dataprep import dicom_io, fluence
-from rt_dataprep import ion_plan_table, masks, plan_table
+from rt_dataprep import dwell_table, ion_plan_table, masks, plan_table
 from rt_dataprep.organize import organize
 from rt_dataprep.dicom_io import CaseRefused
 
@@ -2278,6 +2279,118 @@ def test_a_bug_in_the_ion_table_builder_propagates_and_leaves_no_plan_folder(tre
     def bug(plan, ct):
         raise RuntimeError('SYNTHETIC bug')
     monkeypatch.setattr(ion_plan_table, 'ion_plan_rows', bug)
+    case = org.parent / 'case'
+    with pytest.raises(RuntimeError):
+        run_plan(org / PID / 'plan_1', case)
+    assert not case.exists()
+
+
+# ---------------------------------------------------------------- dwell.parquet (brachy-dwells task-03)
+
+def hdr_plan(tree, channels=None, **kwargs):
+    """(plan, rows, out) of a converted tree whose plan is an HDR brachy plan (two channels x three dwells by default)."""
+    plan_meta = dict(treatment_type='HDR', sources=[sd.brachy_source()], channels=channels or default_channels(), **kwargs.pop('plan_meta', {}))
+    return one_plan(tree, plan_meta=plan_meta, **kwargs)
+
+
+def test_an_hdr_plan_converts_with_dwell_parquet_after_the_other_files(tree):
+    plan, rows, out = hdr_plan(tree, rois=[BOX])
+    row = row_of(rows)
+    assert row.outcome == conv.OUTCOME_CONVERTED
+    assert row.files == ['planning_ct.nii.gz', 'liver.nii.gz', 'dwell.parquet', 'series.json']
+    folder = out / PID / 'plan_1'
+    assert conv.DWELL_NAME == 'dwell.parquet' and sorted(p.name for p in folder.iterdir()) == sorted(row.files)
+    header = dicom_io.read_header_core(plan['folder'] / 'plan.dcm')
+    expected = dwell_table.to_table(dwell_table.dwell_rows(header, read(folder / 'planning_ct.nii.gz')))
+    assert pq.read_table(folder / 'dwell.parquet').equals(expected) and expected.num_rows == 6
+    assert pq.read_schema(folder / 'dwell.parquet').equals(dwell_table.DWELL_SCHEMA)
+
+
+def test_an_hdr_series_json_has_one_dwell_row_with_the_shared_keys_and_empty_frame_when_the_plan_has_none(tree):
+    plan, _, out = hdr_plan(tree)  # make_plan writes the plan without a FrameOfReferenceUID unless asked
+    full = sf.read(out / PID / 'plan_1')
+    assert [r['kind'] for r in full] == ['ct', 'dwell']
+    assert all(list(r) == [*SERIES_COLUMNS, 'dicom'] and all(isinstance(r[c], str) for c in SERIES_COLUMNS) for r in full)
+    dwell = full[-1]
+    ds = pydicom.dcmread(plan['folder'] / 'plan.dcm')
+    assert 'FrameOfReferenceUID' not in ds
+    assert (dwell['file'], dwell['modality'], dwell['frame_of_reference_uid']) == ('dwell.parquet', 'RTPLAN', '')
+    assert dwell['dicom'] == conv.metadata.collect([ds], (conv.metadata.ALL, conv.metadata.RTPLAN))
+
+
+def test_an_hdr_dwell_row_carries_the_plan_frame(tree):
+    frame = sd.generate_uid()
+    plan, _, out = hdr_plan(tree, plan_meta=dict(frame_uid=frame))
+    assert series_rows(out)[-1]['frame_of_reference_uid'] == frame != plan['ct']['frame_uid']
+
+
+def odd_channels():
+    return [dict(default_channels()[0], paired=False)]  # three single control points: an odd count
+
+
+def test_a_malformed_hdr_plan_converts_without_dwell_parquet_and_logs_only_the_fixed_reason(tree, caplog):
+    caplog.set_level(logging.DEBUG)
+    plan, rows, out = hdr_plan(tree, channels=odd_channels(), rois=[BOX], plan_meta=dict(label='SYNTHETIC_PLAN'))
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
+    assert row_of(rows).files == ['planning_ct.nii.gz', 'liver.nii.gz', 'series.json']
+    assert not (out / PID / 'plan_1' / 'dwell.parquet').exists()
+    assert [r['kind'] for r in series_rows(out)] == ['ct', 'mask']
+    assert len(logged(caplog, dwell_table.REASON_DWELL)) == 1
+    secrets = [plan['plan'], 'SYNTHETIC_PLAN', 'SYNTHETIC_Ir-192', plan['ct']['frame_uid'], PID]
+    assert all(secret not in caplog.text for secret in secrets)
+    assert plan_table.REASON_PLAN_TABLE not in caplog.text and ion_plan_table.REASON_ION_PLAN not in caplog.text
+
+
+def test_a_malformed_hdr_plan_leaves_every_other_output_as_the_good_plan_writes_it(tree, tmp_path):
+    org, out = tree
+    good = tmp_path / 'good'
+    make_plan(org / PID / 'plan_1', rois=[BOX], plan_meta=dict(treatment_type='HDR', sources=[sd.brachy_source()], channels=default_channels()))
+    conv.convert(org, good)
+    bad_org = tmp_path / 'bad_org'
+    make_plan(bad_org / PID / 'plan_1', rois=[BOX], plan_meta=dict(treatment_type='HDR', sources=[sd.brachy_source()], channels=odd_channels()))
+    conv.convert(bad_org, tmp_path / 'bad')
+    for name in ('planning_ct.nii.gz', 'liver.nii.gz'):
+        assert (good / PID / 'plan_1' / name).read_bytes() == (tmp_path / 'bad' / PID / 'plan_1' / name).read_bytes()
+
+
+def test_a_tag_level_fault_in_the_dwell_table_logs_the_fixed_reason(tree, caplog, monkeypatch):
+    def fault(plan, ct):
+        return plan.ApplicationSetupSequence[0].ApplicationSetupManufacturer  # a real keyword the item lacks: pydicom's AttributeError
+    monkeypatch.setattr(dwell_table, 'dwell_rows', fault)
+    caplog.set_level(logging.DEBUG)
+    plan, rows, out = hdr_plan(tree, rois=[BOX])
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED and not (out / PID / 'plan_1' / 'dwell.parquet').exists()
+    assert len(logged(caplog, dwell_table.REASON_DWELL)) == 1
+    assert all(secret not in caplog.text for secret in [plan['plan'], PID])
+
+
+def test_a_refused_ion_table_does_not_stop_the_dwell_table(tree, monkeypatch):
+    def refuse(plan, ct):
+        raise CaseRefused(ion_plan_table.REASON_ION_PLAN)
+    monkeypatch.setattr(ion_plan_table, 'ion_plan_rows', refuse)  # the fifth catch is independent of the fourth
+    _, rows, _ = hdr_plan(tree)
+    assert 'dwell.parquet' in row_of(rows).files
+
+
+@pytest.mark.parametrize('kwargs', [dict(),
+                                    dict(plan_meta=dict(treatment_type='LDR')),
+                                    dict(plan_writer=sd.write_photon_rtplan),
+                                    dict(plan_writer=sd.write_pbs_rtplan)], ids=['brachy-no-type', 'ldr', 'photon', 'ion'])
+def test_other_plans_get_no_dwell_parquet_and_no_log_line(tree, kwargs, caplog):
+    caplog.set_level(logging.DEBUG)
+    _, rows, out = one_plan(tree, rois=[BOX], **kwargs)
+    assert 'dwell.parquet' not in row_of(rows).files and not (out / PID / 'plan_1' / 'dwell.parquet').exists()
+    assert dwell_table.REASON_DWELL not in caplog.text
+    assert 'dwell' not in [r['kind'] for r in series_rows(out)]
+
+
+def test_a_bug_in_the_dwell_table_builder_propagates_and_leaves_no_plan_folder(tree, monkeypatch):
+    org, _ = tree
+    make_plan(org / PID / 'plan_1')
+
+    def bug(plan, ct):
+        raise RuntimeError('SYNTHETIC bug')
+    monkeypatch.setattr(dwell_table, 'dwell_rows', bug)
     case = org.parent / 'case'
     with pytest.raises(RuntimeError):
         run_plan(org / PID / 'plan_1', case)

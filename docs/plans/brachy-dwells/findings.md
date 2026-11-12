@@ -46,3 +46,15 @@ Files: `src/rt_dataprep/preprocess.py`, `src/rt_dataprep/manifest.py`, `tests/te
 PASS, no BLOCKING. W1 (phi rule lacks dwell.parquet) is task-04's criterion. Deferred to 2.9 filing: N1 (signature-only
 prefix-default test), N2 (no manifest test with both ion_plan and dwell rows). task-03: switch the test literal
 DWELL_NAME in tests/test_preprocess.py to conv.DWELL_NAME if convenient.
+
+## task-03
+Files: `src/rt_dataprep/convert.py`, `tests/test_convert.py`, `tests/test_preprocess.py` (DWELL_NAME now `conv.DWELL_NAME`), this file.
+- convert: `DWELL_NAME = 'dwell.parquet'` (shares the `ION_PLAN_NAME` line); fifth catch right after the ion catch
+  (`_header_call(dwell_table.dwell_rows, plan, ct)`, `to_table` outside, one WARNING `convert: <REASON_DWELL>`); written after
+  ion_plan.parquet, before beam_mu; series.json row kind `dwell`, modality RTPLAN, frame = plan `FrameOfReferenceUID` ('' when absent),
+  dicom from (ALL, RTPLAN). The local is named `dwell_tbl` (`dwell_table` is the imported module).
+- Tests (end of test_convert.py, `hdr_plan(tree, channels=None, **kw)` helper): `make_plan`'s default plan has no FrameOfReferenceUID, so the
+  default fixtures cover the '' case and one test passes `frame_uid`. The default writer takes `channels=` through `plan_meta`, so no
+  partial is needed. Malformed fixture = `paired=False` (odd control-point count). HDR plans produce no plan.parquet (no BeamSequence).
+- A tag-level fault test needs a REAL DICOM keyword the item lacks (a non-keyword attribute is a plain AttributeError, aborting convert).
+- Full suite: 1916 passed, 4 skipped, 3 deselected; ruff clean.
