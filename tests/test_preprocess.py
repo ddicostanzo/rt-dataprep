@@ -1212,6 +1212,11 @@ def test_study_refusal_count(tmp_path, text, expected):
     assert pre.study_refusal_count(pre.read_series_json(tmp_path)[0]) == expected
 
 
+def test_study_refusal_count_counts_only_the_objects_of_a_corrupt_array():  # #250
+    assert pre.study_refusal_count([{'file': 'a'}, 'x', 3, None, {'file': 'b'}, ['c']]) == 2
+    assert pre.study_refusal_count(['x', 3]) == 1
+
+
 def test_study_refusal_count_of_an_unparseable_file_is_one(tmp_path):
     (tmp_path / conv.SERIES_NAME).write_bytes(b'[{"file": "a"}, {"file": "\xff\xfe"}]')
     assert pre.study_refusal_count(pre.read_series_json(tmp_path)[0]) == 1
