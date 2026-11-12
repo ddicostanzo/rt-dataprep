@@ -169,6 +169,17 @@ def test_check_disjoint_on_the_split_dict(tmp_path):
         sp.check_disjoint(splits, external)
 
 
+@pytest.mark.parametrize('external', [False, True])
+def test_a_root_with_only_a_v0_1_manifest_csv_is_refused_with_a_hint_to_rerun_manifest(tmp_path, external):  # #250
+    (tmp_path / 'manifest.csv').write_text('case_dir,patient\n', encoding='utf-8')
+    with pytest.raises(ValueError, match=sp.REASON_LEGACY):
+        if external:
+            sp.check_disjoint({'train': {}}, str(tmp_path / 'manifest.jsonl'))
+        else:
+            sp.split(tmp_path / 'manifest.jsonl', test_size=0.2, val_size=0.2, seed=SEED_A)
+    assert 'rerun manifest' in sp.REASON_LEGACY and not (tmp_path / 'splits.json').exists()
+
+
 def test_an_existing_splits_json_with_different_content_is_refused_and_untouched(tmp_path):
     path = write_manifest(tmp_path, TEN)
     run(path, seed=SEED_A)

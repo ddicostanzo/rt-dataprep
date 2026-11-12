@@ -416,6 +416,14 @@ def test_a_different_existing_splits_file_is_refused(tree, capfd):
     assert 'SYNTHETIC_' not in result.out + result.err
 
 
+def test_split_on_a_root_with_only_a_v0_1_manifest_csv_prints_the_hint(tmp_path, capfd):  # #250
+    (tmp_path / 'manifest.csv').write_text('case_dir,patient\n', encoding='utf-8')
+    with pytest.raises(SystemExit) as exc:
+        cli.main(split_args(tmp_path))
+    assert exc.value.code == 1
+    refusal(capfd.readouterr(), sp.REASON_LEGACY)
+
+
 def test_a_manifest_line_without_the_patient_prints_the_refusal(tree, capfd):
     (tree / 'manifest.jsonl').write_text('{"case_dir": "SYNTHETIC_P0/plan_1"}\n')
     with pytest.raises(SystemExit) as exc:
