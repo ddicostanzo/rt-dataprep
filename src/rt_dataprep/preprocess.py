@@ -379,6 +379,7 @@ class PreprocessRow:
     skipped_series: int = 0  # registered series left out of a plan (unusable matrix, no overlap, unreadable file)
     cropped: int | str = ''  # preprocessed plan row of a geometric run: its dose and mask files that extend past the final grid; blank otherwise
     retained: float | None = None  # its lowest `retained` over counts_toward_retained files (run log only, #226); None when no file has one
+    untyped_masks: int = 0  # its counted masks with no single roi_interpreted_type, so a body outline among them is not recognised (run log only, #308)
 
 
 @dataclass
@@ -447,6 +448,8 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
     imaging_rows = [r for r in rows if r.folder.startswith('study_')]
     plan_rows = [r for r in rows if r.folder and not r.folder.startswith('study_')]
     patient_rows = [r for r in rows if r.folder == '']
+    if untyped := sum(r.untyped_masks for r in rows):  # before the summary, which stays the last line
+        log.warning('preprocess: %d masks count toward retained without a single dicom.roi_interpreted_type, so a body outline among them is not left out; re-convert to add dicom metadata', untyped)
     log.info('preprocess: %d plan rows (%d preprocessed, %d refused), %d imaging rows (%d preprocessed, %d refused), %d patient rows (%d refused, %d skipped); %d registered series skipped; %d plans cropped, %d with retained < %g; %d replaced, %d kept',
              len(plan_rows), *(sum(r.outcome == o for r in plan_rows) for o in (OUTCOME_PREPROCESSED, conv.OUTCOME_REFUSED)),
              len(imaging_rows), *(sum(r.outcome == o for r in imaging_rows) for o in (OUTCOME_PREPROCESSED, conv.OUTCOME_REFUSED)),
@@ -507,7 +510,7 @@ def preprocess_one(plan_dir, out_dir, steps):
     """The PreprocessRow of one plan. A refusal leaves no `out_dir`; an OSError or REASON_INTERNAL is the patient's and propagates."""
     reason = None
     try:
-        files, skipped, cropped, retained = preprocess_plan(plan_dir, out_dir, steps)
+        files, skipped, cropped, retained, untyped = preprocess_plan(plan_dir, out_dir, steps)
     except CaseRefused as exc:
         if str(exc) == REASON_INTERNAL:
             raise
@@ -518,7 +521,7 @@ def preprocess_one(plan_dir, out_dir, steps):
         log.warning('preprocess: plan refused: %s', reason)
         return PreprocessRow(plan_dir.parent.name, plan_dir.name, conv.OUTCOME_REFUSED, reason)
     return PreprocessRow(plan_dir.parent.name, plan_dir.name, OUTCOME_PREPROCESSED, files=files, skipped_series=skipped, cropped=cropped,
-                         retained=retained)
+                         retained=retained, untyped_masks=untyped)
 
 
 def preprocess_study(study_dir, out_dir, steps):
@@ -767,7 +770,7 @@ def index_plan_table(source, path, final, schema=plan_table.SCHEMA, prefix='isoc
 
 
 def preprocess_plan(plan_dir, out_dir, steps):
-    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run; the lowest `retained` of the rows counts_toward_retained accepts, None when none is set). CaseRefused on a refusal."""
+    """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid, '' on a non-geometric run; the lowest `retained` of the rows counts_toward_retained accepts, None when none is set; how many of those are masks with no single roi_interpreted_type). CaseRefused on a refusal."""
     kept, ct, series = check_rows(plan_dir)
     if too_small(ct, steps):
         raise CaseRefused(REASON_TOO_SMALL)
@@ -839,5 +842,6 @@ def preprocess_plan(plan_dir, out_dir, steps):
             del image
         del native, fov
     conv.write_series_json(series_rows, out_dir / conv.SERIES_NAME)
-    retained = [float(row['retained']) for row in series_rows if counts_toward_retained(row)]
-    return [*files, conv.SERIES_NAME], skipped, cropped if geometric else '', min(retained, default=None)
+    counted = [row for row in series_rows if counts_toward_retained(row)]
+    untyped = sum(row['kind'] == 'mask' and not isinstance(row.get('dicom', {}).get('roi_interpreted_type'), str) for row in counted)
+    return [*files, conv.SERIES_NAME], skipped, cropped if geometric else '', min((float(row['retained']) for row in counted), default=None), untyped

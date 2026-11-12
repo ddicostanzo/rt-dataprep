@@ -1596,7 +1596,7 @@ def test_a_geometric_run_leaves_out_an_unreadable_or_non_schema_plan_parquet(tmp
         done = out / folder.parent.name / 'plan_1'
         assert not (done / conv.PLAN_NAME).exists() and conv.PLAN_NAME not in plan_row(report).files
         assert [r for r in sf.read(done) if r['kind'] == 'plan'] == []
-        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and 'roi_interpreted_type' not in r.getMessage()] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
 
 
 BEAM_FILE = pre.output_name(conv.BEAM_NAME, SMALL)
@@ -1762,7 +1762,7 @@ def test_a_geometric_run_leaves_out_a_plan_table_of_the_other_schema(tmp_path, c
     done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
     assert plan_row(report).outcome == 'preprocessed'
     assert not (done / name).exists() and name not in plan_row(report).files and [r for r in sf.read(done) if r['kind'] == kind] == []
-    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and 'roi_interpreted_type' not in r.getMessage()] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
 
 
 def test_the_plan_index_reason_names_a_plan_table():
@@ -2988,6 +2988,20 @@ def test_a_cut_non_external_mask_still_counts_in_the_low_retained_count(tmp_path
     assert '; 1 plans cropped, 1 with retained < 0.9; ' in caplog.records[-1].getMessage()
 
 
+@pytest.mark.parametrize(('types', 'warning'), [(None, '2 masks count toward retained'),  # a tree converted before dicom metadata
+                                               ({'body': {'distinct': ['EXTERNAL']}, 'ptv': 'PTV'}, '1 masks count toward retained'),
+                                               ({'body': 'EXTERNAL', 'ptv': 'PTV'}, None)])
+def test_the_run_log_warns_of_counted_masks_without_a_single_roi_interpreted_type(tmp_path, caplog, types, warning):
+    folder, _ = write_plan(tmp_path / 'converted', masks=EXTERNAL_CUT)
+    if types:
+        with_roi_types(folder, types)
+    with caplog.at_level('INFO'):
+        pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    found = [r.getMessage() for r in caplog.records if 'roi_interpreted_type' in r.getMessage()]
+    assert [m.split(' without')[0] for m in found] == ([f'preprocess: {warning}'] if warning else [])
+    assert 'plan rows' in caplog.records[-1].getMessage()
+
+
 @pytest.mark.parametrize(('row', 'counts'), [
     (series_row('d.nii.gz', 'dose', retained='0.5'), True),
     (series_row('m.nii.gz', 'mask', retained='0.5', dicom={'roi_interpreted_type': 'PTV'}), True),
@@ -3298,7 +3312,7 @@ def test_a_geometric_run_leaves_out_a_dwell_parquet_that_is_not_the_dwell_schema
     done = tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1'
     assert plan_row(report).outcome == 'preprocessed'
     assert not (done / DWELL_NAME).exists() and DWELL_NAME not in plan_row(report).files and [r for r in sf.read(done) if r['kind'] == 'dwell'] == []
-    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and 'roi_interpreted_type' not in r.getMessage()] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
 
 
 def test_the_plan_index_reason_names_all_three_plan_tables():
