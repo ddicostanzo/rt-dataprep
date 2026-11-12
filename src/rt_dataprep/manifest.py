@@ -34,15 +34,18 @@ def _optional(row):
     return {key: value for key, value in values.items() if value not in (None, '')}
 
 
+RETAINED_CELL = re.compile(r'[0-9.eE+-]+')  # what preprocess writes (repr of a float): no whitespace or underscores, which float() would accept (#264); float() still parses, so a match like '1e' is refused by its ValueError
+
+
 def _retained(kept):
     """{'retained': the lowest dose/mask `retained` of a plan as a float} (#225), or {} when no row has one (a converted tree, a non-geometric run) or only EXTERNAL masks do (#305).
-    Every non-blank cell is parsed and validated first, an EXTERNAL one too; the minimum then leaves out is_external rows."""
+    Every non-blank cell is parsed and validated first (a plain number in [0, 1]), an EXTERNAL one too; the minimum then leaves out is_external rows."""
     rows = [row for row in kept if row['kind'] in ('dose', 'mask') and row.get('retained')]
     try:
-        values = [float(row['retained']) for row in rows]
+        values = [float(row['retained']) if RETAINED_CELL.fullmatch(row['retained']) else float('nan') for row in rows]
     except ValueError:
         values = [float('nan')]
-    if not all(np.isfinite(values)):  # a hand-edited cell: the plan is refused like any other malformed series.json
+    if not all(0 <= value <= 1 for value in values):  # a hand-edited cell (NaN and inf too): the plan is refused like any other malformed series.json
         raise CaseRefused(REASON_SERIES_CSV)
     counted = [value for row, value in zip(rows, values, strict=True) if not is_external(row)]
     return {'retained': min(counted)} if counted else {}

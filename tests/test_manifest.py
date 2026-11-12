@@ -625,18 +625,26 @@ def test_a_plan_whose_only_retained_values_are_external_masks_gets_no_retained_k
     assert plan_retained(tmp_path / 'out') is None
 
 
-@pytest.mark.parametrize('cell', ['half', 'nan'])
+@pytest.mark.parametrize('cell', ['half', 'nan', 'inf', '-0.2', '1.5', ' 0.5 ', '1_0'])  # '1_0' reads as 10.0 and ' 0.5 ' as 0.5 under float() (#264)
 @pytest.mark.parametrize('target', ['first', 'external'])
-def test_a_plan_whose_retained_cell_is_not_a_finite_number_is_refused(tmp_path, cell, target):
+def test_a_plan_whose_retained_cell_is_not_a_number_in_0_1_is_refused_and_its_sibling_is_written(tmp_path, cell, target):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
-    folder, _ = write_plan(converted, masks=EXTERNAL_CUT)
-    with_roi_types(folder, {'body': 'EXTERNAL', 'ptv': 'PTV'})
+    for plan in ('plan_1', 'plan_2'):
+        folder, _ = write_plan(converted, plan=plan, masks=EXTERNAL_CUT)
+        with_roi_types(folder, {'body': 'EXTERNAL', 'ptv': 'PTV'})
     pre.preprocess(converted, out, CUT)
     path = out / 'SYNTHETICPTA' / 'plan_1' / conv.SERIES_NAME
     rows = json.loads(path.read_text(encoding='utf-8'))
     next(row for row in rows if row['retained'] and (target == 'first' or row.get('roi_name') == 'body'))['retained'] = cell  # an EXTERNAL cell is validated too
     path.write_text(json.dumps(rows), encoding='utf-8')
-    assert man.manifest(out) == (0, 1)
+    assert man.manifest(out) == (1, 1)
+    assert json.loads((out / 'manifest.jsonl').read_text(encoding='utf-8'))['case_dir'].endswith('plan_2')
+
+
+def test_a_non_geometric_run_leaves_the_plan_line_retained_out(tmp_path):  # #264
+    write_plan(tmp_path / 'converted', dose=DOSE_SPLIT, masks={'ptv': HALF_OUT})
+    pre.preprocess(tmp_path / 'converted', tmp_path / 'out', pre.PreprocessSteps(rescale=True))
+    assert plan_retained(tmp_path / 'out') is None
 
 
 def test_a_patient_folder_whose_name_is_not_utf8_is_refused_and_the_rest_still_splits(tmp_path):
