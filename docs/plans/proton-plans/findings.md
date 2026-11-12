@@ -77,3 +77,14 @@ shifter ignored; strict-decrease check has no tolerance.
 Opus wave review of task-03: no BLOCKING, no WARNING. Notes: the 'plan'/'ion_plan' entries of the copy tuple
 (preprocess.py:775) are unreachable (kept for symmetry, as planned); test ION_NAME stays a literal (task-04's 5-file
 commit leaves test_preprocess/test_manifest alone).
+
+## task-04
+- convert: ION_PLAN_NAME, a fourth catch (after fluence's, before case_dir.mkdir), written after plan.parquet; the ion_plan
+  series.json row follows the plan row (the two never co-occur). The ct row's dicom also gains the PROTON metadata
+  (plan_keys merge into every row).
+- write_pbs_rtplan has no label= argument: tests set RTPlanLabel through tags=.
+- The nan-energy test clears caplog after building the plan (pydicom logs the value at write time) and records warnings
+  around conv.convert only.
+- Tag-level fault test monkeypatches ion_plan_rows to read an absent keyword (file mutations are refused by our own checks
+  first): REASON_MISSING_TAG then one REASON_ION_PLAN.
+- tests/test_preprocess.py ION_NAME stays a literal (5-file limit).
