@@ -250,7 +250,13 @@ def past_eof_offset(path):
     patch_headers(path, central=[(42, (1 << 30).to_bytes(4, 'little'))])  # local header offset far past the end: BadZipFile, not OSError (#262)
 
 
-BAD = [encrypted, crc_flipped, truncated, method_9, bad_name, bzip2, lzma_zip, negative_offset, past_eof_offset]
+def oversize_stream(path, method=zipfile.ZIP_DEFLATED):
+    make_zip(path, [(NAME + 'big', DICOM * 20)], method=method)
+    declared = (len(DICOM) // 2).to_bytes(4, 'little')  # the stream holds 20x the bytes the headers declare
+    patch_headers(path, central=[(24, declared)], local=[(22, declared)])
+
+
+BAD = [encrypted, crc_flipped, truncated, method_9, bad_name, bzip2, lzma_zip, negative_offset, past_eof_offset, oversize_stream]
 
 
 @pytest.mark.parametrize('build', BAD)
@@ -259,6 +265,34 @@ def test_a_bad_zip_alone_refuses_as_unreadable_and_leaves_nothing(folder, stage,
     with pytest.raises(org.ZipRefused) as refused:
         run(folder, stage)
     assert str(refused.value) == org.REASON_ZIP_UNREADABLE and staged_files(stage) == []
+
+
+@pytest.mark.parametrize('method', [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED])
+def test_a_stream_larger_than_its_declared_size_is_unreadable_and_stages_nothing(folder, stage, method):
+    oversize_stream(folder / 'a.zip', method)
+    assert org._zip_scan(folder / 'a.zip') is not None  # the scan reads the central directory only: it passes
+    with pytest.raises(org.ZipRefused) as refused:
+        run(folder, stage)
+    assert str(refused.value) == org.REASON_ZIP_UNREADABLE and staged_files(stage) == []
+
+
+def test_a_clean_zip_passes_the_scan(folder):
+    make_zip(folder / 'a.zip', [('x', DICOM)])
+    assert org._zip_scan(folder / 'a.zip')[:2] == (len(DICOM), 1)
+
+
+@pytest.mark.parametrize('flag', [0x01, 0x20, 0x40])  # encrypted, patched data, strong encryption: the three bits of 0x61
+def test_each_disallowed_flag_bit_fails_the_allow_list(folder, flag):
+    make_zip(folder / 'a.zip', [('x', DICOM)])
+    patch_headers(folder / 'a.zip', central=[(8, flag.to_bytes(2, 'little'))])
+    assert org._zip_scan(folder / 'a.zip') is None
+
+
+@pytest.mark.parametrize('method', [1, 6, 9, 12, 14, 93, 95, 98])  # shrink, implode, deflate64, bzip2, lzma, zstd, xz, ppmd: all but 0 and 8
+def test_each_method_off_the_allow_list_fails_it(folder, method):
+    make_zip(folder / 'a.zip', [('x', DICOM)])
+    patch_headers(folder / 'a.zip', central=[(10, method.to_bytes(2, 'little'))])
+    assert org._zip_scan(folder / 'a.zip') is None
 
 
 def test_a_member_that_fails_after_good_ones_removes_everything_staged(folder, stage):
@@ -383,6 +417,7 @@ def test_no_member_name_or_path_reaches_a_log_a_message_or_a_chained_exception(f
 
 import fcntl  # noqa: E402 (POSIX-only tests below)
 import hashlib  # noqa: E402
+import os  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -465,6 +500,54 @@ def test_staged_files_join_the_loose_ones_and_keep_index_names(tree):
     assert len(names) == 6 and {'1', '2'} <= names and not names & {'plan.dcm', 'struct.dcm'}
 
 
+def link_fixture(tmp_path):
+    staging, loose = tmp_path / 'stg', tmp_path / 'loose'
+    (staging / '1').mkdir(parents=True)
+    loose.mkdir()
+    staged, plain = staging / '1' / '1', loose / 'a.dcm'
+    staged.write_bytes(DICOM)
+    plain.write_bytes(DICOM)
+    return staging, staged, plain, tmp_path / 'out'
+
+
+def test_staged_files_are_hard_linked_and_loose_files_are_copied(tmp_path):
+    staging, staged, plain, dest = link_fixture(tmp_path)
+    org._copy_all([staged, plain], dest, staging=staging)
+    assert os.path.samefile(staged, dest / '1') and staged.stat().st_nlink == 2
+    assert not os.path.samefile(plain, dest / 'a.dcm') and plain.stat().st_nlink == 1 and (dest / 'a.dcm').read_bytes() == DICOM
+
+
+def test_the_copy_fallback_runs_when_os_link_fails(tmp_path, monkeypatch):
+    staging, staged, _, dest = link_fixture(tmp_path)
+    copied, real = [], shutil.copy2
+
+    def no_link(*args):
+        raise OSError(18, 'Invalid cross-device link')
+
+    monkeypatch.setattr(os, 'link', no_link)
+    monkeypatch.setattr(shutil, 'copy2', lambda source, target: (copied.append(source), real(source, target))[1])
+    org._copy_all([staged], dest, staging=staging)
+    assert copied == [staged] and not os.path.samefile(staged, dest / '1')
+    assert staged.stat().st_nlink == 1 and (dest / '1').read_bytes() == DICOM
+
+
+def test_a_zipped_patient_organizes_the_same_when_hard_links_fail(tmp_path, monkeypatch):
+    planning_study(tmp_path / 'loose' / 'x')
+    shutil.copytree(tmp_path / 'loose', tmp_path / 'zipped')
+    zip_up(tmp_path / 'zipped' / 'x')
+    organize(tmp_path / 'loose', tmp_path / 'ref')
+    copied, real = [], shutil.copy2
+
+    def no_link(*args):
+        raise OSError(18, 'Invalid cross-device link')
+
+    monkeypatch.setattr(os, 'link', no_link)
+    monkeypatch.setattr(shutil, 'copy2', lambda source, target: (copied.append(source), real(source, target))[1])
+    organize(tmp_path / 'zipped', tmp_path / 'out')
+    assert plan_hashes(tmp_path / 'out') == plan_hashes(tmp_path / 'ref')
+    assert len([c for c in copied if '.unzip-' in str(c)]) == 6 and leftovers(tmp_path / 'out') == []
+
+
 # --- AC11: zipped converts to the same outputs as loose -----------------------------------------------------------------
 
 def test_a_zipped_patient_converts_to_the_same_outputs_as_the_same_files_loose(tmp_path):
@@ -486,7 +569,8 @@ def test_a_zipped_patient_converts_to_the_same_outputs_as_the_same_files_loose(t
     assert converted['zipped'] and all(r.outcome == 'converted' for r in converted['zipped'])
     assert [(r.folder, r.files) for r in converted['loose']] == [(r.folder, r.files) for r in converted['zipped']]
     images = lambda label: sorted(p.relative_to(tmp_path / f'out_{label}') for p in (tmp_path / f'out_{label}').rglob('*.nii.gz'))  # noqa: E731
-    assert images('loose') == images('zipped') and len(images('zipped')) >= 3  # CT, ROI mask, dose and the MR series
+    assert images('loose') == images('zipped')
+    assert [p.name for p in images('zipped')] == ['dose.nii.gz', 'liver.nii.gz', 'planning_ct.nii.gz', 'series_MR_1.nii.gz']  # dose, ROI mask, CT, the MR series
     for path in images('zipped'):
         a, b = (sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / f'out_{k}' / path))) for k in ('loose', 'zipped'))
         assert np.array_equal(a, b)
@@ -506,7 +590,9 @@ def test_loose_files_plus_a_zip_with_the_rest_are_one_patient_and_a_duplicate_us
     assert [(r.patient, r.outcome, r.plans, r.misc) for r in report.rows] == [(PID, org.OUTCOME_ORGANIZED, 1, 1)]
     plan_names = {p.name for p in (out / PID / 'plan_1').iterdir()}
     assert len(plan_names) == 6 and first.name in plan_names
-    assert [p.read_bytes() for p in (out / PID / 'misc_files').iterdir()] == [first.read_bytes()]
+    misc = list((out / PID / 'misc_files').iterdir())
+    assert [p.read_bytes() for p in misc] == [first.read_bytes()]
+    assert re.fullmatch(r'\d+(_\d+)?', misc[0].name) and misc[0].name != first.name  # a staged member's index name: the zipped copy, not the loose one
 
 
 # --- AC13: two plans on one planning CT, zipped -------------------------------------------------------------------------
@@ -728,6 +814,50 @@ def test_no_staging_is_left_after_a_keyboard_interrupt_during_extraction(tree, m
     assert calls and leftovers(out) == [] and not (out / PID).exists()
 
 
+def keep_staging_parent(monkeypatch, out):
+    """The run's own removal of its staging parent becomes a no-op: whatever is gone from inside it was dropped by the code under test."""
+    real = dicom_io.remove_tree
+    monkeypatch.setattr(dicom_io, 'remove_tree',
+                        lambda path: None if Path(path).parent == out and Path(path).name.startswith('.unzip-') else real(path))
+
+
+def test_a_read_delivered_after_the_abort_drops_its_staging_and_adds_no_row(tree, monkeypatch):
+    src, out = tree
+    (src / 'a').mkdir()
+    planning_study(src / 'b')
+    zip_up(src / 'b')
+
+    def run_auto(workers, tasks, handle, processed):  # a's abort is delivered first, then b's read, which was already under way
+        assert handle(0, (None, org._failure_row(src / 'a', org.REASON_INTERNAL))) is org.pool.ABORT
+        assert handle(1, tasks[1].fn(*tasks[1].args)) is None
+        return 1
+
+    monkeypatch.setattr(org.pool, 'run_auto', run_auto)
+    keep_staging_parent(monkeypatch, out)
+    with pytest.raises(org.OrganizeAborted):
+        organize(src, out)
+    (parent,) = out.glob('.unzip-*')
+    assert list(parent.iterdir()) == [] and not (out / PID).exists()
+    report = (out / org.REPORT_NAME).read_text()
+    assert org.REASON_INTERNAL in report and PID not in report
+
+
+def test_a_recover_oserror_drops_that_patients_staging(tree, monkeypatch):
+    src, out = tree
+    planning_study(src / 'a')
+    zip_up(src / 'a')
+
+    def denied(root, name):
+        raise OSError(f'denied {root}/{name}')
+
+    monkeypatch.setattr(dicom_io, 'recover', denied)
+    keep_staging_parent(monkeypatch, out)
+    report = organize(src, out)
+    assert [(r.outcome, r.reason) for r in report.rows] == [(org.OUTCOME_REFUSED, org.REASON_IO_ERROR)]
+    (parent,) = out.glob('.unzip-*')
+    assert list(parent.iterdir()) == [] and not (out / PID).exists()
+
+
 def test_no_staging_is_left_after_a_two_process_run(tree):
     src, out = tree
     for n in range(3):
@@ -755,6 +885,29 @@ def test_a_staging_parent_that_cannot_be_removed_logs_one_fixed_warning_with_a_c
     monkeypatch.undo()
     organize(src, out)  # the next run sweeps it
     assert leftovers(out) == []
+
+
+def test_an_unreadable_staging_leftover_still_logs_the_warning_with_count_one_and_writes_the_report(tree, monkeypatch, caplog):
+    src, out = tree
+    planning_study(src / 'a')
+    real = shutil.rmtree, Path.rglob
+
+    def stubborn(path, *args, **kwargs):
+        if Path(path).name.startswith('.unzip-'):
+            raise OSError(f'busy {path}')
+        return real[0](path, *args, **kwargs)
+
+    def unreadable(self, *args, **kwargs):
+        if self.name.startswith('.unzip-'):
+            raise PermissionError(f'denied {self}')
+        return real[1](self, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, 'rmtree', stubborn)
+    monkeypatch.setattr(Path, 'rglob', unreadable)
+    with caplog.at_level(logging.WARNING):
+        report = organize(src, out)
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == [org.WARN_STAGING_LEFT % 1]
+    assert [r.outcome for r in report.rows] == [org.OUTCOME_ORGANIZED] and PID in (out / org.REPORT_NAME).read_text()
 
 
 def test_the_log_of_a_zipped_run_holds_no_member_name_or_path(tree, caplog):
