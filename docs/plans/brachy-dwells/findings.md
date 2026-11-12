@@ -27,3 +27,8 @@ Files: `src/rt_dataprep/dwell_table.py` (new), `tests/test_dwell_table.py` (new)
 - Gotchas: tests mutate the READ-BACK header (`edit(plan)`) rather than the writer; a non-finite position goes through `point_tags` (DS 'nan'
   written unvalidated). Tests read via `read_header_core` (no quiet block). The AST test names `_pydicom_quiet` (private-name flag at commit).
   Multi-value test wraps the plan in a `.get`-only `Listy` that returns plain lists, since assigning a list to a pydicom element converts it back.
+
+## review-1 (wave, task-01)
+PASS, no BLOCKING. Fixed: W1 (final-0-with-time check had no isolating test; added, mutation-checked), N3 rename,
+N5/N6 spec wording. Deferred to the 2.9 filing: N2 (no test isolates the decrease check; the flat and sum checks also
+catch it), N4 (PDR pulse-interval test sits outside the parametrized case, wording only).

@@ -219,11 +219,18 @@ def test_a_channel_without_control_points_contributes_nothing(tmp_path):
     assert len(rows_of(tmp_path, add_empty)) == 6
 
 
-def test_zero_final_zero_time_channel_gives_zero_rows_without_dividing(tmp_path):
+def test_zero_final_zero_time_channel_gives_zero_time_rows_without_dividing(tmp_path):
     channel = dict(dwells_mm=[(0, 0, 0), (0, 0, 5)], times=[0, 0], total_time=0, final_weight=0, source_number=1,
                    movement_type='FIXED')
     rows = rows_of(tmp_path, channels=[channel])
     assert [(r['dwell_weight'], r['dwell_time_s']) for r in rows] == [(0.0, 0.0)] * 2
+
+
+def test_zero_weights_with_channel_time_are_refused(tmp_path):
+    # every weight 0 passes the weight checks alone: only the final-0-with-time rule keeps 30 s from vanishing
+    channel = dict(dwells_mm=[(0, 0, 0), (0, 0, 5)], times=[0, 0], total_time=30, final_weight=0, source_number=1,
+                   movement_type='FIXED')
+    refused(tmp_path, channels=[channel])
 
 
 def _no_time(plan):

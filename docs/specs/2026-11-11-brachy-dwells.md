@@ -102,9 +102,10 @@ with a non-empty control point sequence (a channel with none contributes no rows
 - pairing: CPs 2k and 2k+1 more than `PAIR_ATOL_MM = 0.1` apart on any axis;
 - weights (tolerance `DWELL_WEIGHT_TOLERANCE × final`): CP 0 ≠ 0; last CP ≠ final; any decrease between consecutive CPs;
   `w_{2k+2} ≠ w_{2k+1}` (time while moving);
-- channel total: |Σ dwell_weight − final| > tolerance × final;
+- channel total: |Σ dwell_weight − final| > `DWELL_WEIGHT_TOLERANCE` × final;
 - final weight 0 with `ChannelTotalTime` ≠ 0; negative `ChannelTotalTime` or final weight;
-- `NumberOfPulses` or `PulseRepetitionInterval` absent on a PDR channel (both Type 1C for PDR).
+- `NumberOfPulses` or `PulseRepetitionInterval` absent on a PDR channel (both Type 1C for PDR);
+- a setup without `ApplicationSetupNumber` or a `SourceSequence` item without `SourceNumber` (Type 1; wave review).
 Mechanics are ion_plan's: rows built through `_header_call`, our checks raise only `CaseRefused(REASON_DWELL)`, `.get`
 reads, no quieting, no try/except, `to_table` outside `_header_call`, all before the plan folder exists. AST test: the
 module raises only `CaseRefused(REASON_DWELL)` and imports none of `plan_table`, `ion_plan_table`, `beam_volume`,
