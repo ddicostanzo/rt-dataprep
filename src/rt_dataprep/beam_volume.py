@@ -107,6 +107,9 @@ def _point(row, sad, weight, position, grid):
 def _points(plan, rows, patient_position, grid):
     _check(isinstance(patient_position, str) and patient_position in POSITIONS)
     position = np.array(POSITIONS[patient_position], dtype=float)
+    # A stated setup position other than the CT's would mirror the volume (#288). shortcut: checks every setup item, not
+    # only those the treatment beams reference; refusing loses only beam_mu. Narrow it if a real plan is refused for this.
+    _check(all(s.get('PatientPosition') in ('', None, patient_position) for s in plan.get('PatientSetupSequence') or []))
     sads = _sads(plan)
     _table_top_flat(plan)
     points = []
