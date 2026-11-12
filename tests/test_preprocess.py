@@ -1693,7 +1693,7 @@ def test_a_tree_without_a_fluence_row_is_unaffected(tmp_path):
 
 # ---- proton-plans task-03: ion_plan.parquet is carried like plan.parquet, checked against ION_SCHEMA ----
 
-ION_NAME = 'ion_plan.parquet'  # convert's ION_PLAN_NAME arrives with task-04
+ION_NAME = conv.ION_PLAN_NAME
 
 
 def add_ion_plan(tmp_path, folder, kind='ion_plan', name=ION_NAME, table=None):

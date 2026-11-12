@@ -238,7 +238,7 @@ The file has one row per spot with a non-zero weight. The columns and types are 
   nullable), `scan_spot_tune_id` (nullable), `spot_size_x`/`spot_size_y` (mm, nullable), `number_of_paintings` (nullable),
   `range_shifter_settings` (list of strings, `[]` when none), `range_shifter_wet` (list of floats, mm water equivalent; `[]` when no shifter, null when a
   declared shifter has no value), `isocenter_x/y/z` (patient mm) and `isocenter_i/j/k` (the same point as a continuous voxel index of the CT in the same folder).
-- Spot: `spot_index`, `spot_x`/`spot_y` (mm), `spot_weight`, `spot_mu`. Every column not marked nullable is never null.
+- Spot: `spot_index`, `spot_x`/`spot_y` (mm), `spot_weight`, `spot_mu` (MU per fraction). Every column not marked nullable is never null.
 - `spot_x` and `spot_y` are at the isocenter plane in the IEC gantry frame, stored as the plan gives them.
 - `spot_index` is the position in the control point's weight list (zero-weight spots keep their gap), i.e. map order, not delivery order (the plan may allow reordering).
 - `spot_mu` is `beam_meterset * spot_weight / final_cumulative_meterset_weight`, the total over all paintings (never divided by `number_of_paintings`).

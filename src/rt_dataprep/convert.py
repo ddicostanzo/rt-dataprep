@@ -743,7 +743,7 @@ def _joined(values):
 
 
 def _series_rows(plan, struct, ct_slices, dose_heads, rois, files, beam_numbers):
-    """One dict per mask, applicator, line, CT, dose, plan, beam and fluence file in `files` (series.json itself has none), from headers already read.
+    """One dict per mask, applicator, line, CT, dose, plan, ion plan, beam and fluence file in `files` (series.json itself has none), from headers already read.
     SERIES_COLUMNS come from the first CT slice; `dicom` aggregates every planning-CT slice, every RTDOSE file and the RTSTRUCT's ROI."""
     ct_head = ct_slices[0][1]
     groups = plan.get('FractionGroupSequence', [])
