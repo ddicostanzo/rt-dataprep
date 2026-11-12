@@ -404,8 +404,8 @@ By default a plan whose dose or mask extends past the final CT grid is refused. 
 `series.json`, the `retained` key of each dose and mask object is the fraction of that file's native-grid content kept by the crop: for a
 dose, the fraction of its voxels at or above the lesser of 1 Gy and 10% of its max (so a 2 Gy fraction is judged at 0.2 Gy); for a mask, its volume.
 The 1 Gy and 10% are the defaults: `--dose-retained-gy GY` (finite, greater than 0) and `--dose-retained-fraction F` (greater than 0, at most 1) change them, and
-each needs `--allow-crop`. They change `retained` and nothing else in the output, so rerunning with other values needs `--overwrite` or a fresh output root. Setting
-`F` to 1 counts only the peak voxels of a dose whose max is below `GY`, since the threshold is then the dose max itself. It is exactly `1.0` when nothing is cut, and blank for CT, applicator, line, plan, beam and series entries and on runs
+each needs `--allow-crop`. They change only `retained` and what is derived from it (never the dose itself), so rerunning with other values needs `--overwrite` or a fresh output root. Setting
+`F` to 1 counts only the peak voxels of a dose whose max is below `GY`, since the threshold is then the dose max itself. `retained` is exactly `1.0` when nothing is cut, and blank for CT, applicator, line, plan, beam and series entries and on runs
 without a geometric step. In `preprocess_report.csv`, the `cropped` column counts the dose and mask files the final grid cut; a
 dose cut only below that threshold counts as cropped but has `retained` `1.0`. A mask whose `dicom.roi_interpreted_type` is `EXTERNAL` (the body outline) keeps its own
 `retained`, but is left out of the plan's lowest `retained` and of `cropped`. A mask without a single `roi_interpreted_type` (a tree converted before dicom metadata) still counts, and the run log warns how many such masks the final grid cut. The run's closing log line counts the cropped plans and how many of them have a
