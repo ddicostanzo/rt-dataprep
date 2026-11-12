@@ -2344,13 +2344,22 @@ def test_a_malformed_hdr_plan_converts_without_dwell_parquet_and_logs_only_the_f
 def test_a_malformed_hdr_plan_leaves_every_other_output_as_the_good_plan_writes_it(tree, tmp_path):
     org, out = tree
     good = tmp_path / 'good'
-    make_plan(org / PID / 'plan_1', rois=[BOX], plan_meta=dict(treatment_type='HDR', sources=[sd.brachy_source()], channels=default_channels()))
+    with_applicator = [dict(c, applicator_id='Ring-1', roi=2) if n == 0 else c for n, c in enumerate(default_channels())]
+    kwargs = dict(doses=[dose_spec(10)], rois=[BOX, RING])
+    make_plan(org / PID / 'plan_1', plan_meta=dict(treatment_type='HDR', sources=[sd.brachy_source()], channels=with_applicator), **kwargs)
     conv.convert(org, good)
     bad_org = tmp_path / 'bad_org'
-    make_plan(bad_org / PID / 'plan_1', rois=[BOX], plan_meta=dict(treatment_type='HDR', sources=[sd.brachy_source()], channels=odd_channels()))
+    bad_channels = [dict(with_applicator[0], paired=False)]  # an odd control-point count
+    make_plan(bad_org / PID / 'plan_1', plan_meta=dict(treatment_type='HDR', sources=[sd.brachy_source()], channels=bad_channels), **kwargs)
     conv.convert(bad_org, tmp_path / 'bad')
-    for name in ('planning_ct.nii.gz', 'liver.nii.gz'):
-        assert (good / PID / 'plan_1' / name).read_bytes() == (tmp_path / 'bad' / PID / 'plan_1' / name).read_bytes()
+    good_folder, bad_folder = good / PID / 'plan_1', tmp_path / 'bad' / PID / 'plan_1'
+    written = sorted(p.name for p in good_folder.iterdir())
+    assert {'planning_ct.nii.gz', 'dose.nii.gz', 'liver.nii.gz', 'Ring1.nii.gz', 'dwell.parquet', 'series.json'} <= set(written)
+    assert sorted(p.name for p in bad_folder.iterdir()) == [n for n in written if n != 'dwell.parquet']
+    for name in written:
+        if name not in ('dwell.parquet', 'series.json'):
+            assert (good_folder / name).read_bytes() == (bad_folder / name).read_bytes(), name
+    assert [(r['file'], r['kind']) for r in sf.read(bad_folder)] == [(r['file'], r['kind']) for r in sf.read(good_folder) if r['kind'] != 'dwell']  # the UIDs differ per run
 
 
 def test_a_tag_level_fault_in_the_dwell_table_logs_the_fixed_reason(tree, caplog, monkeypatch):
@@ -2361,6 +2370,8 @@ def test_a_tag_level_fault_in_the_dwell_table_logs_the_fixed_reason(tree, caplog
     plan, rows, out = hdr_plan(tree, rois=[BOX])
     assert row_of(rows).outcome == conv.OUTCOME_CONVERTED and not (out / PID / 'plan_1' / 'dwell.parquet').exists()
     assert len(logged(caplog, dwell_table.REASON_DWELL)) == 1
+    assert len([r for r in caplog.records if r.levelno >= logging.WARNING]) == 1  # the one fixed warning and nothing else
+    assert any(r.levelno == logging.INFO and r.getMessage().startswith(f'convert: {conv.REASON_MISSING_TAG}: AttributeError at ') for r in caplog.records)
     assert all(secret not in caplog.text for secret in [plan['plan'], PID])
 
 

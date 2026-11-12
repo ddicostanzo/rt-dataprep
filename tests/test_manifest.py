@@ -752,6 +752,18 @@ def test_a_dwell_key_follows_ion_plan_exactly_when_its_row_exists(tmp_path):
     assert list(line)[-5:] == ['plan', 'beam', 'fluence', 'ion_plan', 'dwell'] and line['dwell'] == DWELL_NAME
 
 
+def test_a_geometric_run_lists_the_ion_plan_and_the_dwell_in_order_after_the_other_files(tmp_path):
+    converted, folder = photon_converted(tmp_path)
+    add_ion_plan(tmp_path, folder)
+    add_dwell(tmp_path, folder)
+    out = tmp_path / 'out'
+    pre.preprocess(converted, out, dataclasses.replace(SMALL, new_shape=(8, 8, 8)))
+    assert man.manifest(out) == (1, 0)
+    line = plan_line(out)
+    assert list(line)[-6:] == ['retained', 'plan', 'beam', 'fluence', 'ion_plan', 'dwell']
+    assert (line['ion_plan'], line['dwell']) == (ION_NAME, DWELL_NAME)
+
+
 def test_a_geometric_run_lists_the_dwell_under_its_kept_name(tmp_path):
     converted, folder = photon_converted(tmp_path)
     add_dwell(tmp_path, folder)
