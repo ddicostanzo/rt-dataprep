@@ -450,3 +450,13 @@ def test_optional_manifest_keys_and_lines_that_differ_in_them_do_not_change_the_
     rich.parent.mkdir()
     rich.write_text(''.join(json.dumps(row | optional[i % len(optional)]) + '\n' for i, row in enumerate(rows)), encoding='utf-8')
     assert run(rich) == run(plain)
+
+
+@pytest.mark.parametrize(('name', 'legacy'), [('manifest.jsonl', False), ('other.jsonl', False), ('other.jsonl', True)])
+def test_a_missing_manifest_outside_the_legacy_case_still_raises_file_not_found(tmp_path, name, legacy):  # #322: the hint is only for a missing manifest.jsonl beside manifest.csv
+    if legacy:
+        (tmp_path / 'manifest.csv').write_text('case_dir,patient\n', encoding='utf-8')
+    with pytest.raises(FileNotFoundError):
+        sp.split(tmp_path / name, test_size=0.2, val_size=0.2, seed=SEED_A)
+    with pytest.raises(FileNotFoundError):
+        sp.check_disjoint({'train': {}}, str(tmp_path / name))

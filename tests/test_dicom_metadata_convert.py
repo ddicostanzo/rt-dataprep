@@ -348,12 +348,12 @@ def test_no_synthetic_value_reaches_a_log_line_or_the_report_when_a_plan_is_refu
     Path(one['ct']['paths'][-1]).unlink()  # plan_1 is refused as slice-missing; plan_2 converts, then is refused too, as it sits on that short CT
     collected = []
     real = metadata.collect
-    monkeypatch.setattr(metadata, 'collect', lambda *args, **kwargs: collected.append(1) or real(*args, **kwargs))
+    monkeypatch.setattr(metadata, 'collect', lambda heads, groups, **kwargs: collected.append(groups) or real(heads, groups, **kwargs))
     with caplog.at_level(logging.DEBUG):
         rows = conv.convert(org, out).rows
     assert [(r.folder, r.outcome, r.reason) for r in rows if r.folder.startswith('plan_')] == [
         ('plan_1', 'refused', conv.REASON_CT_SLICE_MISSING), ('plan_2', 'refused', conv.REASON_CT_SLICE_MISSING)]
-    assert collected  # plan_1 is refused before any metadata, so plan_2's rows were built first
+    assert (metadata.RTPLAN,) in collected  # plan_1 is refused before any metadata, so plan_2's plan-level rows were built first (#322)
     logged = '\n'.join(r.getMessage() for r in caplog.records) + caplog.text
     assert logged and not any(value in text for value in SYNTHETIC_VALUES for text in (logged, (out / conv.REPORT_NAME).read_text(encoding='utf-8')))
 
