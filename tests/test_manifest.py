@@ -667,7 +667,7 @@ def test_a_plan_whose_series_json_holds_a_lone_surrogate_is_refused_and_its_sibl
     converted = tmp_path / 'converted'
     for plan in ('plan_1', 'plan_2'):
         write_plan(converted, plan=plan)
-    path = converted / 'SYNTHETICPTA' / 'plan_1' / conv.SERIES_NAME
+    path = converted / 'SYNTHETICPTA' / 'plan_1' / conv.SERIES_NAME  # a dicom value is checked too: test_preprocess SERIES_JSON_BREAKS
     text = path.read_text(encoding='utf-8')
     rows = json.loads(text)
     next(row for row in rows if row[key])[key] = 'SYNTHETIC_\udcff'

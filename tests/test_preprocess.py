@@ -3148,6 +3148,8 @@ SERIES_JSON_BREAKS = {
     'deep nesting': lambda good: b'[' * 100_000,
     'duplicate key': lambda good: ('[' + full_row_json()[:-1] + ', "file": "b.nii.gz"}]').encode(),
     'bom': lambda good: b'\xef\xbb\xbf' + good,
+    'lone surrogate': lambda good: ('[' + full_row_json(roi_name='\udcff') + ']').encode(),  # #268
+    'lone surrogate in dicom': lambda good: ('[' + full_row_json(dicom={'manufacturer': '\udcff'}) + ']').encode(),
     'not utf-8': lambda good: good + b'\xff\xfe',
     'empty file': lambda good: b'',
     'not an array': lambda good: b'{}',
