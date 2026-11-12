@@ -32,3 +32,12 @@ Files: `src/rt_dataprep/dwell_table.py` (new), `tests/test_dwell_table.py` (new)
 PASS, no BLOCKING. Fixed: W1 (final-0-with-time check had no isolating test; added, mutation-checked), N3 rename,
 N5/N6 spec wording. Deferred to the 2.9 filing: N2 (no test isolates the decrease check; the flat and sum checks also
 catch it), N4 (PDR pulse-interval test sits outside the parametrized case, wording only).
+
+## task-02
+Files: `src/rt_dataprep/preprocess.py`, `src/rt_dataprep/manifest.py`, `tests/test_preprocess.py`, `tests/test_manifest.py`.
+- `dwell` is in `KINDS`, both keep-the-name tuples and the geometric branch, which now picks `(schema, prefix)` per kind from a dict;
+  `index_plan_table(source, path, final, schema=plan_table.SCHEMA, prefix='isocenter')` (`'position'` for dwell). `REASON_PLAN_INDEX`
+  names plan.parquet, ion_plan.parquet and dwell.parquet (still contains 'plan table').
+- manifest `_files` gains `dwell` after `ion_plan`.
+- Tests: `add_dwell(tmp_path, folder, kind, name, table)` in test_preprocess builds the table from `test_dwell_table.plan_of` (HDR, positions on the
+  CT grid of `write_plan`); `DWELL_NAME` is a literal there because `conv.DWELL_NAME` arrives in task-03 (switch to it then).
