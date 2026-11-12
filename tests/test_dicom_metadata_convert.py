@@ -7,6 +7,7 @@ import json
 import logging
 from collections import Counter
 from copy import deepcopy
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -14,7 +15,7 @@ import series_files as sf
 import synthetic_dicom as sd
 from test_convert import RING, RING_CHANNEL, SHAPE, dose_spec, make_plan
 from test_metadata import ALL_TAGS, IMAGES_TAGS, PLAN_TAGS
-from test_series import VALUES, rigid
+from test_series import VALUES, copy_renamed, rigid
 
 from rt_dataprep import convert as conv
 from rt_dataprep import metadata
@@ -196,7 +197,7 @@ def test_each_folder_gets_its_own_dicom_dict(tmp_path, monkeypatch):
     assert len({id(d) for d in dicts}) == len(dicts)
 
 
-def test_a_registration_without_a_usable_matrix_still_gives_the_chosen_regs_keys_and_an_identity_row_none(tmp_path):
+def test_a_registration_without_a_usable_matrix_still_gives_the_chosen_regs_keys_and_an_empty_matrix(tmp_path):
     def build(org):
         one = make_plan(org / PID / 'plan_1', ct_meta=dict(tags=CT_TAGS), plan_meta=dict(tags=PLAN_TAGS), patient=PID)
         mr = sd.write_ct_series(one['folder'], VALUES, patient_id=PID, prefix='mr', modality='MR', tags=LOUD)
@@ -337,6 +338,25 @@ def test_a_bad_value_omits_its_keys_and_changes_no_outcome(tmp_path, case):
 
 
 # ---------------------------------------------------------------- AC9: nothing reaches a log line or the report
+
+def test_no_synthetic_value_reaches_a_log_line_or_the_report_when_a_plan_is_refused_after_its_metadata_was_built(tmp_path, caplog, monkeypatch):
+    org, out = tmp_path / 'org', tmp_path / 'out'
+    one = make_plan(org / PID / 'plan_1', ct_meta=dict(tags=CT_TAGS), plan_meta=dict(tags=PLAN_TAGS))
+    second = org / PID / 'plan_2'  # a second RTPLAN on the same CT, its copy complete and its headers loud
+    copy_renamed([*one['ct']['paths'], one['folder'] / 'struct.dcm'], second)
+    sd.write_rtplan(second / 'plan.dcm', one['struct'], np.zeros((2, 3)), patient_id=PID, study_uid=one['ct']['study_uid'], tags=PLAN_TAGS)
+    Path(one['ct']['paths'][-1]).unlink()  # plan_1 is refused as slice-missing; plan_2 converts, then is refused too, as it sits on that short CT
+    collected = []
+    real = metadata.collect
+    monkeypatch.setattr(metadata, 'collect', lambda *args, **kwargs: collected.append(1) or real(*args, **kwargs))
+    with caplog.at_level(logging.DEBUG):
+        rows = conv.convert(org, out).rows
+    assert [(r.folder, r.outcome, r.reason) for r in rows if r.folder.startswith('plan_')] == [
+        ('plan_1', 'refused', conv.REASON_CT_SLICE_MISSING), ('plan_2', 'refused', conv.REASON_CT_SLICE_MISSING)]
+    assert collected  # plan_1 is refused before any metadata, so plan_2's rows were built first
+    logged = '\n'.join(r.getMessage() for r in caplog.records) + caplog.text
+    assert logged and not any(value in text for value in SYNTHETIC_VALUES for text in (logged, (out / conv.REPORT_NAME).read_text(encoding='utf-8')))
+
 
 def test_no_synthetic_value_reaches_a_log_line_or_the_report_in_a_full_run_the_guard_cases_and_a_refused_plan(tmp_path, caplog):
     org, out = tmp_path / 'org', tmp_path / 'out'

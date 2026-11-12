@@ -448,10 +448,11 @@ def test_a_legacy_study_is_counted_without_reading_anything(converted, monkeypat
     assert man._study_rows(converted / PID, converted / PID / 'study_2') == ([], 1)
 
 
-def test_images_and_misc_files_with_a_series_csv_are_not_counted(converted):
+def test_images_and_misc_files_with_a_series_csv_and_json_are_not_counted(converted):
     for name in ('images', 'misc_files'):
         (converted / PID / name).mkdir()
         (converted / PID / name / pre.LEGACY_SERIES_NAME).write_text('file,kind\n', encoding='utf-8')
+        (converted / PID / name / conv.SERIES_NAME).write_text('[]', encoding='utf-8')  # as the preprocess test does (#250)
     assert man.manifest(converted) == (4, 0)
 
 
@@ -570,6 +571,19 @@ def test_a_series_json_without_dicom_still_gives_lines_with_only_series_date(met
     for line in lines:
         assert not set(line) & (set(OPTIONAL) - {'series_date'}) and set(line) - {'series_date'} <= {*COLUMNS}
     assert {line['case_dir'].split('/')[1]: line.get('series_date') for line in lines}['plan_1'] == STUDY_D1
+
+
+def test_a_preprocessed_tree_whose_series_json_carries_dicom_reaches_the_manifest_with_the_8_optional_keys(meta_master, tmp_path):  # #253
+    converted = tmp_path / 'converted'
+    shutil.copytree(meta_master, converted)
+    out = tmp_path / 'out'
+    pre.preprocess(converted, out, pre.PreprocessSteps(rescale=True))  # a non-geometric step: no `retained`
+    assert all('dicom' in row for row in sf.read(out / PID / 'plan_1'))
+    assert man.manifest(out) == (2, 0)  # the plan and the study CT: rescale refuses the PT
+    lines = {row['case_dir']: row for row in map(json.loads, (out / 'manifest.jsonl').read_text(encoding='utf-8').splitlines())}
+    plan_line = lines[f'{PID}/plan_1']
+    assert list(plan_line) == [*COLUMNS, *OPTIONAL]
+    assert (plan_line['patient_age'], plan_line['manufacturer'], plan_line['institution_name']) == (63, 'SYNTHETIC_MAKER', 'SYNTHETIC_SITE')
 
 
 def test_a_plan_line_carries_the_lowest_dose_or_mask_retained_of_a_cut_plan_and_none_on_a_converted_tree(tmp_path):

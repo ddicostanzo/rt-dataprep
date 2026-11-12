@@ -673,8 +673,8 @@ def read_series_json(folder):
 
 
 def study_refusal_count(rows):
-    """What a refused study counts in the manifest: its series.json items (read_series_json), or 1 when it cannot be parsed or holds no row."""
-    return max(1, len(rows))
+    """What a refused study counts in the manifest: its series.json objects (read_series_json; any other item is not counted), or 1 when it cannot be parsed or holds no row."""
+    return max(1, sum(isinstance(row, dict) for row in rows))
 
 
 def check_study_rows(study_dir, parsed=None):

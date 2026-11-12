@@ -19,3 +19,10 @@ def test_custom_preprocess_fails_when_no_cases_are_processed(tmp_path, empty_pat
     assert 'no cases were processed, or cases/registered series were refused or skipped' in result.stderr
     assert 'Custom preprocessing complete' not in result.stdout
     assert all(secret not in result.stdout + result.stderr for secret in ('SYNTHETIC_EMPTY', str(tmp_path)))
+
+
+def test_synthetic_workflow_runs_end_to_end(tmp_path):  # #250: about 4 s
+    script = Path(__file__).resolve().parents[1] / 'examples' / 'synthetic_workflow.py'
+    result = subprocess.run([sys.executable, str(script), str(tmp_path / 'workspace')], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert 'Synthetic workflow complete: 6 patients, 18 imaging cases; train=2, val=2, test=2; no refusals.' in result.stdout

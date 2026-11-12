@@ -20,7 +20,7 @@ from rt_dataprep.preprocess import (
     preprocess,
 )
 from rt_dataprep.preprocess import REASON_INTERNAL as PREPROCESS_REASON_INTERNAL
-from rt_dataprep.split import REASON_COLUMNS, REASON_EXISTS, REASON_NO_TRAIN, REASON_OVERLAP, REASON_ROWS, REASON_SIZE, SPLIT_NAMES, split
+from rt_dataprep.split import REASON_COLUMNS, REASON_EXISTS, REASON_LEGACY, REASON_NO_TRAIN, REASON_OVERLAP, REASON_ROWS, REASON_SIZE, SPLIT_NAMES, split
 
 
 PREPROCESS_HELP = 'resample, rescale and crop/pad a converted tree into a separate output tree; give at least one step flag to write anything'
@@ -131,7 +131,7 @@ def main(argv=None):
     except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug, reported as below
         if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_AHE_OPTIONS,
                             REASON_MASK_RETENTION_LIMIT, REASON_OUTSIDE_SRC, REASON_INPUT_INSIDE_OUTPUT,
-                            REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS,
+                            REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS, REASON_LEGACY,
                             REASON_LOCKED):
             parser.exit(1, unexpected(exc))
         parser.exit(1, f'rt_dataprep: {exc}\n')

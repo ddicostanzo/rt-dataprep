@@ -1212,6 +1212,11 @@ def test_study_refusal_count(tmp_path, text, expected):
     assert pre.study_refusal_count(pre.read_series_json(tmp_path)[0]) == expected
 
 
+def test_study_refusal_count_counts_only_the_objects_of_a_corrupt_array():  # #250
+    assert pre.study_refusal_count([{'file': 'a'}, 'x', 3, None, {'file': 'b'}, ['c']]) == 2
+    assert pre.study_refusal_count(['x', 3]) == 1
+
+
 def test_study_refusal_count_of_an_unparseable_file_is_one(tmp_path):
     (tmp_path / conv.SERIES_NAME).write_bytes(b'[{"file": "a"}, {"file": "\xff\xfe"}]')
     assert pre.study_refusal_count(pre.read_series_json(tmp_path)[0]) == 1
@@ -2852,6 +2857,42 @@ def test_the_run_log_counts_cropped_plans_and_those_with_a_low_retained(tmp_path
     with caplog.at_level('INFO'):
         pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
     assert f'; {tail}; ' in run_summary(caplog)
+
+
+def one_voxel_past_the_edge(value=1.0):
+    """The in-grid box 3..8 plus one voxel at z 9, past the kept indices: retained 216 / 217, in [0.9, 1.0)."""
+    array = box((3, 3, 3), (9, 9, 9), value=value)
+    array[9, 5, 5] = value
+    return array
+
+
+@pytest.mark.parametrize(('plan', 'tail'), [(dict(dose=None, masks={'ptv': one_voxel_past_the_edge()}), '1 plans cropped, 0 with retained < 0.9'),  # a mask at ~0.995 is cropped but not low (#266)
+                                            (dict(dose=one_voxel_past_the_edge(), masks={}), '1 plans cropped, 0 with retained < 0.9'),  # the same for a dose
+                                            (dict(dose=DOSE_SPLIT, masks={}), '1 plans cropped, 1 with retained < 0.9')])  # a dose at 0.5
+def test_the_run_log_counts_a_cut_dose_and_a_retained_in_the_open_interval_below_one(tmp_path, caplog, plan, tail):
+    write_plan(tmp_path / 'converted', **plan)
+    with caplog.at_level('INFO'):
+        pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    assert f'; {tail}; ' in run_summary(caplog)
+
+
+def test_the_run_log_counts_over_every_plan_of_a_tree(tmp_path, caplog):
+    write_plan(tmp_path / 'converted', plan='plan_1', dose=None, masks={'ptv': HALF_OUT})  # cropped, low
+    write_plan(tmp_path / 'converted', plan='plan_2', dose=None, masks={'ptv': one_voxel_past_the_edge()})  # cropped, not low
+    write_plan(tmp_path / 'converted', plan='plan_3', dose=None, masks={'ptv': box((5, 5, 5), (8, 8, 8))})  # not cropped
+    with caplog.at_level('INFO'):
+        pre.preprocess(tmp_path / 'converted', tmp_path / 'out', CUT)
+    assert '; 2 plans cropped, 1 with retained < 0.9; ' in run_summary(caplog)
+
+
+@pytest.mark.parametrize(('steps', 'plan'), [(PreprocessSteps(rescale=True), dict(dose=None, masks={'ptv': HALF_OUT})),  # no geometric step: nothing is cut or measured
+                                           (CUT_OFF, dict(dose=DOSE_SPLIT, masks={}))])  # refused for the cut: no cropped or retained recorded
+def test_a_non_geometric_run_and_a_refused_plan_count_zero_for_both_numbers(tmp_path, caplog, steps, plan):
+    write_plan(tmp_path / 'converted', **plan)
+    with caplog.at_level('INFO'):
+        report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
+    assert '; 0 plans cropped, 0 with retained < 0.9; ' in run_summary(caplog)
+    assert plan_row(report).outcome == (conv.OUTCOME_REFUSED if steps is CUT_OFF else pre.OUTCOME_PREPROCESSED)
 
 
 def test_a_cut_plan_without_allow_crop_still_refuses_and_records_no_cropped_count(tmp_path):
