@@ -28,7 +28,8 @@ how the dose was delivered. Dose-prediction, plan-parameter and fluence models n
    other check (they often have no or zero `BeamMeterset`). A plan with any beam of another delivery type
    (CONTINUATION, TRMT_PORTFILM, OPEN_PORTFILM: they deliver dose that is in `dose.nii.gz`) → no parquet, no log line
    (owner, 2026-11-11, review round).
-3. Every treatment beam has `RadiationType` PHOTON, else no parquet, no log line. No treatment beam → no parquet.
+3. Every treatment beam has `RadiationType` PHOTON, else no parquet, no log line. No treatment beam → no parquet. An empty or missing
+   type beside photon beams, or a treatment beam with an `ApplicatorSequence` (cone), is malformed: no parquet, REASON_PLAN_TABLE (#275, #277).
 
 ## Columns (one row per control point)
 The schema is declared once with `pa.schema(...)`; types never come from inference (an all-null column would otherwise
