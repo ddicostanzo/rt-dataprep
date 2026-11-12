@@ -12,6 +12,7 @@ from rt_dataprep.organize import REASON_LOCKED, REASON_OUTSIDE_SRC, OrganizeAbor
 from rt_dataprep.pool import MAX_WORKERS
 from rt_dataprep.preprocess import (
     REASON_AHE_OPTIONS,
+    REASON_DOSE_RETAINED_LIMIT,
     REASON_MASK_RETENTION_LIMIT,
     REASON_NO_STEPS,
     REASON_OUTSIDE_INPUT,
@@ -81,6 +82,10 @@ def main(argv=None):
     sub.add_argument('--final-spacing', type=spacing_mm, nargs=3, metavar=('X', 'Y', 'Z'), help='--resample spacing in mm (default 1.25 1.25 1.25); requires --resample')
     sub.add_argument('--allow-crop', action='store_true',
                      help='crop a dose or mask that extends past the final grid, not refuse the plan; needs --initial-resample, --resample or --reshape')
+    sub.add_argument('--dose-retained-gy', type=float, default=None, metavar='GY',
+                     help='dose retained counts voxels at or above min(GY, F of the dose max); GY default 1.0, finite and greater than 0; requires --allow-crop')
+    sub.add_argument('--dose-retained-fraction', type=float, default=None, metavar='F',
+                     help='dose retained counts voxels at or above min(GY, F of the dose max); F default 0.1, greater than 0 and at most 1; requires --allow-crop')
     sub.add_argument('--ahe-kernel-mm', type=float, nargs=3, metavar=('X', 'Y', 'Z'), help='AHE window in physical mm; requires --ahe')
     sub.add_argument('--ahe-bins', type=int, default=None, help='AHE histogram bins (default 128, at least 2); requires --ahe')
     sub.add_argument('--ahe-clip-limit', type=float, default=None, help='AHE clip limit (default 0.05, from 0 to 1); requires --ahe')
@@ -110,13 +115,18 @@ def main(argv=None):
                     parser.error(f'{option} requires its step flag')
             if args.allow_crop and not (args.initial_resample or args.resample or args.reshape):
                 parser.error('--allow-crop requires --initial-resample, --resample or --reshape')
+            for option, value in (('--dose-retained-gy', args.dose_retained_gy), ('--dose-retained-fraction', args.dose_retained_fraction)):
+                if value is not None and not args.allow_crop:
+                    parser.error(f'{option} requires --allow-crop')
             grids = {name: tuple(value) for name, value in (('new_shape', args.new_shape), ('new_spacing', args.new_spacing),
                                                            ('final_spacing', args.final_spacing)) if value is not None}
+            dose_limits = {name: value for name, value in (('dose_retained_gy', args.dose_retained_gy),
+                                                           ('dose_retained_fraction', args.dose_retained_fraction)) if value is not None}
             # flags are named after the output prefix: --initial-resample is the resample field, --resample is harmonize_spacing
             preprocess(args.converted, args.out, PreprocessSteps(
                 resample=args.initial_resample, rescale=args.rescale, ahe=args.ahe, harmonize_spacing=args.resample, reshape=args.reshape,
                 legacy_linear_masks=args.legacy_linear_masks, series_fov_mask=args.series_fov_mask,
-                min_mask_retention=args.min_mask_retention, allow_crop=args.allow_crop, **grids,
+                min_mask_retention=args.min_mask_retention, allow_crop=args.allow_crop, **grids, **dose_limits,
                 ahe_kernel_mm=None if args.ahe_kernel_mm is None else tuple(args.ahe_kernel_mm),
                 ahe_bins=128 if args.ahe_bins is None else args.ahe_bins,
                 ahe_clip_limit=0.05 if args.ahe_clip_limit is None else args.ahe_clip_limit), workers=args.workers, overwrite=args.overwrite)
@@ -130,7 +140,7 @@ def main(argv=None):
             organize(args.src, args.out, workers=args.workers, overwrite=args.overwrite)
     except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug, reported as below
         if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_AHE_OPTIONS,
-                            REASON_MASK_RETENTION_LIMIT, REASON_OUTSIDE_SRC, REASON_INPUT_INSIDE_OUTPUT,
+                            REASON_MASK_RETENTION_LIMIT, REASON_DOSE_RETAINED_LIMIT, REASON_OUTSIDE_SRC, REASON_INPUT_INSIDE_OUTPUT,
                             REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS, REASON_LEGACY,
                             REASON_LOCKED):
             parser.exit(1, unexpected(exc))

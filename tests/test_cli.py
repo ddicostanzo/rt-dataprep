@@ -279,6 +279,40 @@ def test_grid_option_and_allow_crop_usage_errors_exit_2_before_any_work(argv, mo
     assert 'usage:' in capsys.readouterr().err
 
 
+@pytest.mark.parametrize('flag, field, value', [('--dose-retained-gy', 'dose_retained_gy', 0.5), ('--dose-retained-fraction', 'dose_retained_fraction', 0.05)])
+def test_dose_retained_flags_require_allow_crop_and_exit_2_with_empty_stdout(flag, field, value, monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: seen.append(args))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(['preprocess', 'a', 'b', '--reshape', flag, str(value)])
+    captured = capsys.readouterr()
+    assert exc.value.code == 2 and seen == [] and captured.out == ''
+    assert f'{flag} requires --allow-crop' in captured.err
+
+
+@pytest.mark.parametrize('flag, field, value', [('--dose-retained-gy', 'dose_retained_gy', 0.5), ('--dose-retained-fraction', 'dose_retained_fraction', 0.05)])
+def test_dose_retained_flags_reach_the_steps_only_when_given(flag, field, value, monkeypatch):
+    got = steps_from(['--reshape', '--allow-crop', flag, str(value)], monkeypatch)
+    assert got == pre.PreprocessSteps(reshape=True, allow_crop=True, **{field: value})
+    assert type(getattr(got, field)) is float
+    assert steps_from(['--reshape', '--allow-crop'], monkeypatch) == pre.PreprocessSteps(reshape=True, allow_crop=True)
+
+
+def test_both_dose_retained_flags_reach_the_steps_together(monkeypatch):
+    got = steps_from(['--reshape', '--allow-crop', '--dose-retained-gy', '2', '--dose-retained-fraction', '0.25'], monkeypatch)
+    assert (got.dose_retained_gy, got.dose_retained_fraction) == (2.0, 0.25)
+
+
+@pytest.mark.parametrize('flag, bad', [('--dose-retained-gy', 'nan'), ('--dose-retained-fraction', '1.5')])
+def test_invalid_dose_retained_values_exit_1_with_the_fixed_text_and_write_nothing(tmp_path, flag, bad):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_plan(converted)
+    result = subprocess.run([sys.executable, '-m', 'rt_dataprep', 'preprocess', str(converted), str(out),
+                             '--reshape', '--allow-crop', flag, bad], capture_output=True, text=True)
+    assert result.returncode == 1 and not out.exists()
+    assert result.stderr == f'rt_dataprep: {pre.REASON_DOSE_RETAINED_LIMIT}\n' and not result.stdout
+
+
 def test_allow_crop_with_new_shape_writes_a_cut_dose_end_to_end(tmp_path):
     write_plan(tmp_path / 'converted', dose=DOSE_SPLIT, masks={'ptv': HALF_OUT, 'bladder': box((5, 5, 5), (8, 8, 8))})
     out = tmp_path / 'out'

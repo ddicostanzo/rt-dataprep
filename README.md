@@ -85,7 +85,7 @@ count before accepting the cohort. Successful process completion can include ref
 | --- | --- | --- |
 | `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers auto` or `1..64` (default `auto`); `--overwrite` |
 | `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers auto` or `1..64` (default `auto`); `--overwrite` |
-| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers auto` or `1..64` (default `auto`); at least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--new-spacing`, `--final-spacing`, `--new-shape`, `--allow-crop`, `--min-mask-retention`, `--ahe-kernel-mm`, `--ahe-bins`, `--ahe-clip-limit`, `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
+| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers auto` or `1..64` (default `auto`); at least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--new-spacing`, `--final-spacing`, `--new-shape`, `--allow-crop`, `--dose-retained-gy`, `--dose-retained-fraction`, `--min-mask-retention`, `--ahe-kernel-mm`, `--ahe-bins`, `--ahe-clip-limit`, `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
 | `manifest ROOT` | Write `ROOT/manifest.jsonl` and a dated copy. | Works on converted or preprocessed trees. |
 | `split ROOT` | Read `ROOT/manifest.jsonl`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
 
@@ -402,7 +402,10 @@ pad a large extent at native spacing.
 By default a plan whose dose or mask extends past the final CT grid is refused. `--allow-crop` (needs at least one of
 `--initial-resample`, `--resample`, `--reshape`) writes the plan anyway, with the dose and masks cut to the final grid. In
 `series.json`, the `retained` key of each dose and mask object is the fraction of that file's native-grid content kept by the crop: for a
-dose, the fraction of its voxels at or above the lesser of 1 Gy and 10% of its max (so a 2 Gy fraction is judged at 0.2 Gy); for a mask, its volume. It is exactly `1.0` when nothing is cut, and blank for CT, applicator, line, plan, beam and series entries and on runs
+dose, the fraction of its voxels at or above the lesser of 1 Gy and 10% of its max (so a 2 Gy fraction is judged at 0.2 Gy); for a mask, its volume.
+The 1 Gy and 10% are the defaults: `--dose-retained-gy GY` (finite, greater than 0) and `--dose-retained-fraction F` (greater than 0, at most 1) change them, and
+each needs `--allow-crop`. They change `retained` and nothing else in the output, so rerunning with other values needs `--overwrite` or a fresh output root. Setting
+`F` to 1 counts only the peak voxels of a dose whose max is below `GY`, since the threshold is then the dose max itself. It is exactly `1.0` when nothing is cut, and blank for CT, applicator, line, plan, beam and series entries and on runs
 without a geometric step. In `preprocess_report.csv`, the `cropped` column counts the dose and mask files the final grid cut; a
 dose cut only below that threshold counts as cropped but has `retained` `1.0`. A mask whose `dicom.roi_interpreted_type` is `EXTERNAL` (the body outline) keeps its own
 `retained`, but is left out of the plan's lowest `retained` and of `cropped`. A mask without a single `roi_interpreted_type` (a tree converted before dicom metadata) still counts, and the run log warns how many such masks the final grid cut. The run's closing log line counts the cropped plans and how many of them have a
@@ -646,6 +649,8 @@ their output prefix:
 | `final_spacing` | `--final-spacing` | `(1.25, 1.25, 1.25)` mm |
 | `new_shape` | `--new-shape` | `(701, 701, 433)` voxels |
 | `allow_crop` | `--allow-crop` | `False` |
+| `dose_retained_gy` | `--dose-retained-gy` | `1.0` Gy |
+| `dose_retained_fraction` | `--dose-retained-fraction` | `0.1` |
 | `min_mask_retention` | `--min-mask-retention` | `None` |
 | `ahe_kernel_mm`, `ahe_bins`, `ahe_clip_limit` | `--ahe-kernel-mm`, `--ahe-bins`, `--ahe-clip-limit` | `None`, `128`, `0.05` |
 | `legacy_linear_masks` | `--legacy-linear-masks` | `False` |
@@ -765,8 +770,8 @@ train = [load(case) for cases in splits['train'].values() for case in cases]
 
 In a plan's `series.json`, `kind` is `ct`, `dose`, `mask`, `series` (a registered image), `applicator`, `line`, `plan`, `beam`, `fluence`, `ion_plan`, or `dwell`.
 Applicator and line files are gzip-compressed coordinate text, not NIfTI; see [Conversion behavior](#conversion-behavior).
-After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (its voxels >= min(1 Gy, 10% of its max)) and mask (volume)
-kept on the final grid. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should
+After a geometric `preprocess` run, the `retained` key gives the fraction of each dose (its voxels >= min(1 Gy, 10% of its max); 1 Gy and 10% are the defaults of `--dose-retained-gy` and `--dose-retained-fraction`) and mask (volume)
+kept on the final grid. Changing either value needs `--overwrite` or a fresh output root, and a fraction of 1 counts only the peak voxels of a dose whose max is below the Gy floor. It is below `1.0` only under `--allow-crop`; filter on it if partially cropped structures should
 not be used. EXTERNAL masks (the body outline) keep their own value in `series.json` but are left out of the manifest's plan-level
 `retained`, of the run log's low-`retained` count and of `cropped`. The optional `fov_mask` manifest key and `fov_mask` entries in
 the `series` JSON name support masks for excluding fill voxels from losses or metrics.
