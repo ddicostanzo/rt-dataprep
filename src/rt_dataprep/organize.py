@@ -182,7 +182,11 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
         finally:  # Ctrl-C too: the report lists what was done
             dicom_io.remove_tree(staging_parent)
             if os.path.lexists(staging_parent):  # remove_tree swallows its error; the next run's sweep retries
-                log.warning(WARN_STAGING_LEFT, 1 + sum(1 for _ in staging_parent.rglob('*')))
+                try:
+                    left = 1 + sum(1 for _ in staging_parent.rglob('*'))
+                except OSError:  # an unreadable leftover: the report below must still be written
+                    left = 1
+                log.warning(WARN_STAGING_LEFT, left)
             rows = [done[i] for i in sorted(done)]
             write_report(out_root, REPORT_NAME, ['patient', 'plan_count', 'misc_count', 'unreadable_count', 'outcome', 'reason'],
                          ([r.patient, r.plans, r.misc, r.unreadable, r.outcome, r.reason] for r in rows))

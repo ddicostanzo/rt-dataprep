@@ -130,13 +130,14 @@ Zip archives in a source folder are read too, recognized by content rather than 
 members are supported (bzip2 and lzma are not); encrypted members, a zip inside a zip, and tar/7z/gzip archives are not. Before anything is
 extracted, a folder's zips may declare at most 16 GiB and 200,000 members in total. Members are extracted into a hidden
 `.unzip-<random>/` folder under the output root and appear in the plan folders under index names (`1`, `1_1`, ...), never
-under their names inside the archive. A zip that is over the cap or cannot be read is skipped when the folder also holds
-loose DICOM files. Otherwise the folder is refused with `zip archives in the source folder exceed the size or member cap;
+under their names inside the archive. When the folder also holds loose DICOM files, a zip that cannot be read is skipped,
+and a total over the cap skips every zip of the folder. Otherwise the folder is refused with `zip archives in the source folder exceed the size or member cap;
 nothing kept` or `a zip archive in the source folder cannot be read safely; nothing kept`. The summary line counts zips,
 zip members and skipped zips. On Linux and macOS a run holds `.organize.lock` in the output root, so a second run on the
 same root stops with `another organize run holds the output root lock`. Windows takes no lock; on a file system that
 refuses it a warning is logged and the run continues unlocked. A killed run's leftover `.unzip-*` folder is removed by the
-next locked run.
+next locked run. An unlocked run (Windows, or no file locking) never sweeps them: they hold patient files, so delete any
+`.unzip-*` folder in the output root by hand once no run is active.
 
 Representative converted output (optional files shown where applicable):
 
