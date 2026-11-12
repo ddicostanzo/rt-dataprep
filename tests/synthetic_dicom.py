@@ -359,6 +359,71 @@ def write_ion_rtplan(path, struct_sop_uid, sop_uid=None, frame_uid=None, **meta)
     return ds.SOPInstanceUID
 
 
+def pbs_beam(number=1, meterset=100.0, layers=3, spot_weights=None, paintings=None, range_shifters=0, tags=None):
+    """
+    An IonBeamSequence item (proton, MODULATED, MU) as a tag dict for `write_pbs_rtplan`; BeamMeterset is moved into the
+    fraction group (None writes no reference), as in `photon_beam`. Eclipse style: 2 control points per layer; the even one
+    carries the layer's spots (its own energy), the odd one repeats the map with all-zero weights, so the last control point
+    sums to 0. CP 0 also carries gantry, couch, snout, tune, spot size, isocenter, `paintings` (None omits the tag) and one
+    IN setting per range shifter; later control points omit them. spot_weights: one list of spot weights per layer (default
+    binary-exact: layer 0 is [w/2, 0, w/2] with a zero spot, the others [w/2, w/4, w/4]; layer weights .25, .25, .5 for 3
+    layers); a single-weight layer reads back as a float, not a MultiValue. Edit the returned dict for other cases.
+    """
+    if spot_weights is None:
+        layer_weights = [0.5 ** (layers - 1)] + [0.5 ** (layers - k) for k in range(1, layers)]
+        spot_weights = [[w * f for f in ((0.5, 0.0, 0.5) if k == 0 else (0.5, 0.25, 0.25))] for k, w in enumerate(layer_weights)]
+    cumulative = [0.0]
+    for layer in spot_weights:
+        cumulative.append(round(cumulative[-1] + sum(layer), 10))
+    points = []
+    for k, layer in enumerate(spot_weights):
+        positions = [value for s in range(len(layer)) for value in (-20.0 + 5.0 * s + k, 2.0 * k - s)]
+        common = dict(ScanSpotPositionMap=positions, NumberOfScanSpotPositions=len(layer))
+        points.append(dict(ControlPointIndex=2 * k, CumulativeMetersetWeight=cumulative[k], NominalBeamEnergy=100.0 + 10.0 * k,
+                           ScanSpotMetersetWeights=list(layer), **common))
+        points.append(dict(ControlPointIndex=2 * k + 1, CumulativeMetersetWeight=cumulative[k + 1],
+                           ScanSpotMetersetWeights=[0.0] * len(layer), **common))
+    points[0].update(
+        GantryAngle=90.0, PatientSupportAngle=0.0, SnoutPosition=300.0, IsocenterPosition=[10.0, 20.0, 30.0],
+        ScanSpotTuneID='SYNTHETIC_TUNE', ScanningSpotSize=[7.0, 8.0], NumberOfPaintings=paintings,
+        RangeShifterSettingsSequence=[dict(ReferencedRangeShifterNumber=n, RangeShifterSetting='IN',
+                                           RangeShifterWaterEquivalentThickness=10.0 * n) for n in range(1, range_shifters + 1)]
+        or None)  # None as a value writes no tag (see _apply_tags)
+    beam = dict(
+        BeamNumber=number, BeamName=f'SYNTHETIC_B{number}', BeamType='STATIC', RadiationType='PROTON',
+        TreatmentDeliveryType='TREATMENT', TreatmentMachineName='SYNTHETIC_GANTRY', ScanMode='MODULATED',
+        PrimaryDosimeterUnit='MU', VirtualSourceAxisDistances=[2300.0, 2000.0], SnoutSequence=[dict(SnoutID='SYNTHETIC_SNOUT')],
+        NumberOfRangeShifters=range_shifters, FinalCumulativeMetersetWeight=cumulative[-1], NumberOfControlPoints=len(points),
+        IonControlPointSequence=points, BeamMeterset=meterset)
+    if range_shifters:
+        beam['RangeShifterSequence'] = [dict(RangeShifterNumber=n, RangeShifterID=f'SYNTHETIC_RS{n}', RangeShifterType='BINARY')
+                                        for n in range(1, range_shifters + 1)]
+    beam.update(tags or {})
+    return beam
+
+
+def write_pbs_rtplan(path, struct_sop_uid, beams=None, fractions=1, sop_uid=None, frame_uid=None, **meta):
+    """
+    A proton PBS RT Ion plan: ReferencedStructureSetSequence -> `struct_sop_uid`, one fraction group of `fractions` that
+    references each beam of `beams` (`pbs_beam` dicts; default beam 1 at 100 MU and beam 2 at 300 MU) with its BeamMeterset.
+    Same leading arguments as `write_photon_rtplan`. Returns its SOPInstanceUID.
+    """
+    ds = _dataset(path, pydicom.uid.RTIonPlanStorage, 'RTPLAN', sop_uid=sop_uid, frame_uid=frame_uid, **meta)
+    reference = Dataset()
+    reference.ReferencedSOPClassUID = pydicom.uid.RTStructureSetStorage
+    reference.ReferencedSOPInstanceUID = struct_sop_uid
+    ds.ReferencedStructureSetSequence = [reference]
+    beams = [dict(b) for b in (beams or [pbs_beam(1, 100.0), pbs_beam(2, 300.0)])]
+    group = dict(FractionGroupNumber=1, NumberOfFractionsPlanned=fractions, ReferencedBeamSequence=[
+        dict(ReferencedBeamNumber=b['BeamNumber'], BeamMeterset=b['BeamMeterset'])
+        for b in beams if b.get('BeamMeterset') is not None])
+    for b in beams:
+        b.pop('BeamMeterset', None)
+    _apply_tags(ds, dict(FractionGroupSequence=[group], IonBeamSequence=beams))
+    _save(ds)
+    return ds.SOPInstanceUID
+
+
 def write_rtstruct_contours(path, contours, sop_uid=None, brachy=True, **meta):
     """
     An RTSTRUCT of open contours: `contours` is [(roi_number, name, points_mm (N, 3))]. Each ROI gets its ContourData in
