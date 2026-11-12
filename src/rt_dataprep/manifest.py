@@ -34,7 +34,7 @@ def _optional(row):
     return {key: value for key, value in values.items() if value not in (None, '')}
 
 
-RETAINED_CELL = re.compile(r'[0-9.eE+-]+')  # what preprocess writes (repr of a float): no whitespace or underscores, which float() would accept (#264)
+RETAINED_CELL = re.compile(r'[0-9.eE+-]+')  # what preprocess writes (repr of a float): no whitespace or underscores, which float() would accept (#264); float() still parses, so a match like '1e' is refused by its ValueError
 
 
 def _retained(kept):
