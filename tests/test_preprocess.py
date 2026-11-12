@@ -3339,6 +3339,18 @@ def test_the_plan_index_reason_names_all_three_plan_tables():
     assert all(name in pre.REASON_PLAN_INDEX for name in ('plan.parquet', 'ion_plan.parquet', 'dwell.parquet'))
 
 
-def test_index_plan_table_prefix_defaults_to_isocenter():
-    import inspect
-    assert inspect.signature(pre.index_plan_table).parameters['prefix'].default == 'isocenter'
+def test_index_plan_table_without_a_prefix_writes_the_isocenter_index_columns(tmp_path):
+    import pyarrow.parquet as pq
+
+    converted, folder = photon_converted(tmp_path)
+    final = sitk.ReadImage(str(folder / conv.CT_NAME))
+    final.SetOrigin(tuple(o + 7.0 for o in final.GetOrigin()))  # a grid that moves the index, so the columns must be rewritten
+    target = tmp_path / 'indexed.parquet'
+    assert pre.index_plan_table(folder / conv.PLAN_NAME, target, final) is True
+    before, after = pq.read_table(folder / conv.PLAN_NAME), pq.read_table(target)
+    index_columns = ('isocenter_i', 'isocenter_j', 'isocenter_k')
+    assert after.num_rows == before.num_rows > 0 and all(after[name].null_count == 0 for name in index_columns)
+    points = zip(*(after[name].to_pylist() for name in ('isocenter_x', 'isocenter_y', 'isocenter_z')), strict=True)
+    expected = np.array([final.TransformPhysicalPointToContinuousIndex(p) for p in points])
+    assert np.allclose(np.column_stack([after[name].to_numpy() for name in index_columns]), expected, rtol=0, atol=1e-6)
+    assert not np.allclose(np.column_stack([after[n].to_numpy() for n in index_columns]), np.column_stack([before[n].to_numpy() for n in index_columns]))

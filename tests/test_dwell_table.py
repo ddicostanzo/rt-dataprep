@@ -330,10 +330,32 @@ def _no_control_point_index(plan):
     del cps(plan)[2].ControlPointIndex
 
 
+def _pdr(plan, pulses=(), interval=()):
+    """Make the plan PDR; `pulses` and `interval` list the channels that keep NumberOfPulses and PulseRepetitionInterval."""
+    plan.BrachyTreatmentType = 'PDR'
+    for n in range(2):
+        if n in pulses:
+            chan(plan, n).NumberOfPulses = 24
+        if n in interval:
+            chan(plan, n).PulseRepetitionInterval = 3600
+
+
+def _pdr_neither(plan):
+    _pdr(plan)
+
+
+def _pdr_no_interval(plan):
+    _pdr(plan, pulses=(0, 1), interval=(0,))
+
+
+def _pdr_no_pulses(plan):
+    _pdr(plan, pulses=(0,), interval=(0, 1))
+
+
 CASES = [_no_time, _odd, _pair_apart, _rising, _decreasing, _last_not_final, _unknown_source, _no_source_number, _no_position,
          _no_movement, _unknown_movement, _empty_movement, _duplicate_channel, _duplicate_setup, _duplicate_source,
          _count_mismatch, _final_zero_with_time, _negative_time, _negative_final, _first_weight, _no_weight, _no_final,
-         _no_setup_number, _no_control_point_index]
+         _no_setup_number, _no_control_point_index, _pdr_neither, _pdr_no_interval, _pdr_no_pulses]
 
 
 @pytest.mark.parametrize('mutate', CASES)
@@ -346,20 +368,6 @@ def test_non_finite_position_is_refused(tmp_path):
     channels = default_channels()
     channels[0]['point_tags'] = {2: dict(ControlPoint3DPosition=['nan', '0', '5'])}
     refused(tmp_path, channels=channels)
-
-
-def test_pdr_without_pulses_or_interval_is_refused(tmp_path):
-    channels = default_channels()
-    refused(tmp_path, channels=channels, treatment_type='PDR')  # neither
-    with_pulses = [dict(c, pulses=(24, 3600)) for c in default_channels()]
-
-    def no_interval(plan):
-        del chan(plan, 1).PulseRepetitionInterval
-
-    def no_number(plan):
-        del chan(plan, 1).NumberOfPulses
-    refused(tmp_path, no_interval, channels=with_pulses, treatment_type='PDR')
-    refused(tmp_path, no_number, channels=with_pulses, treatment_type='PDR')
 
 
 def test_channel_sum_drift_of_sub_tolerance_gaps_is_refused_alone(tmp_path):
@@ -378,6 +386,21 @@ def test_channel_sum_drift_of_sub_tolerance_gaps_is_refused_alone(tmp_path):
     assert abs(weights[-1] - final) <= tolerance
     assert sum(weights[2 * k + 1] - weights[2 * k] for k in range(n)) < final - tolerance  # only the sum is off
     refused(tmp_path, drift, channels=[channel])
+
+
+def test_a_decrease_within_a_dwell_is_refused_alone(tmp_path):
+    # zero-time dwell 1 (control points 2 and 3): 0.25 -> 0.25 + 0.7e-4 -> 0.25 - 0.7e-4 -> 0.25; each step is inside the tolerance
+    # of 0.75e-4 for the flat-between-pairs check, but the drop of 1.4e-4 inside the pair is not
+    weights = [0, 0.25, 0.25 + 0.7e-4, 0.25 - 0.7e-4, 0.25, 0.75]
+
+    def dip(plan):
+        for point, weight in zip(cps(plan), weights, strict=True):
+            point.CumulativeTimeWeight = weight
+    tolerance = DWELL_WEIGHT_TOLERANCE * 0.75
+    assert weights[2] - weights[3] > tolerance  # the decrease check fails
+    assert all(abs(weights[i + 1] - weights[i]) <= tolerance for i in (1, 3))  # the flat-between-pairs check passes
+    assert abs(math.fsum(max(0.0, weights[i + 1] - weights[i]) for i in (0, 2, 4)) - 0.75) <= tolerance  # the channel-sum check passes
+    refused(tmp_path, dip)
 
 
 @pytest.mark.parametrize(('index', 'delta'), [(0, 0.5e-4), (3, -0.5e-4), (2, 0.5e-4), (5, -0.5e-4), (4, -0.5e-4)])
