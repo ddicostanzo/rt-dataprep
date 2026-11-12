@@ -57,7 +57,7 @@ def test_schema_columns_types_nullability():
     ints = {'beam_number', 'number_of_control_points', 'number_of_wedges', 'number_of_blocks', 'number_of_boli',
             'control_point_index'}
     strings = {'beam_name', 'beam_type', 'treatment_machine', 'fluence_mode', 'mlc_type', 'wedge_id', 'wedge_type',
-               'wedge_orientation', 'gantry_rotation_direction', 'wedge_position'}
+               'gantry_rotation_direction', 'wedge_position'}
     for field in SCHEMA:
         expected = (pa.list_(pa.float64()) if field.name in LISTS else pa.int64() if field.name in ints
                     else pa.string() if field.name in strings else pa.float64())
@@ -133,7 +133,7 @@ def test_3d_plan_with_wedge_and_setup_beam(tmp_path):
     assert {r['beam_number'] for r in rows} == {2} and len(rows) == 2
     for row in rows:
         assert (row['wedge_id'], row['wedge_type'], row['wedge_orientation'], row['wedge_angle'], row['wedge_position']) == (
-            'SYNTHETIC_W1', 'STANDARD', '90.0', 30.0, 'IN') and row['number_of_wedges'] == 1
+            'SYNTHETIC_W1', 'STANDARD', 90.0, 30.0, 'IN') and row['number_of_wedges'] == 1
         assert row['mlc_type'] is row['leaf_position_boundaries'] is row['mlc_positions'] is None
         assert row['jaw_x1'] == -40
 
@@ -232,10 +232,18 @@ def _mlc_missing_at_cp0(beam):
     del beam['ControlPointSequence'][0]['BeamLimitingDevicePositionSequence'][2]
 
 
+def _truncated(beam):  # #272: NumberOfControlPoints says one more than the sequence holds
+    beam['NumberOfControlPoints'] = len(beam['ControlPointSequence']) + 1
+
+
+def _index_out_of_order(beam):  # #272
+    beam['ControlPointSequence'][2]['ControlPointIndex'] = 5
+
+
 @pytest.mark.filterwarnings('ignore:Invalid value for VR DS')  # the 'nan' gantry case
 @pytest.mark.parametrize('mutate', [
     _bad_gantry, _beam_type_gone, _energy_gone, _no_meterset, _short_mlc, _short_boundaries, _decreasing, _final_zero,
-    _first_weight, _last_weight, _empty_weight, _two_mlcs, _jaw_missing_at_cp0, _mlc_missing_at_cp0])
+    _first_weight, _last_weight, _empty_weight, _two_mlcs, _jaw_missing_at_cp0, _mlc_missing_at_cp0, _truncated, _index_out_of_order])
 def test_malformed_photon_plan_is_refused(tmp_path, mutate):
     beam = vmat()
     mutate(beam)

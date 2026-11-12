@@ -230,11 +230,23 @@ def _bad_spot_size(beam):
     points_of(beam)[0]['ScanningSpotSize'] = [7.0, 8.0, 9.0]
 
 
+def _negative_meterset(beam):  # #297
+    beam['BeamMeterset'] = -100.0
+
+
+def _duplicate_shifter(beam):  # #297
+    beam['RangeShifterSequence'].append(dict(beam['RangeShifterSequence'][0]))
+
+
+def _undeclared_shifter_setting(beam):  # #297
+    points_of(beam)[0]['RangeShifterSettingsSequence'].append(dict(points_of(beam)[0]['RangeShifterSettingsSequence'][0], ReferencedRangeShifterNumber=9))
+
+
 @pytest.mark.filterwarnings('ignore:Invalid value for VR DS')  # the 'nan' energy case
 @pytest.mark.parametrize('mutate', [
     _layer_sum_off, _last_cp_weights, _layer_shifted, _last_cp_moved, _total_drifts, _negative, _odd_map, _spot_count, _no_meterset, _energy_nan, _energy_gone,
     _gantry_gone, _isocenter_gone, _first_weight, _last_weight, _decreasing, _final_zero, _no_unit, _shifter_without_setting,
-    _weights_absent, _bad_spot_size])
+    _weights_absent, _bad_spot_size, _negative_meterset, _duplicate_shifter, _undeclared_shifter_setting])
 def test_malformed_pbs_plan_is_refused(tmp_path, mutate):
     beam = sd.pbs_beam(range_shifters=1)
     mutate(beam)
@@ -292,6 +304,13 @@ def test_two_range_shifters_keep_sequence_order_and_join_on_number(tmp_path):
     assert [r['range_shifter_settings'] for r in rows if r['control_point_index'] == 4] == [['IN', 'IN']] * 3
     assert {tuple(r['range_shifter_wet']) for r in rows if r['control_point_index'] < 4} == {(70.0, 30.0)}
     assert {r['range_shifter_wet'] for r in rows if r['control_point_index'] == 4} == {None}  # a new setting drops the old value
+
+
+def test_a_re_listed_unchanged_setting_keeps_its_water_equivalent_thickness(tmp_path):  # #298
+    beam = sd.pbs_beam(range_shifters=1)
+    points_of(beam)[4]['RangeShifterSettingsSequence'] = [dict(ReferencedRangeShifterNumber=1, RangeShifterSetting='IN')]  # IN again, no thickness
+    rows = rows_of(tmp_path, [beam])
+    assert {tuple(r['range_shifter_wet']) for r in rows} == {(10.0,)}
 
 
 def test_missing_water_equivalent_thickness_makes_the_list_null(tmp_path):

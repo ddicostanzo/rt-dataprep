@@ -124,10 +124,12 @@ def _beam_rows(beam, meterset, ct):
     _check(all(abs(s - step) <= tolerance for s, step in zip(sums, steps, strict=True)))
     _check(abs(math.fsum(sums) - final) <= tolerance)  # per-CP errors could add up past the tolerance
     beam_meterset = _num(_need(meterset))
+    _check(beam_meterset >= 0)  # else negative spot_mu (#297)
 
     snouts = beam.get('SnoutSequence') or []
     shifters = beam.get('RangeShifterSequence') or []
     numbers = [int(_need(s.get('RangeShifterNumber'))) for s in shifters]
+    _check(len(set(numbers)) == len(numbers))  # a repeat would collapse in the settings dict (#297)
     sad = _pair(beam.get('VirtualSourceAxisDistances'))
     _check(_need(beam.get('PrimaryDosimeterUnit')) == 'MU')
     fixed = dict(
@@ -148,8 +150,10 @@ def _beam_rows(beam, meterset, ct):
             number = item.get('ReferencedRangeShifterNumber')
             if _missing(number):
                 continue
-            if not _missing(item.get('RangeShifterSetting')):  # a new setting replaces the whole entry: an old thickness never carries over
-                settings[int(number)] = str(item.get('RangeShifterSetting'))
+            _check(int(number) in numbers)  # a setting for an undeclared shifter (#297)
+            setting = item.get('RangeShifterSetting')
+            if not _missing(setting) and settings.get(int(number)) != str(setting):  # a changed setting replaces the whole entry: an old thickness never carries over; a re-listed one keeps it (#298)
+                settings[int(number)] = str(setting)
                 thicknesses.pop(int(number), None)
             if not _missing(item.get('RangeShifterWaterEquivalentThickness')):
                 thicknesses[int(number)] = _num(item.get('RangeShifterWaterEquivalentThickness'))
