@@ -1955,7 +1955,7 @@ def test_a_malformed_photon_plan_converts_without_plan_parquet_and_logs_only_the
     assert not (out / PID / 'plan_1' / 'plan.parquet').exists()
     assert [r['kind'] for r in series_rows(out)] == ['ct', 'mask']
     assert any(r.levelno == logging.WARNING and r.getMessage() == f'convert: {plan_table.REASON_PLAN_TABLE}' for r in caplog.records)
-    secrets = [plan['plan'], 'SYNTHETIC_PLAN', 'SYNTHETIC_B1', plan['ct']['frame_uid'], PID]
+    secrets = [plan['plan'], 'SYNTHETIC_PLAN', 'SYNTHETIC_B1', plan['ct']['frame_uid'], PID, *every_uid(plan['folder'])]  # every UID (#278)
     assert all(secret not in caplog.text for secret in secrets)
 
 
