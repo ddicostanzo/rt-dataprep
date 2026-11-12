@@ -1010,3 +1010,19 @@ def test_convert_reads_no_patient_from_the_lock_file(tmp_path):
     make_plan(root / 'SYNTHETIC_CP' / 'plan_1', rois=[BOX], patient='SYNTHETIC_CP')
     (root / org.LOCK_NAME).write_text('')
     assert {r.patient for r in conv.convert(root, tmp_path / 'out').rows} == {'SYNTHETIC_CP'}
+
+
+def test_a_keyboard_interrupt_during_the_staging_cleanup_still_writes_the_report(tree, monkeypatch):
+    src, out = tree
+    planning_study(src / 'a')
+    real = shutil.rmtree
+
+    def interrupt(path, *args, **kwargs):
+        if Path(path).name.startswith('.unzip-'):
+            raise KeyboardInterrupt
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, 'rmtree', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        organize(src, out)
+    assert PID in (out / org.REPORT_NAME).read_text()  # #319
