@@ -15,7 +15,7 @@ import numpy as np
 
 from rt_dataprep import convert as conv
 from rt_dataprep.dicom_io import CaseRefused, write_report
-from rt_dataprep.preprocess import REASON_SERIES_CSV, STUDY_FOLDER, check_rows, check_study_rows, counts_toward_retained, holds_series, is_legacy, read_info, read_series_json, same_grid, series_id, study_refusal_count
+from rt_dataprep.preprocess import REASON_SERIES_CSV, STUDY_FOLDER, check_rows, check_study_rows, holds_series, is_external, is_legacy, read_info, read_series_json, same_grid, series_id, study_refusal_count
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ def _optional(row):
 
 def _retained(kept):
     """{'retained': the lowest dose/mask `retained` of a plan as a float} (#225), or {} when no row has one (a converted tree, a non-geometric run) or only EXTERNAL masks do (#305).
-    Every non-blank cell is parsed and validated first, an EXTERNAL one too; the minimum then covers the rows `counts_toward_retained` accepts."""
+    Every non-blank cell is parsed and validated first, an EXTERNAL one too; the minimum then leaves out is_external rows."""
     rows = [row for row in kept if row['kind'] in ('dose', 'mask') and row.get('retained')]
     try:
         values = [float(row['retained']) for row in rows]
@@ -44,7 +44,7 @@ def _retained(kept):
         values = [float('nan')]
     if not all(np.isfinite(values)):  # a hand-edited cell: the plan is refused like any other malformed series.json
         raise CaseRefused(REASON_SERIES_CSV)
-    counted = [value for row, value in zip(rows, values, strict=True) if counts_toward_retained(row)]
+    counted = [value for row, value in zip(rows, values, strict=True) if not is_external(row)]
     return {'retained': min(counted)} if counted else {}
 
 
