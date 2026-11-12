@@ -58,3 +58,7 @@ Files: `src/rt_dataprep/convert.py`, `tests/test_convert.py`, `tests/test_prepro
   partial is needed. Malformed fixture = `paired=False` (odd control-point count). HDR plans produce no plan.parquet (no BeamSequence).
 - A tag-level fault test needs a REAL DICOM keyword the item lacks (a non-keyword attribute is a plain AttributeError, aborting convert).
 - Full suite: 1916 passed, 4 skipped, 3 deselected; ruff clean.
+
+## review-3 (wave, task-03)
+PASS, no BLOCKING; no escape path from dwell_rows found. Deferred to 2.9 filing: N1 (tag-level fault test does not
+assert total WARNING count 1 / INFO REASON_MISSING_TAG).
