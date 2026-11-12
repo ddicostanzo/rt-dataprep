@@ -68,3 +68,8 @@ Files: `README.md`, `.gitignore`, `project-profile.yml`, this file.
 - README: new `### dwell.parquet` after `### ion_plan.parquet`; `dwell` added to the manifest-key row (and its order) and to the series.json `kind` list.
   Column names are the `DWELL_SCHEMA` ones. The `retained` sentence (blank for CT, applicator, line, plan, beam and series) never listed ion_plan, so dwell was not added there.
 - `.gitignore`: `dwell.parquet`. `project-profile.yml` phi rule: dwell.parquet in the per-file metadata list, with applicator names, dwell positions and source calibration dates.
+
+## review-loop-pass-1
+/code-review (opus) + spec axis (opus) over the PR diff: no BLOCKING, no plan bugs. Trivial fixed: README dwell section
+had split beam_mu's heading from its body (moved above it); nullable columns unmarked; moving-source wording; grammar;
+dwell_table.py bare tuple of two _need calls. Deferred → hardening issues (see PR body).

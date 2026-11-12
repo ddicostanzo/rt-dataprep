@@ -252,30 +252,30 @@ The file has one row per spot with a non-zero weight. The columns and types are 
 - Converted trees made before this version gain `ion_plan.parquet`, and the new `radiation_type`/`beam_type`/`treatment_machine` values of proton plans in their
   `series.json` `dicom` objects, only on a run with `convert --overwrite`.
 
-### beam_mu.nii.gz
-
 ### dwell.parquet
 
 A brachytherapy RT Plan with `BrachyTreatmentType` HDR or PDR (and `SourceMovementType` STEPWISE or FIXED on every channel that has control points) writes
 `dwell.parquet` in its plan folder (after `ion_plan.parquet`, before `series.json`). Its `series.json` row has `kind` `dwell` (modality `RTPLAN`, the plan's
 FrameOfReferenceUID, which may be empty: brachy RTPLANs often omit it); `preprocess` copies or re-indexes it like `plan.parquet`, and `manifest` lists it in
-the plan line's `dwell` key. LDR, MDR, MANUAL and plans with no `BrachyTreatmentType` get no table, silently, as do channels with an OSCILLATING or
-UNIDIRECTIONAL source (moving sources are not handled).
+the plan line's `dwell` key. LDR, MDR, MANUAL and plans with no `BrachyTreatmentType` get no table, silently, as does a plan with any channel whose source is
+OSCILLATING or UNIDIRECTIONAL (moving sources are not handled).
 
 The file has one row per dwell: control points 2k and 2k+1 of a channel, at one position, form dwell k. Dwells with zero time are kept (inactive positions show the
 activatable path). The columns and types are `rt_dataprep.dwell_table.DWELL_SCHEMA`; read them with `pyarrow.parquet.read_table`. Rows are in application setup
 order, then channel order, then dwell index. Setup, channel and source fields repeat on every row of their channel.
 
 - Setup and channel: `brachy_treatment_type`, `setup_number`, `setup_name`, `setup_type`, `channel_number`, `source_movement_type`, `source_applicator_id`,
-  `source_applicator_type`, `source_applicator_step_size` (mm), `source_applicator_length` (mm), `transfer_tube_length` (mm), `referenced_roi_number`,
+  `source_applicator_type`, `source_applicator_step_size` (mm), `source_applicator_length` (mm), `transfer_tube_length` (mm), `referenced_roi_number`
+  (nullable: `setup_name`, `setup_type` and the `source_applicator_*`,
+  `transfer_tube_length` and `referenced_roi_number` columns),
   `channel_total_time` (s), `final_cumulative_time_weight`, `number_of_control_points`, `number_of_pulses` and `pulse_repetition_interval` (s; PDR only, else null).
 - Source (the `SourceSequence` item the channel references): `source_number`, `source_isotope_name`, `source_isotope_half_life` (days), `reference_air_kerma_rate`
-  (µGy/h at 1 m), `source_strength_reference_date` and `source_strength_reference_time` (DICOM DA and TM strings, as stored).
+  (µGy/h at 1 m), `source_strength_reference_date` and `source_strength_reference_time` (DICOM DA and TM strings, as stored); all but `source_number` nullable.
 - Dwell: `dwell_index` (0-based within the channel, zero-time dwells counted), `control_point_index`, `relative_position` (mm, nullable),
   `position_x/y/z` (patient mm, control point 2k), `position_i/j/k` (the same point as a continuous voxel index of the CT in the same folder), `cumulative_time_weight`,
   `dwell_weight` and `dwell_time_s`. Every column not marked nullable is never null.
 - `dwell_weight` is `max(0, w(2k+1) - w(2k))` of the cumulative time weights; `dwell_time_s` is `channel_total_time * dwell_weight / final_cumulative_time_weight`
-  (the DICOM definition), and 0 when both the final weight and the total time are 0. The `dwell_weight` of a channel sum to its final weight within 1e-4 relative
+  (the DICOM definition), and 0 when both the final weight and the total time are 0. The `dwell_weight`s of a channel sum to its final weight within 1e-4 relative
   (`DWELL_WEIGHT_TOLERANCE`), not exactly.
 - The times are as exported in `ChannelTotalTime`. **Which date's source strength those times assume is not established** (DICOM ties the air kerma rate to its
   reference date, not to the treatment time); it stays open until a TG-43 point dose from this table is compared with RTDOSE on a real export. No decay correction is applied.
@@ -288,6 +288,8 @@ order, then channel order, then dwell index. Setup, channel and source fields re
 - A `preprocess` run with `--initial-resample`, `--resample` or `--reshape` rewrites `position_i/j/k` for the final CT (every other column is unchanged); a run
   without those steps copies the file unchanged. A `dwell.parquet` that is not the table schema is left out with one warning, as for `plan.parquet`.
 - Converted trees made before this version gain `dwell.parquet` only on a run with `convert --overwrite`.
+
+### beam_mu.nii.gz
 
 A photon plan that gets a `plan.parquet` also gets `beam_mu.nii.gz` (after `plan.parquet`, before `series.json`), with a
 `series.json` row of `kind` `beam` and `modality` `RTPLAN` (the plan's columns and metadata, and the planning CT's

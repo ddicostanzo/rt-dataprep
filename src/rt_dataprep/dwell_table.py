@@ -123,7 +123,8 @@ def _channel_rows(fixed, channel, ct):
     declared = channel.get('NumberOfControlPoints')
     _check(len(points) % 2 == 0 and (_missing(declared) or int(declared) == len(points)))
     if fixed['brachy_treatment_type'] == 'PDR':
-        _need(channel.get('NumberOfPulses')), _need(channel.get('PulseRepetitionInterval'))
+        _need(channel.get('NumberOfPulses'))
+        _need(channel.get('PulseRepetitionInterval'))
     tolerance = DWELL_WEIGHT_TOLERANCE * final
     weights = [_num(_need(p.get('CumulativeTimeWeight'))) for p in points]
     positions = [_nums(_need(p.get('ControlPoint3DPosition'))) for p in points]
