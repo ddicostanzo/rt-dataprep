@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pydicom
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import series_files as sf
@@ -2158,6 +2159,18 @@ def test_duplicate_beam_numbers_refuse_plan_parquet_and_with_it_the_fluence_map(
     folder = out / PID / 'plan_1'
     assert not (folder / 'plan.parquet').exists() and not (folder / 'fluence_mu.nii.gz').exists()
     assert len(logged(caplog, plan_table.REASON_PLAN_TABLE)) == 1 and logged(caplog, fluence.REASON_FLUENCE) == []
+    assert_no_leak(caplog, out, secrets_of(plan, tree))
+
+
+@pytest.mark.parametrize('error', [pa.ArrowInvalid, pa.ArrowTypeError])
+def test_an_arrow_error_in_to_table_only_drops_that_plans_parquet(tree, caplog, monkeypatch, error):  # #276: no REASON_INTERNAL, the run goes on
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(plan_table, 'to_table', lambda rows: (_ for _ in ()).throw(error('SYNTHETIC_VALUE')))
+    plan, rows, out = photon_plan(tree, rois=[BOX])
+    folder = out / PID / 'plan_1'
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
+    assert not any((folder / name).exists() for name in ('plan.parquet', 'beam_mu.nii.gz', 'fluence_mu.nii.gz'))
+    assert len(logged(caplog, plan_table.REASON_PLAN_TABLE)) == 1 and 'SYNTHETIC_VALUE' not in caplog.text
     assert_no_leak(caplog, out, secrets_of(plan, tree))
 
 

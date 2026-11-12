@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import pydicom
 import SimpleITK as sitk
 from pydicom.datadict import tag_for_keyword
@@ -425,6 +426,19 @@ def convert_plan(headers, unreadable, case_dir):
     return result
 
 
+def _table(to_table, rows, reason):
+    """to_table(rows), None for None rows; None with one fixed warning when Arrow rejects a value the row builder let through, so
+    that plan loses only its table instead of stopping the run (#276). The Arrow message quotes the value, so it is never logged."""
+    if rows is None:
+        return None
+    try:
+        return to_table(rows)
+    except (pa.ArrowInvalid, pa.ArrowTypeError):
+        pass
+    log.warning('convert: %s', reason)  # outside the except: nothing chained
+    return None
+
+
 def _header_call(fn, *args, **kwargs):
     """
     fn(*args, **kwargs) for a header-only step: a missing tag or odd value (#33) is CaseRefused(REASON_MISSING_TAG), logged at
@@ -468,12 +482,13 @@ def _convert_plan(headers, unreadable, case_dir):
     # The scratch folder of DicomRTTool goes in the patient's partial folder: a stale partial's cleanup removes it too.
     mask_images = masks.build_masks(rois.kept, [p for p, _ in ct_slices], struct_path, struct_series_uid,
                                     series_uid, ct, case_dir.parent, ORIGIN_ATOL_MM, DIRECTION_ATOL)
-    try:  # the first catch: a malformed photon plan only loses its parquet (to_table is ours to leave uncaught: ArrowInvalid is a ValueError)
+    try:  # the first catch: a malformed photon plan only loses its parquet
         rows = _header_call(plan_table.plan_rows, plan, ct)
     except CaseRefused:
         log.warning('convert: %s', plan_table.REASON_PLAN_TABLE)
         rows = None
-    table = None if rows is None else plan_table.to_table(rows)
+    table = _table(plan_table.to_table, rows, plan_table.REASON_PLAN_TABLE)
+    rows = None if table is None else rows  # no beam_mu or fluence from rows Arrow rejected
     beam = fluence_image = None
     beam_numbers = []
     if rows is not None:
@@ -490,13 +505,13 @@ def _convert_plan(headers, unreadable, case_dir):
     except CaseRefused:
         log.warning('convert: %s', ion_plan_table.REASON_ION_PLAN)
         ion_rows = None
-    ion_table = None if ion_rows is None else ion_plan_table.to_table(ion_rows)
+    ion_table = _table(ion_plan_table.to_table, ion_rows, ion_plan_table.REASON_ION_PLAN)
     try:  # the fifth catch: a malformed brachy HDR/PDR plan only loses dwell.parquet (independent of the ion table; to_table stays outside)
         dwell_rows = _header_call(dwell_table.dwell_rows, plan, ct)
     except CaseRefused:
         log.warning('convert: %s', dwell_table.REASON_DWELL)
         dwell_rows = None
-    dwell_tbl = None if dwell_rows is None else dwell_table.to_table(dwell_rows)
+    dwell_tbl = _table(dwell_table.to_table, dwell_rows, dwell_table.REASON_DWELL)
     # Everything that can refuse has run: only now does the plan folder appear.
     case_dir.mkdir(parents=True)
     write_atomic(ct, case_dir / CT_NAME)

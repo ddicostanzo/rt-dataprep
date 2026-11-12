@@ -195,8 +195,10 @@ def plan_rows(plan, ct):
     if any(b.get('TreatmentDeliveryType') not in (None, '', 'TREATMENT', 'SETUP') for b in beams):
         return None  # a CONTINUATION or port-film beam delivers dose the table would leave out (owner, 2026-11-11)
     treatment = [b for b in beams if b.get('TreatmentDeliveryType') != 'SETUP']  # SETUP beams drop first
-    if not treatment or any(b.get('RadiationType') != 'PHOTON' for b in treatment):
+    if not treatment or any(b.get('RadiationType') not in ('PHOTON', None, '') for b in treatment):
         return None
+    _check(all(b.get('RadiationType') == 'PHOTON' for b in treatment))  # an empty (Type 2) type beside photon beams is malformed, not silently skipped (#275)
+    _check(not any(b.get('ApplicatorSequence') for b in treatment))  # a cone-shaped (SRS) field: jaw/MLC rows would misstate the field size (#277)
     numbers = [int(_need(b.get('BeamNumber'))) for b in treatment]
     _check(len(set(numbers)) == len(numbers))  # else a beam could take another beam's MU (#273)
     metersets = _metersets(plan)
