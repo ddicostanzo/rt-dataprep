@@ -205,7 +205,7 @@ A photon external-beam RTPLAN also writes `plan.parquet` in its plan folder (aft
 `series.json` row of `kind` `plan`; `preprocess` writes it under the same name (copied unchanged on a run with no geometric step), and `manifest`
 lists it in the plan line's `plan` key. Brachy and RT Ion plans, a plan mixing photon with other beams, and a photon plan with a missing or inconsistent
 value get no `plan.parquet` (the plan still converts; a malformed photon plan logs a warning). A treatment beam with an empty
-`RadiationType` or a cone (`ApplicatorSequence`) counts as malformed, and so does a table Arrow cannot build; neither stops the run. The file has one row per control point of each
+`RadiationType` or a cone (`ApplicatorSequence`) counts as malformed, and so does a table Arrow cannot build; none stops the run (the same holds for `ion_plan.parquet` and `dwell.parquet`). The file has one row per control point of each
 treatment beam (SETUP beams are dropped; a plan with a CONTINUATION, TRMT_PORTFILM or OPEN_PORTFILM beam gets no
 `plan.parquet`, since that beam's dose is in `dose.nii.gz`), values DICOM omits are filled forward from the earlier control point, and the
 beam-level fields repeat on every row. The columns and types are `rt_dataprep.plan_table.SCHEMA`; read them with
