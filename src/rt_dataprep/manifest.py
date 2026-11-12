@@ -46,8 +46,8 @@ def _retained(kept):
 
 
 def _files(kept):
-    """{'plan': file, 'beam': file, 'fluence': file} for the plan.parquet, beam volume and fluence map rows of a plan, in that order; a key is left out when its row is absent (#280, #279)."""
-    files = {kind: next((row['file'] for row in kept if row['kind'] == kind), None) for kind in ('plan', 'beam', 'fluence')}
+    """{'plan': file, 'beam': file, 'fluence': file, 'ion_plan': file} for the plan.parquet, beam volume, fluence map and ion_plan.parquet rows of a plan, in that order; a key is left out when its row is absent (#280, #279)."""
+    files = {kind: next((row['file'] for row in kept if row['kind'] == kind), None) for kind in ('plan', 'beam', 'fluence', 'ion_plan')}
     return {kind: file for kind, file in files.items() if file}
 
 

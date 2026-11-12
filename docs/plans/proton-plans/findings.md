@@ -59,3 +59,16 @@ Opus wave review of task-01/02: no BLOCKING. Fixed in the PR (clinical-output te
 - N4 metadata BeamSequence-over-IonBeamSequence order now tested.
 Deferred (hardening at 2.9): negative BeamMeterset accepted; duplicate RangeShifterNumber; settings item for an undeclared
 shifter ignored; strict-decrease check has no tolerance.
+
+## task-03
+- `ion_plan` joins `KINDS`, the keep-the-name tuple, the geometric re-index branch and manifest `_files` (after `fluence`).
+  `index_plan_table(source, path, final, schema=plan_table.SCHEMA)`: the schema argument is used for the compare and for the
+  rewritten isocenter_i/j/k fields; preprocess passes `ion_plan_table.ION_SCHEMA` for `ion_plan`. It writes with `pq.write_table`
+  (what `plan_table.write_plan_table` / `write_ion_plan_table` both do), so one function serves both schemas.
+- `REASON_PLAN_INDEX` is now 'a plan table (plan.parquet or ion_plan.parquet) is unreadable or not its schema; left out of the output'.
+- Timing: geometric `index_plan_table` on a 50 000-row ion_plan.parquet (full ION_SCHEMA, 40x40x40 float image, 1.5/1.5/2 mm):
+  0.16 s (3 runs: 0.164, 0.166, 0.161), limit 2 s -> no hardening issue. Throwaway script, not committed.
+- Test helper `add_ion_plan` (tests/test_preprocess.py) uses the literal 'ion_plan.parquet' (`ION_NAME`) because convert's
+  `ION_PLAN_NAME` arrives in task-04; swap it then. It spreads the last series.json row so a converted tree's `dicom` key is kept.
+- Pre-existing assertions changed: only tests/test_manifest.py `read()` key tuple (adds 'ion_plan'). No test pinned the old
+  REASON_PLAN_INDEX text (they use `pre.REASON_PLAN_INDEX`).
