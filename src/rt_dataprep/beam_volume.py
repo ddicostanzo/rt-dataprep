@@ -197,7 +197,7 @@ def _window(ends, sad, last, bounds):
 
     With depth = sad - b_z > 0, X_q >= value is sad*b_q - value*depth >= 0, linear in x along a row.
     """
-    lo, hi = 0.0, float(last)
+    lo, hi = np.zeros(ends[0].shape[1]), np.full(ends[0].shape[1], float(last))  # one per row, even with no bounds
     depths = [sad - b[2] for b in ends]
     for q, value, upper in bounds:
         g0, g1 = (sad * b[q] - value * depth for b, depth in zip(ends, depths, strict=True))

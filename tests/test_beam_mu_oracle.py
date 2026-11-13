@@ -186,6 +186,12 @@ def test_ac1_mlc_with_one_jaw_axis_missing(tmp_path, dropped, gantry):
 
 
 @NO_WARNINGS
+@pytest.mark.parametrize('gantry', [0, 90])
+def test_ac1_mlc_with_no_jaws(tmp_path, gantry):  # aperture() models an MLC alone: both jaw axes None
+    check(tmp_path, drop_jaw(drop_jaw(mlc_beam(gantry=gantry), 'ASYMX'), 'ASYMY'))
+
+
+@NO_WARNINGS
 @pytest.mark.parametrize('gantry', [0, 90, 270])
 @pytest.mark.parametrize('mlc', [False, True])
 def test_ac1_jaws_on_voxel_centres(tmp_path, gantry, mlc):  # 5 mm grid: jaws on multiples of 5 sit on voxel centres

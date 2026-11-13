@@ -45,3 +45,12 @@ last-pair fix removed) fails 42 / 22 / 17 tests. WARNING: the oracle uses the li
 - Decision: interior voxels go in via np.add.at over run indices, not literal slices; the float32 add is identical.
 - Oracle: 133 passed (AC1, AC2, AC3). Full suite: 2224 passed, 4 skipped. ruff clean.
 - AC14 once (task-02 criterion): new beam_mu 26.5 s, peak RSS 586 MB; against the 324 s baseline profile, ~12.2x.
+
+## review-1
+Wave review of task-02 (opus): 1 BLOCKING, fixed. `_window` started from scalar (0, last), so an MLC beam with no jaws
+(aperture() allows it) raised TypeError in `_add_rows`. Class: window helpers assuming at least one bound; `_window` is
+the only instance. Fix: per-row arrays from the start; new oracle test `test_ac1_mlc_with_no_jaws` (red before, green
+after). Reviewer fuzzed ~18,000 random geometries (0.01-0.1 mm voxels, n=1 axes, oblique, edges on voxel centres,
+grids out to 4900 mm, CHUNK_VOXELS 1/50) byte-identical to the reference. WARNING: `isocenter_x_inf` warns from the
+unchanged `_points` matmul, so the "no RuntimeWarning" criterion applies to the marked oracle tests only (as task-01
+planned). NOTE: np.cumsum promotes int32 to int64 inside `_runs`; the measured speedup stands.
