@@ -1631,7 +1631,7 @@ def test_a_read_error_on_the_plan_parquet_refuses_the_patient(tmp_path, monkeypa
         return real(self)
 
     monkeypatch.setattr(pathlib.Path, 'read_bytes', read_bytes)
-    report = pre.preprocess(converted, tmp_path / 'out', SMALL)
+    report = pre.preprocess(converted, tmp_path / 'out', SMALL, workers=1)  # the patch is process-wide: a worker process would not see it (#338)
     assert [(r.folder, r.outcome, r.reason) for r in report.rows] == [('', 'refused', pre.REASON_IO_ERROR)]
     assert not (tmp_path / 'out' / folder.parent.name).exists()
 

@@ -401,6 +401,13 @@ def test_ac8_setup_item_with_a_position_and_an_additional_position_is_accepted(t
     assert lit(run())[1].size
 
 
+@pytest.mark.parametrize('additional', ['', None])
+@pytest.mark.parametrize('position', ['', None])
+def test_ac8_setup_item_with_no_position_and_no_additional_position_is_accepted(tmp_path, position, additional):  # #338
+    run = _with_setups(tmp_path, {'PatientPosition': position, 'PatientAdditionalPosition': additional})
+    assert lit(run())[1].size
+
+
 def test_ac8_every_setup_item_must_match_the_ct(tmp_path):  # #335: one matching item does not excuse a mirrored one
     run = _with_setups(tmp_path, {'PatientPosition': 'HFS'}, {'PatientPosition': 'FFS'})
     with pytest.raises(CaseRefused) as raised:
