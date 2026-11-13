@@ -54,3 +54,12 @@ after). Reviewer fuzzed ~18,000 random geometries (0.01-0.1 mm voxels, n=1 axes,
 grids out to 4900 mm, CHUNK_VOXELS 1/50) byte-identical to the reference. WARNING: `isocenter_x_inf` warns from the
 unchanged `_points` matmul, so the "no RuntimeWarning" criterion applies to the marked oracle tests only (as task-01
 planned). NOTE: np.cumsum promotes int32 to int64 inside `_runs`; the measured speedup stands.
+
+## task-03
+- test_ac14_full_size_vmat_case rewritten as the AC4 gate (still `@pytest.mark.slow`): new beam_mu x3 (wall and peak RSS
+  printed after run 1, before the reference runs), then `reference_beam_mu` once on `beam_volume._points`; asserts byte
+  identity (dtype, shape, tobytes), zero `_add` fallback calls (monkeypatch spy), and reference_wall / min(new) >= 10.
+- Measured on this workstation (`pytest -m slow -s -k ac14`, 401.8 s total): new beam_mu 26.5 / 26.3 / 26.5 s
+  (min 26.3 s, median 26.5 s); reference 321.1 s; ratio 321.1 / 26.3 = 12.2x; peak RSS after the first new run 602 MB
+  (printed, not asserted). Baseline before the rewrite: 324 s.
+- Result: PASSED (ratio >= 10). Byte-identical to the reference, zero fallback calls.
