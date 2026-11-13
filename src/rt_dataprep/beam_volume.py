@@ -175,6 +175,8 @@ def _rows_ready(point, size):
     values = [point['t'], point['a']] + [v for v in jaws.values() if v is not None] + list(leaves[:3] if leaves else [])
     if not all(np.isfinite(np.asarray(v, dtype=float)).all() for v in values):
         return False
+    if any((np.abs(np.asarray(v, dtype=float)) > MAX_COORD_MM).any() for v in values[2:]):  # jaw/leaf: no overflow
+        return False
     corners = np.array(list(itertools.product(*((0, n - 1) for n in size))), dtype=float)
     b = point['t'] + corners @ point['a'].T
     return bool((point['sad'] - b[:, 2] >= FALLBACK_DEPTH_FRACTION * point['sad']).all() and (np.abs(b) <= MAX_COORD_MM).all())

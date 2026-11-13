@@ -63,3 +63,14 @@ planned). NOTE: np.cumsum promotes int32 to int64 inside `_runs`; the measured s
   (min 26.3 s, median 26.5 s); reference 321.1 s; ratio 321.1 / 26.3 = 12.2x; peak RSS after the first new run 602 MB
   (printed, not asserted). Baseline before the rewrite: 324 s.
 - Result: PASSED (ratio >= 10). Byte-identical to the reference, zero fallback calls.
+
+## review-loop-pass-1
+One review round on PR #341 (opus code review + opus spec axis). BLOCKING: none. The code review fuzzed 12,000 more cases
+(rotations, grids of size 1-40, negative weights, uneven leaf boundaries): bit-identical, no warnings; the measured
+float32 drift was at most 1.6e-3 mm against the 0.01 mm margin.
+- TRIVIAL, fixed: `_rows_ready` sends jaw/leaf values beyond MAX_COORD_MM to `_add`. Values near 1e306 used to overflow
+  in `_window` and emit new RuntimeWarnings; the output was already identical.
+- TRIVIAL, fixed: spec Design 1 wording (np.add.at instead of "contiguous slice"; band duplicates add once via fancy
+  `+=`; depth > 0 guaranteed by the fallback rather than solved per row).
+- DEFERRED: #342 (rows x pairs path ~20% slower near collimator 90/270 with an MLC), #343 (AC14 gate on the median).
+No blocking fix was made, so no verification pass is needed.

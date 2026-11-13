@@ -56,7 +56,7 @@ case costs about 5.5 min per worker, and the cohort run multiplies that by every
 ## Design
 1. **Candidate set.** For each weighted point, work out each row's candidate x-range in float64. It is the
    intersection of these half-lines, each linear in x:
-   - `depth > 0`;
+   - `depth > 0`, which the fallback (Design 3) guarantees for every voxel, so it is not solved per row;
    - the jaw bounds on each axis that has a jaw (`sad·b − low·depth ≥ 0`, `high·depth − sad·b ≥ 0`). An axis with no
      jaw but an MLC (legal on either axis) is bounded by the MLC alone: `B[0] ≤ Y ≤ B[-1]` for Y, the pair openings for X;
    - with an MLC, the union over pairs of (leaf band `B[n] ≤ Y < B[n+1]`, the last pair closed) ∩ (opening
@@ -65,12 +65,13 @@ case costs about 5.5 min per worker, and the cohort run multiplies that by every
    Each row is split into three disjoint classes using `EDGE_MARGIN_MM` = ε (0.01 mm at the isocenter plane, i.e.
    `ε·depth` in the linear form):
    - **interior**: clears every inequality by more than ε (tightened inward), minus a one-voxel pad at each end. These
-     voxels are **credited** without the per-voxel test: the weight goes in through a contiguous slice with the same
+     voxels are **credited** without the per-voxel test: the weight goes in through `np.add.at` over the runs' flat indices with the same
      float32 add as today (`float32 + float32(weight)`). The owner chose this to make 10× reachable: the scattered
      exact test alone measured 0.086 s per point against 0.90 s dense. It relies on the same error bound as exclusion.
    - **edge band**: inside the outward-relaxed (by ε) intervals, padded one voxel and clipped to the grid, but not
      interior. Each band voxel runs today's full test **once** (jaws plus the `searchsorted` leaf lookup, never a
-     per-pair test). The union of a row's padded intervals is deduplicated, so a voxel can never be added twice.
+     per-pair test). Band voxels an interior run already holds are dropped; a voxel in two adjacent pairs' bands may be tested
+     twice, but `flat[lit] += weight` adds a repeated index once, so a voxel is never added twice.
    - **outside**: everything else gets nothing, as it does today.
 
    The oracle (AC1) is the proof, not a written error bound. Each voxel gets at most one add per point, in point
