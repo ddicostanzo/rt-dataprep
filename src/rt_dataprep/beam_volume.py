@@ -312,7 +312,7 @@ def _add_rows(chunk, point, z):
 
     outer_s, outer_e = voxels(outer, 1)
     inner_s, inner_e = voxels(inner, -1)
-    flat = chunk.reshape(-1)  # a view: chunk is a contiguous slab of out
+    flat = chunk.reshape(-1)  # a view: chunk is a fresh contiguous array
     weight = np.float32(point['weight'])
     full = inner_s <= inner_e  # solid runs are disjoint: leaf bands and jaw-only rows do not overlap
     np.add.at(flat, _runs(rows, inner_s, inner_e, nx), weight)  # the same float32 add; faster than flat[...] +=
@@ -335,18 +335,18 @@ def beam_mu(plan, rows, ct, patient_position):
     grid = (np.array(ct.GetOrigin()), np.array(ct.GetDirection()).reshape(3, 3), np.array(ct.GetSpacing()))
     points = _points(plan, rows, patient_position, grid)
     nx, ny, nz = ct.GetSize()
-    out = np.zeros((nz, ny, nx), dtype=np.float32)
+    image = sitk.Image(nx, ny, nz, sitk.sitkFloat32)  # zero-filled; chunks are pasted in place, so no full-size numpy copy
     x, y = np.arange(nx, dtype=np.float32), np.arange(ny, dtype=np.float32)
     step = max(1, CHUNK_VOXELS // (nx * ny))
     ready = [_rows_ready(point, (nx, ny, nz)) for point in points]
     for start in range(0, nz, step):
         z = np.arange(start, min(start + step, nz), dtype=np.float32)
-        chunk = out[start:start + len(z)]  # a view: the points add into it
+        chunk = np.zeros((len(z), ny, nx), dtype=np.float32)
         for point, rows_ready in zip(points, ready, strict=True):  # in point order: float32 sums are order-sensitive
             if rows_ready:
                 _add_rows(chunk, point, z)
             else:
                 _add(chunk, point, x, y, z)
-    image = sitk.GetImageFromArray(out)
+        image[:, :, start:start + len(z)] = sitk.GetImageFromArray(chunk)
     image.CopyInformation(ct)
     return image
