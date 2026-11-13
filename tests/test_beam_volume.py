@@ -348,6 +348,41 @@ def test_ac8_setup_position_must_match_the_ct(tmp_path, setup, ok):  # #288: els
     assert str(raised.value) == REASON_BEAM_VOLUME
 
 
+def _with_setups(tmp_path, *setups):  # each setup is a dict of PatientPosition / PatientAdditionalPosition; None = absent
+    ct = ct_image()
+    plan = written(tmp_path, [static()])
+    items = []
+    for number, setup in enumerate(setups, 1):
+        item = sd.Dataset()
+        item.PatientSetupNumber = number
+        for keyword, value in setup.items():
+            if value is not None:
+                setattr(item, keyword, value)
+        items.append(item)
+    plan.PatientSetupSequence = items
+    return lambda: beam_volume.beam_mu(plan, plan_table.plan_rows(plan, ct), ct, 'HFS')
+
+
+@pytest.mark.parametrize('position', ['', None])
+def test_ac8_setup_item_with_no_position_but_an_additional_position_is_refused(tmp_path, position):  # #335
+    run = _with_setups(tmp_path, {'PatientPosition': position, 'PatientAdditionalPosition': 'arms up'})
+    with pytest.raises(CaseRefused) as raised:
+        run()
+    assert str(raised.value) == REASON_BEAM_VOLUME
+
+
+def test_ac8_setup_item_with_a_position_and_an_additional_position_is_accepted(tmp_path):  # #335: PS3.3 C.8.8.12
+    run = _with_setups(tmp_path, {'PatientPosition': 'HFS', 'PatientAdditionalPosition': 'arms up'})
+    assert lit(run())[1].size
+
+
+def test_ac8_every_setup_item_must_match_the_ct(tmp_path):  # #335: one matching item does not excuse a mirrored one
+    run = _with_setups(tmp_path, {'PatientPosition': 'HFS'}, {'PatientPosition': 'FFS'})
+    with pytest.raises(CaseRefused) as raised:
+        run()
+    assert str(raised.value) == REASON_BEAM_VOLUME
+
+
 @pytest.mark.parametrize('sad', [float('nan'), float('inf'), '400', None, [400.0], True])
 def test_ac8_sad_must_be_a_finite_positive_number(tmp_path, sad):
     plan = written(tmp_path, [static()])

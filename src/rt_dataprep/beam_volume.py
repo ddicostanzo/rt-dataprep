@@ -109,7 +109,10 @@ def _points(plan, rows, patient_position, grid):
     position = np.array(POSITIONS[patient_position], dtype=float)
     # A stated setup position other than the CT's would mirror the volume (#288). shortcut: checks every setup item, not
     # only those the treatment beams reference; refusing loses only beam_mu. Narrow it if a real plan is refused for this.
-    _check(all(s.get('PatientPosition') in ('', None, patient_position) for s in plan.get('PatientSetupSequence') or []))
+    # An item with no PatientPosition but a PatientAdditionalPosition states a position that cannot be checked (#335).
+    _check(all(s.get('PatientPosition') == patient_position
+               or (s.get('PatientPosition') in ('', None) and not s.get('PatientAdditionalPosition'))
+               for s in plan.get('PatientSetupSequence') or []))
     sads = _sads(plan)
     _table_top_flat(plan)
     points = []
