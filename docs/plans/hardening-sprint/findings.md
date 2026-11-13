@@ -27,3 +27,9 @@ Decisions: the OverflowError catch has no test (unreachable from IS-VR inputs). 
 Gotchas: the mutation must guard None rows (`None if rows is None else _header_call(to_table, rows)`); an unguarded `_header_call(to_table, None)` also reddens the photon test on plans with no ion/dwell rows, which is noise, not a pin.
 Red runs: with ion and dwell sites routed through `_header_call` (None-guarded), exactly the 4 new tests failed (outcome 'refused' != 'converted'); the photon tests stayed green. Reverted; `git diff src/` shows only the except tuple.
 Suite: 2070 passed, 4 skipped, 3 deselected; ruff clean; compileall clean.
+
+## task-02
+
+Files changed: src/rt_dataprep/preprocess.py (image loop in preprocess_plan).
+Decisions: `checked = kind != 'beam'` is set once (beam-footprint comment kept on that line); the crop-check block and the has_voxels refusal both use it. Not `kind in ('dose','mask')`. Pure refactor, no new test, no red run.
+Suite: 2070 passed, 4 skipped, 3 deselected; ruff clean; compileall clean.
