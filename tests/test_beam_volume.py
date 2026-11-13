@@ -2,6 +2,7 @@ import ast
 import copy
 import inspect
 import resource
+import statistics
 import time
 
 import numpy as np
@@ -9,6 +10,7 @@ import pytest
 import SimpleITK as sitk
 
 import synthetic_dicom as sd
+from beam_mu_reference import reference_beam_mu
 from rt_dataprep import beam_volume, plan_table
 from rt_dataprep.beam_volume import REASON_BEAM_VOLUME
 from rt_dataprep.dicom_io import CaseRefused, read_header_core
@@ -462,15 +464,39 @@ def vmat_arc(number, start, step):
 
 
 @pytest.mark.slow
-def test_ac14_full_size_vmat_case(tmp_path):
-    """512 x 512 x 150 CT, two 178-point arcs; run with -m slow -s to see the wall time and peak RSS."""
+def test_ac14_full_size_vmat_case(tmp_path, monkeypatch):
+    """
+    512 x 512 x 150 CT, two 178-point arcs: the new beam_mu is byte-identical to the frozen reference, never takes the
+    `_add` fallback, and is at least 10x faster. Run with -m slow -s (about 7 min; the reference takes ~5.5 min).
+    """
     ct = ct_image(size=(512, 512, 150), spacing=(1.0, 1.0, 2.0))
     plan = written(tmp_path, [vmat_arc(1, 181.0, 2.0), vmat_arc(2, 179.0, -2.0)])
     rows = plan_table.plan_rows(plan, ct)
     assert len(rows) == 2 * 178
+    add_calls = []
+    real_add = beam_volume._add
+    monkeypatch.setattr(beam_volume, '_add', lambda *a, **k: add_calls.append(1) or real_add(*a, **k))
+
+    walls = []
+    for run in range(3):
+        start = time.perf_counter()
+        image = beam_volume.beam_mu(plan, rows, ct, 'HFS')
+        walls.append(time.perf_counter() - start)
+        if run == 0:  # before the reference runs, so its memory does not count
+            peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            print(f'\nAC14 new beam_mu wall {walls[0]:.1f} s, peak RSS {peak_mb:.0f} MB', flush=True)
+    new = sitk.GetArrayFromImage(image)
+    print(f'AC14 new beam_mu 3 runs: min {min(walls):.1f} s, median {statistics.median(walls):.1f} s', flush=True)
+
+    grid = (np.array(ct.GetOrigin()), np.array(ct.GetDirection()).reshape(3, 3), np.array(ct.GetSpacing()))
+    points = beam_volume._points(plan, rows, 'HFS', grid)
     start = time.perf_counter()
-    image = beam_volume.beam_mu(plan, rows, ct, 'HFS')
-    wall = time.perf_counter() - start
-    peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-    print(f'\nAC14 wall {wall:.1f} s ({wall / 60:.1f} min), peak RSS {peak_mb:.0f} MB')
-    assert image.GetSize() == ct.GetSize() and sitk.GetArrayFromImage(image).max() > 0
+    ref = reference_beam_mu(points, ct)
+    ref_wall = time.perf_counter() - start
+    ratio = ref_wall / min(walls)
+    print(f'AC14 reference wall {ref_wall:.1f} s, ratio reference / min(new) {ratio:.1f}x', flush=True)
+
+    assert new.dtype == ref.dtype and new.shape == ref.shape and new.tobytes() == ref.tobytes()
+    assert new.max() > 0
+    assert not add_calls, f'{len(add_calls)} fallback _add calls'
+    assert ratio >= 10

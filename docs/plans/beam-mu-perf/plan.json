@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "metadata": {
+    "title": "beam_mu performance: per-row analytic intervals, bit-identical output (#289)",
+    "spec": "docs/specs/2026-11-13-beam-mu-perf.md",
+    "branch": "feat/beam-mu-perf",
+    "profile": "project-profile.yml",
+    "created": "2026-11-13",
+    "guardrails": [
+      "follow [[iec-61217-dicom-patient-position-beam-projection]]: geometry and signs are not touched; only work is pruned",
+      "follow [[relative-tolerance-check-passes-everything-when-expected-overflows]]: no tolerance comparisons; bit-identity is np.array_equal",
+      "follow [[simpleitk-array-view-of-temporary-image-reads-freed-memory]]: no array views of SimpleITK images (memory cut is deferred)",
+      "commit gate: at most 5 files per commit; naming private functions in docs/commits needs CLAUDE_ALLOW_PRIVATE_API=1 with the list in the commit body",
+      "beam_volume.py: no try/except, no quiet_call, only raise CaseRefused(REASON_BEAM_VOLUME) (test_beam_volume_catches_and_quiets_nothing)"
+    ],
+    "implementer": {
+      "task-01": "sonnet-implementer",
+      "task-02": "orchestrator (float-sensitive design work)",
+      "task-03": "sonnet-implementer"
+    }
+  },
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "Frozen reference oracle and bit-identity test matrix",
+      "depends_on": [],
+      "files": [
+        "tests/beam_mu_reference.py",
+        "tests/test_beam_mu_oracle.py"
+      ],
+      "file_ops": {
+        "tests/beam_mu_reference.py": "create",
+        "tests/test_beam_mu_oracle.py": "create"
+      },
+      "test_approach": "tests/beam_mu_reference.py is a verbatim copy of today's (324e2b2) _axis, _add and the chunk loop of beam_mu from src/rt_dataprep/beam_volume.py, exposed as reference_beam_mu(points, ct) taking the output of beam_volume._points; the module itself imports nothing from rt_dataprep.beam_volume (pure numpy/SimpleITK). tests/test_beam_mu_oracle.py builds plans with the helpers in tests/test_beam_volume.py (ct_image, static, set_mlc, written, vmat_arc) and asserts np.array_equal(beam_volume.beam_mu(...), reference) over the spec's AC1 matrix (one factor at a time around a base case + a seeded random sample of >= 50 geometries), and the AC3 chunk test. These pass against today's code (the reference equals it); they are the guard for task-02. Default suite, keep total runtime under ~30 s. NOTE: these tests cannot go RED against today's code (the reference IS today's algorithm); that is expected, so write them green and commit. reference_beam_mu reads only the point-dict keys sad, weight, jaws, leaves, t, a; task-02 must keep those keys (extra keys allowed).",
+      "criteria": [
+        "reference_beam_mu(points, ct) returns the (nz, ny, nx) float32 ndarray. Bit-identity everywhere means new = sitk.GetArrayFromImage(beam_mu(...)) has the same dtype and shape as the reference and new.tobytes() == ref.tobytes()",
+        "The AC1 base case and every one-factor variant use SAD 1000 on the default 61^3 / 5 mm ct_image(), except the explicit SAD 400, beyond-5000 mm and non-finite cases",
+        "The geometry-matrix, random-sample, degenerate-slope and mixed-plan tests in tests/test_beam_mu_oracle.py carry pytest.mark.filterwarnings('error::RuntimeWarning'); the non-finite cases do not (inf in _points' matmul warns in both paths) and run with warnings permitted",
+        "tests/beam_mu_reference.py contains the 324e2b2 _axis/_add/chunk-loop code verbatim (diff-able against git show 324e2b2:src/rt_dataprep/beam_volume.py) and does not import rt_dataprep.beam_volume",
+        "AC1: np.array_equal(beam_mu, reference) for each of: gantry {0,45,90,180,270,315}, collimator {0,30,90}, couch {0,90,270}, positions HFS/HFP/FFS/FFP, CT direction identity/ROT90/an oblique rotation, anisotropic spacing, off-centre isocenter, asymmetric jaws, MLC with closed/open/partly open pairs, jaw-only beam, MLC with no Y jaw, MLC with no X jaw, jaws on voxel centres (5 mm grid, multiples of 5) including gantry 90 and 270, SAD 400 and SAD 1000",
+        "AC1: a seeded random sample of at least 50 geometries is bit-identical, with ranges pinned so every case is interval-path by construction on the default 61^3 grid: SAD in [800, 1200], spacing <= 5 mm, |isocenter offset| <= 50 mm per axis, random gantry/collimator/couch angles, jaws and leaf openings",
+        "AC1: rows from plan_rows are copied and mutated, one case each: jaw_x1=nan, jaw_y2=inf, one mlc_positions entry nan, the last leaf_position_boundaries entry inf, isocenter_x=inf; plus a CT grid origin beyond 5000 mm in beam coordinates. Each case either raises CaseRefused(REASON_BEAM_VOLUME) in beam_mu exactly where the reference path (beam_volume._points + reference) would, or is bit-identical to the reference",
+        "AC3: with CHUNK_VOXELS monkeypatched to force at least 3 z-chunks, output is bit-identical to the single-chunk output and to the reference",
+        "AC1: a 3-beam plan with overlapping fields, beam 2 at SAD 400 gantry 45 (falls back under Design 3) between beams 1 and 3 at SAD 1000, and the same plan with the beam order reversed, are bit-identical to the reference",
+        "The full default suite passes"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "beam_volume: per-row interval engine with interior credit, exact edge band and full-loop fallback",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/beam_volume.py",
+        "tests/test_beam_mu_oracle.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/beam_volume.py": "modify",
+        "tests/test_beam_mu_oracle.py": "modify"
+      },
+      "test_approach": "Red first: add AC2 tests to tests/test_beam_mu_oracle.py that spy on beam_volume._add (the fallback, today's code) and assert zero fallback calls on SAD 1000 cases, and that FALLBACK_DEPTH_FRACTION set to 0 and to 1e9 both give output bit-identical to the reference on the same SAD 1000 case; these fail until the engine exists. Then implement spec Design 1-6 in beam_volume.py. The task-01 oracle matrix must stay green throughout; any mismatch is fixed by a larger pad or stricter fallback, never a tolerance.",
+      "criteria": [
+        "Spec Design 1: per row, interior voxels (clear every inequality by > EDGE_MARGIN_MM tightened, minus a 1-voxel pad) get the weight via a contiguous float32 add without the per-voxel test; edge-band voxels (inside the epsilon-relaxed, 1-voxel-padded, grid-clipped, deduplicated union) run today's full jaw + searchsorted test once; others get nothing; each voxel gets at most one add per point in point order",
+        "Spec Design 2: relaxed inequalities are evaluated at both row ends; no slope threshold, no division by a slope smaller than 2*eps/(N-1), and no RuntimeWarning is emitted in the oracle tests (run with -W error::RuntimeWarning)",
+        "Spec Design 3: a point falls back to _add over the full chunked grid when any grid corner has depth < FALLBACK_DEPTH_FRACTION*SAD (0.5), when any of t, a, jaws, leaf positions or leaf boundaries is non-finite, or when any grid corner's beam coordinate exceeds MAX_COORD_MM (5000); fallback is a geometric check with no try/except",
+        "Spec Design 4: jaw values stay Python floats and leaf arrays stay float64 as aperture() builds them; the per-voxel test and the float32 adds are today's expressions unchanged",
+        "Spec Design 5: work is z-chunked by CHUNK_VOXELS, which stays monkeypatchable, and per-chunk interval arrays are bounded by the chunk",
+        "AC2: a beam_volume._add spy records zero calls across the whole random sample and every SAD 1000 one-factor AC1 case, and at least 1 call on each named fallback case (beyond-5000 mm origin, each non-finite case that is not refused, SAD 400 at gantry 45); FALLBACK_DEPTH_FRACTION=0 and =1e9 are both bit-identical to the reference on the same SAD 1000 case",
+        "All task-01 oracle tests (AC1, AC3) pass unchanged",
+        "AC5: the full existing suite passes, including test_beam_volume_catches_and_quiets_nothing; no existing test is edited",
+        "Public signatures beam_mu(plan, rows, ct, patient_position) and aperture(row) are unchanged; refusal checks run in the same order",
+        "_add (today's code) is called only for fallback points; the edge-band exact test is a separate function",
+        "On the 3-beam mixed plan the spy shows fallback and interval points processed interleaved in point order within each chunk",
+        "Before task-03 starts, the orchestrator runs AC14 once (-m slow -s) and records the measured ratio in findings.md",
+        "_points keeps the point-dict keys sad, weight, jaws, leaves, t, a (extra keys allowed) so reference_beam_mu keeps working"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "AC14 as a 10x speed-ratio gate against the frozen reference",
+      "depends_on": [
+        "task-02"
+      ],
+      "files": [
+        "tests/test_beam_volume.py",
+        "docs/plans/beam-mu-perf/findings.md"
+      ],
+      "file_ops": {
+        "tests/test_beam_volume.py": "modify",
+        "docs/plans/beam-mu-perf/findings.md": "modify"
+      },
+      "test_approach": "Rewrite test_ac14_full_size_vmat_case (still @pytest.mark.slow): run the new beam_mu first and record its wall time and peak RSS, then run tests/beam_mu_reference.py on the same _points output; assert np.array_equal and reference_wall / new_wall >= 10. Run it with `uv run --group dev pytest -m slow -s -k ac14` and record before/after wall time and RSS in findings.md.",
+      "criteria": [
+        "AC4: test_ac14_full_size_vmat_case runs the new beam_mu first, prints its wall time and peak RSS before the reference runs, then asserts bit-identity with the reference and reference_wall / new_wall >= 10",
+        "RSS is printed and recorded in findings.md, not asserted",
+        "The slow test passes on this workstation and the measured ratio, both wall times and peak RSS are in findings.md",
+        "Any ratio < 10 is FAILED: task-03 never modifies src/, does not retry or tune, and /dev halts for the owner",
+        "AC14 also asserts the beam_volume._add spy recorded zero fallback calls, and findings.md records the new beam_mu wall time over 3 runs (min/median) against one reference run (the reference takes ~5.5 min)"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ],
+    [
+      "task-03"
+    ]
+  ],
+  "deferred": [
+    "Output-copy memory cut: #340 (hardening)",
+    "Speedups beyond 10x: only if the real cohort run asks"
+  ]
+}
