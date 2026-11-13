@@ -687,9 +687,9 @@ using Python 3.12 or newer:
 
 ```bash
 # uv project
-uv add "rt-dataprep @ git+https://github.com/ddicostanzo/rt-dataprep@v0.4.0"
+uv add "rt-dataprep @ git+https://github.com/ddicostanzo/rt-dataprep@v0.5.0"
 # or plain pip in an activated virtual environment
-pip install "git+https://github.com/ddicostanzo/rt-dataprep@v0.4.0"
+pip install "git+https://github.com/ddicostanzo/rt-dataprep@v0.5.0"
 ```
 
 Pin a release tag (or a reviewed commit) rather than `main`, and change the tag to upgrade. Releases are listed on the
