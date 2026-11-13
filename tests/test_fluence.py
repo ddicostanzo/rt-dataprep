@@ -220,7 +220,7 @@ def test_ac8_a_not_modelled_aperture_on_a_weight_zero_control_point_is_still_ref
     beam['NumberOfControlPoints'] = 3
     plan = written(tmp_path, [beam])
     rows = plan_table.plan_rows(plan, ct_image())
-    assert [r['mu'] for r in rows] == [0.0, 0.0, 40.0] and fluence.fluence_mu(plan, rows)[0]  # row 0 has weight 0: accepted as built
+    assert [r['mu'] for r in rows] == [0.0, 0.0, 40.0] and sitk.GetArrayFromImage(fluence.fluence_mu(plan, rows)[0]).max() == pytest.approx(40.0)  # row 0 has weight 0: accepted as built
     rows[0].update(spoil)
     with pytest.raises(CaseRefused) as raised:
         fluence.fluence_mu(plan, rows)

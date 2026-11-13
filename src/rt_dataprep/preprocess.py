@@ -786,7 +786,7 @@ def index_plan_table(source, path, final, schema=plan_table.SCHEMA, prefix='isoc
     data = source.read_bytes()  # a file-system error here propagates; the parse below is from memory, so an OSError out of it is a corrupt file (a full-length bad footer or page raises plain OSError)
     try:
         table = pq.read_table(pa.BufferReader(data))
-    except (OSError, pa.ArrowInvalid, pa.ArrowNotImplementedError, pa.ArrowTypeError):
+    except (OSError, pa.ArrowException):  # every Arrow error class; a MemoryError-like ArrowMemoryError is one too
         return False
     if table.schema != schema:
         return False

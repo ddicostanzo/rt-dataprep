@@ -2207,7 +2207,7 @@ def test_an_arrow_error_in_ion_to_table_only_drops_ion_plan_parquet(tree, caplog
     monkeypatch.setattr(ion_plan_table, 'to_table', lambda rows: (_ for _ in ()).throw(error('SYNTHETIC_VALUE')))
     plan, rows, out = pbs_plan(tree, rois=[BOX])
     assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
-    assert not (out / PID / 'plan_1' / 'ion_plan.parquet').exists()
+    assert not (out / PID / 'plan_1' / 'ion_plan.parquet').exists() and (out / PID / 'plan_1' / 'planning_ct.nii.gz').exists()
     assert len(logged(caplog, ion_plan_table.REASON_ION_PLAN)) == 1 and 'SYNTHETIC_VALUE' not in caplog.text
     assert_no_leak(caplog, out, secrets_of(plan, tree))
 
@@ -2331,7 +2331,7 @@ def test_an_arrow_error_in_dwell_to_table_only_drops_dwell_parquet(tree, caplog,
     monkeypatch.setattr(dwell_table, 'to_table', lambda rows: (_ for _ in ()).throw(error('SYNTHETIC_VALUE')))
     plan, rows, out = hdr_plan(tree, rois=[BOX])
     assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
-    assert not (out / PID / 'plan_1' / 'dwell.parquet').exists()
+    assert not (out / PID / 'plan_1' / 'dwell.parquet').exists() and (out / PID / 'plan_1' / 'planning_ct.nii.gz').exists()
     assert len(logged(caplog, dwell_table.REASON_DWELL)) == 1 and 'SYNTHETIC_VALUE' not in caplog.text
     assert_no_leak(caplog, out, secrets_of(plan, tree))
 

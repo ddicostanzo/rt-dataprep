@@ -331,7 +331,7 @@ def test_zero_table_top_angles_are_modelled(tmp_path):
 
 
 @pytest.mark.parametrize('keyword', beam_volume.TABLE_TOP_ANGLES)
-def test_a_setup_beam_with_a_non_zero_table_top_angle_is_not_refused(tmp_path, keyword):  # setup beams add no dose
+def test_ac8_a_setup_beam_with_a_non_zero_table_top_angle_is_not_refused(tmp_path, keyword):  # setup beams add no dose
     setup = sd.photon_beam(2, kind='setup')
     for point in setup['ControlPointSequence']:
         point[keyword] = 5.0
