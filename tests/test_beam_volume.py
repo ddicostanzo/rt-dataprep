@@ -493,8 +493,8 @@ def test_ac14_full_size_vmat_case(tmp_path, monkeypatch):
     start = time.perf_counter()
     ref = reference_beam_mu(points, ct)
     ref_wall = time.perf_counter() - start
-    ratio = ref_wall / min(walls)
-    print(f'AC14 reference wall {ref_wall:.1f} s, ratio reference / min(new) {ratio:.1f}x', flush=True)
+    ratio = ref_wall / statistics.median(walls)  # spec AC4: reference_wall / new_wall
+    print(f'AC14 reference wall {ref_wall:.1f} s, ratio reference / median(new) {ratio:.1f}x', flush=True)
 
     assert new.dtype == ref.dtype and new.shape == ref.shape and new.tobytes() == ref.tobytes()
     assert new.max() > 0
