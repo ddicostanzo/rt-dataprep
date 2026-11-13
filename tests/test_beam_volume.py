@@ -330,6 +330,24 @@ def test_ac8_unsupported_patient_position_is_refused(tmp_path, position):
     assert str(raised.value) == REASON_BEAM_VOLUME
 
 
+@pytest.mark.parametrize(('setup', 'ok'), [('FFS', False), ('HFS', True), ('', True), (None, True)])
+def test_ac8_setup_position_must_match_the_ct(tmp_path, setup, ok):  # #288: else the volume is mirrored
+    ct = ct_image()
+    plan = written(tmp_path, [static()])
+    item = sd.Dataset()
+    item.PatientSetupNumber = 1
+    if setup is not None:
+        item.PatientPosition = setup
+    plan.PatientSetupSequence = [item]
+    run = lambda: beam_volume.beam_mu(plan, plan_table.plan_rows(plan, ct), ct, 'HFS')  # noqa: E731
+    if ok:
+        assert lit(run())[1].size
+        return
+    with pytest.raises(CaseRefused) as raised:
+        run()
+    assert str(raised.value) == REASON_BEAM_VOLUME
+
+
 @pytest.mark.parametrize('sad', [float('nan'), float('inf'), '400', None, [400.0], True])
 def test_ac8_sad_must_be_a_finite_positive_number(tmp_path, sad):
     plan = written(tmp_path, [static()])

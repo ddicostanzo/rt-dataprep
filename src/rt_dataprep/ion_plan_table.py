@@ -115,6 +115,7 @@ def _beam_rows(beam, meterset, ct):
     tolerance = ION_WEIGHT_TOLERANCE * final
     points = beam.get('IonControlPointSequence') or []
     _check(len(points) > 0)
+    _check(int(_need(beam.get('NumberOfControlPoints'))) == len(points))  # a truncated sequence, as plan_table (#325)
     cumulative = [_num(_need(p.get('CumulativeMetersetWeight'))) for p in points]  # never filled forward
     _check(abs(cumulative[0]) <= tolerance and abs(cumulative[-1] - final) <= tolerance)
     _check(all(b >= a for a, b in zip(cumulative, cumulative[1:], strict=False)))
@@ -143,6 +144,7 @@ def _beam_rows(beam, meterset, ct):
 
     scalars, settings, thicknesses, rows, layer = {}, {}, {}, [], 0
     for i, point in enumerate(points):
+        _check(int(_need(point.get('ControlPointIndex'))) == i)  # the rows' order is the sequence's, as plan_table (#325)
         for keyword in SCALARS:
             if not _missing(point.get(keyword)):
                 scalars[keyword] = point.get(keyword)
@@ -165,7 +167,7 @@ def _beam_rows(beam, meterset, ct):
         size = _pair(scalars.get('ScanningSpotSize'))
         paintings = scalars.get('NumberOfPaintings')
         base = dict(
-            fixed, control_point_index=int(_need(point.get('ControlPointIndex'))), layer_index=layer,
+            fixed, control_point_index=i, layer_index=layer,
             cumulative_meterset_weight=cumulative[i], nominal_energy=_num(_need(scalars.get('NominalBeamEnergy'))),
             gantry_angle=_num(_need(scalars.get('GantryAngle'))), couch_angle=_num(_need(scalars.get('PatientSupportAngle'))),
             snout_position=_optional_num(scalars.get('SnoutPosition')), scan_spot_tune_id=_text(scalars.get('ScanSpotTuneID')),

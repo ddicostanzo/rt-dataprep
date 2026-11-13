@@ -326,6 +326,10 @@ def _no_setup_number(plan):
     del plan.ApplicationSetupSequence[0].ApplicationSetupNumber
 
 
+def _index_out_of_order(plan):  # #325: the dwell pairs follow the sequence, so its indices must too
+    cps(plan)[2].ControlPointIndex = 5
+
+
 def _no_control_point_index(plan):
     del cps(plan)[2].ControlPointIndex
 
@@ -355,7 +359,7 @@ def _pdr_no_pulses(plan):
 CASES = [_no_time, _odd, _pair_apart, _rising, _decreasing, _last_not_final, _unknown_source, _no_source_number, _no_position,
          _no_movement, _unknown_movement, _empty_movement, _duplicate_channel, _duplicate_setup, _duplicate_source,
          _count_mismatch, _final_zero_with_time, _negative_time, _negative_final, _first_weight, _no_weight, _no_final,
-         _no_setup_number, _no_control_point_index, _pdr_neither, _pdr_no_interval, _pdr_no_pulses]
+         _no_setup_number, _no_control_point_index, _index_out_of_order, _pdr_neither, _pdr_no_interval, _pdr_no_pulses]
 
 
 @pytest.mark.parametrize('mutate', CASES)

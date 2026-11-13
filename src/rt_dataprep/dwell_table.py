@@ -122,6 +122,7 @@ def _channel_rows(fixed, channel, ct):
     points = channel.get('BrachyControlPointSequence')
     declared = channel.get('NumberOfControlPoints')
     _check(len(points) % 2 == 0 and (_missing(declared) or int(declared) == len(points)))
+    _check([int(_need(p.get('ControlPointIndex'))) for p in points] == list(range(len(points))))  # dwells pair by sequence order (#325)
     if fixed['brachy_treatment_type'] == 'PDR':
         _need(channel.get('NumberOfPulses'))
         _need(channel.get('PulseRepetitionInterval'))
@@ -161,7 +162,7 @@ def _channel_rows(fixed, channel, ct):
     for k, weight in enumerate(dwell_weights):
         point = points[2 * k]
         index = ct.TransformPhysicalPointToContinuousIndex(tuple(positions[2 * k]))
-        row = dict(base, dwell_index=k, control_point_index=int(_need(point.get('ControlPointIndex'))),
+        row = dict(base, dwell_index=k, control_point_index=2 * k,
                    relative_position=_optional_num(point.get('ControlPointRelativePosition')),
                    cumulative_time_weight=weights[2 * k], dwell_weight=weight,
                    dwell_time_s=total * weight / final if final > 0 else 0.0)  # final 0: every weight and the time are 0
