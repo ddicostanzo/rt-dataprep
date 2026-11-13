@@ -782,10 +782,11 @@ def native_retained(native, final, region=None):
 
 def index_plan_table(source, path, final, schema=plan_table.SCHEMA, prefix='isocenter'):
     """Write `source` (plan.parquet, ion_plan.parquet with schema=ion_plan_table.ION_SCHEMA, or dwell.parquet with schema=dwell_table.DWELL_SCHEMA and prefix='position') to `path` with <prefix>_i/j/k replaced by the continuous index of
-    <prefix>_x/y/z on `final`; False, nothing written, when it is unreadable or not `schema` (compared as fields: file metadata is not part of it). An OSError propagates."""
+    <prefix>_x/y/z on `final`; False, nothing written, when it is corrupt (a parse error of any kind) or not `schema` (compared as fields: file metadata is not part of it). Only an OSError reading the file, or from the write, propagates."""
+    data = source.read_bytes()  # a file-system error here propagates; the parse below is from memory, so an OSError out of it is a corrupt file (a full-length bad footer or page raises plain OSError)
     try:
-        table = pq.read_table(source)
-    except pa.ArrowInvalid:
+        table = pq.read_table(pa.BufferReader(data))
+    except (OSError, pa.ArrowInvalid, pa.ArrowNotImplementedError, pa.ArrowTypeError):
         return False
     if table.schema != schema:
         return False

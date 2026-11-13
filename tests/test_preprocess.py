@@ -7,12 +7,14 @@ import inspect
 import json
 import logging
 import os
+import pathlib
 import re
 import time
 import traceback
 import weakref
 
 import numpy as np
+import pyarrow as pa
 import pytest
 import series_files as sf
 import SimpleITK as sitk
@@ -1602,6 +1604,40 @@ def test_a_geometric_run_leaves_out_an_unreadable_or_non_schema_plan_parquet(tmp
         assert not (done / conv.PLAN_NAME).exists() and conv.PLAN_NAME not in plan_row(report).files
         assert [r for r in sf.read(done) if r['kind'] == 'plan'] == []
         assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and 'roi_interpreted_type' not in r.getMessage()] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+
+
+def test_a_full_length_plan_parquet_with_a_corrupt_footer_drops_only_that_table(tmp_path, caplog):
+    import pyarrow.parquet as pq
+    converted, folder = photon_converted(tmp_path)
+    path = folder / conv.PLAN_NAME
+    data = bytearray(path.read_bytes())
+    data[-24:-8] = b'\xff' * 16  # the footer thrift just before <4-byte length>PAR1; same length, tail intact
+    path.write_bytes(bytes(data))
+    with pytest.raises(OSError) as raised:  # plain OSError, not ArrowInvalid, is what this test pins
+        pq.read_table(path)
+    assert not isinstance(raised.value, pa.ArrowInvalid)
+    out = tmp_path / 'out'
+    with caplog.at_level(logging.WARNING, logger='rt_dataprep.preprocess'):
+        report = pre.preprocess(converted, out, SMALL)
+    assert [(r.folder, r.outcome, r.reason) for r in report.rows] == [('plan_1', 'preprocessed', '')]
+    done = out / folder.parent.name / 'plan_1'
+    assert not (done / conv.PLAN_NAME).exists() and conv.PLAN_NAME not in plan_row(report).files
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and 'roi_interpreted_type' not in r.getMessage()] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+
+
+def test_a_read_error_on_the_plan_parquet_fails_the_patient(tmp_path, monkeypatch):
+    converted, folder = photon_converted(tmp_path)
+    real = pathlib.Path.read_bytes
+
+    def read_bytes(self):
+        if self.name == conv.PLAN_NAME:
+            raise OSError('simulated read failure')
+        return real(self)
+
+    monkeypatch.setattr(pathlib.Path, 'read_bytes', read_bytes)
+    report = pre.preprocess(converted, tmp_path / 'out', SMALL)
+    assert [(r.folder, r.outcome, r.reason) for r in report.rows] == [('', 'refused', pre.REASON_IO_ERROR)]
+    assert not (tmp_path / 'out' / folder.parent.name).exists()
 
 
 BEAM_FILE = pre.output_name(conv.BEAM_NAME, SMALL)
