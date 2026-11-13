@@ -19,3 +19,11 @@ Decisions: one `all(...)` kept (so the all->any mutation still targets it): an i
 Gotchas: `any` over an empty PatientSetupSequence is False, so the all->any mutation fails 27 tests (every plan without a setup sequence), not just test 3; test 3 (`test_ac8_every_setup_item_must_match_the_ct`) is among the failures.
 Red runs: before the change test 1 failed for '' and None (DID NOT RAISE). all->any: red (27 failed incl. test 3). "Refuse whenever PatientAdditionalPosition is non-empty": red, only test 2 failed. Both reverted; `git diff src/` shows only the new condition.
 Suite: 2066 passed, 4 skipped, 3 deselected; ruff clean; compileall clean.
+
+## task-05
+
+Files changed: src/rt_dataprep/convert.py (`_table` except tuple now `(pa.ArrowInvalid, pa.ArrowTypeError, OverflowError)`), tests/test_convert.py (two parametrised tests, ArrowInvalid/ArrowTypeError each: `test_an_arrow_error_in_ion_to_table_only_drops_ion_plan_parquet` via pbs_plan/REASON_ION_PLAN, `test_an_arrow_error_in_dwell_to_table_only_drops_dwell_parquet` via hdr_plan/REASON_DWELL).
+Decisions: the OverflowError catch has no test (unreachable from IS-VR inputs). Tests mirror the photon template: outcome converted, parquet absent, exactly one warning with the table's reason, SYNTHETIC_VALUE not in caplog, assert_no_leak.
+Gotchas: the mutation must guard None rows (`None if rows is None else _header_call(to_table, rows)`); an unguarded `_header_call(to_table, None)` also reddens the photon test on plans with no ion/dwell rows, which is noise, not a pin.
+Red runs: with ion and dwell sites routed through `_header_call` (None-guarded), exactly the 4 new tests failed (outcome 'refused' != 'converted'); the photon tests stayed green. Reverted; `git diff src/` shows only the except tuple.
+Suite: 2070 passed, 4 skipped, 3 deselected; ruff clean; compileall clean.

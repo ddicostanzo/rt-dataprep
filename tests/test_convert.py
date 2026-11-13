@@ -2201,6 +2201,17 @@ def pbs_plan(tree, beams=None, **kwargs):
     return one_plan(tree, plan_meta=plan_meta, plan_writer=sd.write_pbs_rtplan, **kwargs)
 
 
+@pytest.mark.parametrize('error', [pa.ArrowInvalid, pa.ArrowTypeError])
+def test_an_arrow_error_in_ion_to_table_only_drops_ion_plan_parquet(tree, caplog, monkeypatch, error):  # #299: same #276 contract as plan.parquet
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(ion_plan_table, 'to_table', lambda rows: (_ for _ in ()).throw(error('SYNTHETIC_VALUE')))
+    plan, rows, out = pbs_plan(tree, rois=[BOX])
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
+    assert not (out / PID / 'plan_1' / 'ion_plan.parquet').exists()
+    assert len(logged(caplog, ion_plan_table.REASON_ION_PLAN)) == 1 and 'SYNTHETIC_VALUE' not in caplog.text
+    assert_no_leak(caplog, out, secrets_of(plan, tree))
+
+
 def test_a_pbs_plan_converts_with_ion_plan_parquet_and_none_of_the_photon_files(tree):
     plan, rows, out = pbs_plan(tree, rois=[BOX])
     row = row_of(rows)
@@ -2312,6 +2323,17 @@ def hdr_plan(tree, channels=None, **kwargs):
     """(plan, rows, out) of a converted tree whose plan is an HDR brachy plan (two channels x three dwells by default)."""
     plan_meta = dict(treatment_type='HDR', sources=[sd.brachy_source()], channels=channels or default_channels(), **kwargs.pop('plan_meta', {}))
     return one_plan(tree, plan_meta=plan_meta, **kwargs)
+
+
+@pytest.mark.parametrize('error', [pa.ArrowInvalid, pa.ArrowTypeError])
+def test_an_arrow_error_in_dwell_to_table_only_drops_dwell_parquet(tree, caplog, monkeypatch, error):  # #299: same #276 contract as plan.parquet
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(dwell_table, 'to_table', lambda rows: (_ for _ in ()).throw(error('SYNTHETIC_VALUE')))
+    plan, rows, out = hdr_plan(tree, rois=[BOX])
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
+    assert not (out / PID / 'plan_1' / 'dwell.parquet').exists()
+    assert len(logged(caplog, dwell_table.REASON_DWELL)) == 1 and 'SYNTHETIC_VALUE' not in caplog.text
+    assert_no_leak(caplog, out, secrets_of(plan, tree))
 
 
 def test_an_hdr_plan_converts_with_dwell_parquet_after_the_other_files(tree):
