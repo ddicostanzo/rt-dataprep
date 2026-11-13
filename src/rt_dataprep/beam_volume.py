@@ -169,8 +169,9 @@ def _add(chunk, point, x, y, z):
 
 
 def _rows_ready(point, size):
-    """True when `_add_rows` is exact for this point on a grid of `size` (x, y, z): finite values, and every voxel well
-    downstream and within MAX_COORD_MM (depth and b are linear in the index, so the 8 corners bound them)."""
+    """True when `_add_rows` is exact for this point on a grid of `size` (x, y, z): finite values, every voxel well
+    downstream and within MAX_COORD_MM (depth and b are linear in the index, so the 8 corners bound them), and a float32
+    error bound for X and Y within half of EDGE_MARGIN_MM (`_float32_error`)."""
     jaws, leaves = point['jaws'], point['leaves']
     values = [point['t'], point['a']] + [v for v in jaws.values() if v is not None] + list(leaves[:3] if leaves else [])
     if not all(np.isfinite(np.asarray(v, dtype=float)).all() for v in values):
@@ -179,7 +180,26 @@ def _rows_ready(point, size):
         return False
     corners = np.array(list(itertools.product(*((0, n - 1) for n in size))), dtype=float)
     b = point['t'] + corners @ point['a'].T
-    return bool((point['sad'] - b[:, 2] >= FALLBACK_DEPTH_FRACTION * point['sad']).all() and (np.abs(b) <= MAX_COORD_MM).all())
+    depth = point['sad'] - b[:, 2]
+    if not ((depth >= FALLBACK_DEPTH_FRACTION * point['sad']).all() and (np.abs(b) <= MAX_COORD_MM).all()):
+        return False
+    return _float32_error(point, size, values[2:], depth.min()) <= EDGE_MARGIN_MM / 2
+
+
+def _float32_error(point, size, edges, least):
+    """First-order bound on how far `_add`'s float32 X or Y can sit from the exact value at any voxel near an edge.
+
+    Each float32 b = ((t + a0 x) + a1 y) + a2 z is off by at most 5u M (M: the largest |partial sum|), depth = sad - b_z
+    adds cancellation relative to `least` (the smallest depth), and the jaw is rounded to float32 for the comparison.
+    A voxel at distance d >= EDGE_MARGIN_MM from every edge has |X| <= edge + d, so error(edge + d) < d holds for all
+    such d once it holds at d = EDGE_MARGIN_MM (the relative part grows with slope < 1).
+    """
+    u = 2.0 ** -24  # float32 unit roundoff
+    sad = point['sad']
+    m = np.abs(point['t']) + np.abs(point['a']) @ (np.array(size, dtype=float) - 1)
+    edge = max((float(np.abs(np.asarray(v, dtype=float)).max()) for v in edges if np.size(v)), default=0.0)
+    relative = (6 * u * m[2] + 2 * u * sad) / least + 3 * u
+    return 5 * u * max(m[0], m[1]) * sad / least + (edge + EDGE_MARGIN_MM) * relative + u * edge
 
 
 def _half(g0, g1, last):

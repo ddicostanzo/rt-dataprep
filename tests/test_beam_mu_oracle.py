@@ -186,6 +186,20 @@ def test_ac1_mlc_with_one_jaw_axis_missing(tmp_path, dropped, gantry):
 
 
 @NO_WARNINGS
+def test_ac1_cancellation_in_depth_falls_back(tmp_path, monkeypatch):  # PR #341 Codex review: SAD 1, depth from -1000 + 1000.5;
+    # the pre-fix gate admitted this point and the interval path dropped a row `_add` lights
+    point = dict(sad=1.0, weight=1.0, jaws={'x': (200.02, 201.0), 'y': (-20.0, 20.0)}, leaves=None,
+                 t=np.array([100.0, 0.0, -1000.00007]), a=np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 10.0050006, 0.0]]))
+    ct = sitk.Image([10, 101, 1], sitk.sitkInt16)
+    monkeypatch.setattr(beam_volume, '_points', lambda *args: [point])
+    CALLS.clear()
+    new = sitk.GetArrayFromImage(beam_volume.beam_mu(None, [], ct, 'HFS'))
+    ref = reference_beam_mu([point], ct)
+    assert ref.any() and new.tobytes() == ref.tobytes()
+    assert fallbacks() > 0  # float32 X is 0.024 mm off here, beyond EDGE_MARGIN_MM: the interval path is not exact
+
+
+@NO_WARNINGS
 @pytest.mark.parametrize('gantry', [0, 90])
 def test_ac1_mlc_with_no_jaws(tmp_path, gantry):  # aperture() models an MLC alone: both jaw axes None
     check(tmp_path, drop_jaw(drop_jaw(mlc_beam(gantry=gantry), 'ASYMX'), 'ASYMY'))

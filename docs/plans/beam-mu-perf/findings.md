@@ -74,3 +74,13 @@ float32 drift was at most 1.6e-3 mm against the 0.01 mm margin.
   `+=`; depth > 0 guaranteed by the fallback rather than solved per row).
 - DEFERRED: #342 (rows x pairs path ~20% slower near collimator 90/270 with an MLC), #343 (AC14 gate on the median).
 No blocking fix was made, so no verification pass is needed.
+
+## review-loop-pass-1 (Codex thread)
+BLOCKING, fixed: Codex (PR #341, beam_volume.py:182) showed that the corner gates (depth >= 0.5 SAD, |b| <= 5000 mm) do
+not bound float32 error when depth comes from cancellation and SAD is small: SAD 1, t_z = -1000.00007, depth from
+-1000 + 1000.5. Float32 X is about 0.024 mm off, beyond EDGE_MARGIN_MM, and the interval path dropped a row `_add` lights.
+Class: the fast-path gate admits a point whose float32 error exceeds the margin. `_rows_ready` is the only gate. Fix:
+`_float32_error`, a first-order bound from the partial-sum magnitudes, the least depth, the largest edge value and the
+float32 rounding of the jaw, which must be <= EDGE_MARGIN_MM / 2. Test `test_ac1_cancellation_in_depth_falls_back`
+(red before, green after). A 3000-case gate fuzz (SAD 1-3000, depth near threshold, cancellation) found 0 mismatches.
+Full suite 2227 passed; AC14 28.5 s min against a 374.5 s reference = 13.1x, zero fallbacks.
