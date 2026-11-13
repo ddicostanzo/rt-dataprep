@@ -33,3 +33,9 @@ Suite: 2070 passed, 4 skipped, 3 deselected; ruff clean; compileall clean.
 Files changed: src/rt_dataprep/preprocess.py (image loop in preprocess_plan).
 Decisions: `checked = kind != 'beam'` is set once (beam-footprint comment kept on that line); the crop-check block and the has_voxels refusal both use it. Not `kind in ('dose','mask')`. Pure refactor, no new test, no red run.
 Suite: 2070 passed, 4 skipped, 3 deselected; ruff clean; compileall clean.
+
+## task-04
+
+Files changed: tests/test_beam_volume.py (two tests, each parametrised over the three TABLE_TOP_ANGLES keywords: `test_a_setup_beam_with_a_non_zero_table_top_angle_is_not_refused`, `test_ac8_table_top_angle_first_listed_on_a_later_control_point_is_refused`). No src/ change.
+Decisions: the setup beam is `sd.photon_beam(2, kind='setup')` with the angle set on every control point, added to a valid `static()` plan. The later-CP test zeroes all three angles on CP 0 and sets the keyword on CP 1. 360.0 behavior untouched.
+Red runs: dropping the SETUP `continue` in `_table_top_flat` -> exactly the 3 setup tests failed (CaseRefused). Checking only control point 0 (`[:1]`) -> exactly the 3 later-CP tests failed (DID NOT RAISE). Both reverted; `git diff src/` is empty.

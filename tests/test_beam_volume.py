@@ -323,6 +323,24 @@ def test_zero_table_top_angles_are_modelled(tmp_path):
     assert lit(volume(tmp_path, beam))[1].size
 
 
+@pytest.mark.parametrize('keyword', beam_volume.TABLE_TOP_ANGLES)
+def test_a_setup_beam_with_a_non_zero_table_top_angle_is_not_refused(tmp_path, keyword):  # setup beams add no dose
+    setup = sd.photon_beam(2, kind='setup')
+    for point in setup['ControlPointSequence']:
+        point[keyword] = 5.0
+    assert lit(volume(tmp_path, [static(), setup]))[1].size
+
+
+@pytest.mark.parametrize('keyword', beam_volume.TABLE_TOP_ANGLES)
+def test_ac8_table_top_angle_first_listed_on_a_later_control_point_is_refused(tmp_path, keyword):
+    beam = static()
+    beam['ControlPointSequence'][0].update({k: 0.0 for k in beam_volume.TABLE_TOP_ANGLES})
+    beam['ControlPointSequence'][1][keyword] = 5.0
+    with pytest.raises(CaseRefused) as raised:
+        volume(tmp_path, beam)
+    assert str(raised.value) == REASON_BEAM_VOLUME
+
+
 @pytest.mark.parametrize('position', ['HFDR', 'hfs', '', None])
 def test_ac8_unsupported_patient_position_is_refused(tmp_path, position):
     with pytest.raises(CaseRefused) as raised:
