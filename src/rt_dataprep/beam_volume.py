@@ -312,7 +312,7 @@ def _add_rows(chunk, point, z):
 
     outer_s, outer_e = voxels(outer, 1)
     inner_s, inner_e = voxels(inner, -1)
-    flat = chunk.reshape(-1)  # a view: chunk is a contiguous slab of out
+    flat = chunk.reshape(-1)  # a view: chunk is a fresh contiguous array
     weight = np.float32(point['weight'])
     full = inner_s <= inner_e  # solid runs are disjoint: leaf bands and jaw-only rows do not overlap
     np.add.at(flat, _runs(rows, inner_s, inner_e, nx), weight)  # the same float32 add; faster than flat[...] +=
