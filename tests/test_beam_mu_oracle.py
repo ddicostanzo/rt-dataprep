@@ -35,6 +35,26 @@ def _oblique():
 OBLIQUE = _oblique()
 
 
+CALLS = []  # (path, id(point)) per call beam_mu makes for one point in one chunk, in order
+
+
+@pytest.fixture(autouse=True)
+def spy(monkeypatch):
+    """AC2: records which path each point took: 'fallback' (`_add`, today's loop) or 'rows' (`_add_rows`)."""
+    CALLS.clear()
+    for name, path in (('_add', 'fallback'), ('_add_rows', 'rows')):
+        real = getattr(beam_volume, name)
+
+        def wrapped(chunk, point, *args, _real=real, _path=path):
+            CALLS.append((_path, id(point)))
+            return _real(chunk, point, *args)
+        monkeypatch.setattr(beam_volume, name, wrapped)
+
+
+def fallbacks():
+    return sum(path == 'fallback' for path, _ in CALLS)
+
+
 def grid(ct):  # as beam_mu builds it
     return np.array(ct.GetOrigin()), np.array(ct.GetDirection()).reshape(3, 3), np.array(ct.GetSpacing())
 
@@ -55,11 +75,13 @@ def ref_result(plan, rows, ct, position):
     return _refusal_or(lambda: reference_beam_mu(beam_volume._points(plan, rows, position, grid(ct)), ct))
 
 
-def assert_identical(plan, rows, ct, position, *, lit=True):
+def assert_identical(plan, rows, ct, position, *, lit=True, fallback=False):
+    CALLS.clear()
     new, ref = new_result(plan, rows, ct, position), ref_result(plan, rows, ct, position)
     if isinstance(ref, str) or isinstance(new, str):
         assert new == ref == REFUSED
         return
+    assert (fallbacks() > 0) == fallback, CALLS  # AC2: the interval path is what these cases test
     assert new.dtype == ref.dtype == np.float32 and new.shape == ref.shape
     assert new.tobytes() == ref.tobytes()
     assert not lit or ref.any()  # a case that lights nothing proves nothing
@@ -174,8 +196,8 @@ def test_ac1_jaws_on_voxel_centres(tmp_path, gantry, mlc):  # 5 mm grid: jaws on
 @NO_WARNINGS
 @pytest.mark.parametrize('sad', [400.0, 1000.0])
 @pytest.mark.parametrize('gantry', [0, 45])
-def test_ac1_sad(tmp_path, sad, gantry):
-    check(tmp_path, base(sad=sad, gantry=gantry))
+def test_ac1_sad(tmp_path, sad, gantry):  # SAD 400 at gantry 45: a grid corner is nearer the source than SAD/2
+    check(tmp_path, base(sad=sad, gantry=gantry), fallback=sad == 400.0 and gantry == 45)
 
 
 @NO_WARNINGS
@@ -256,13 +278,13 @@ NON_FINITE = {
 @pytest.mark.parametrize('mutate', NON_FINITE.values(), ids=NON_FINITE)
 def test_ac1_non_finite_values_refuse_or_match(tmp_path, mutate):  # runs with warnings permitted: inf warns in both paths
     plan, rows, ct = _rows_case(tmp_path, mutate)
-    assert_identical(plan, rows, ct, 'HFS', lit=False)
+    assert_identical(plan, rows, ct, 'HFS', lit=False, fallback=True)
 
 
 def test_ac1_ct_origin_beyond_5000_mm_in_beam_coordinates(tmp_path):
     beam = base(jaws=(-10000.0, 10000.0, -10000.0, 10000.0))
     plan, rows, ct = _rows_case(tmp_path, lambda rows: None, beam, ct_image(centre=(6000.0, 0.0, 0.0)))
-    assert_identical(plan, rows, ct, 'HFS', lit=False)
+    assert_identical(plan, rows, ct, 'HFS', lit=False, fallback=True)
 
 
 def _mixed_beams():
@@ -276,7 +298,32 @@ def _mixed_beams():
 @pytest.mark.parametrize('reverse', [False, True], ids=['forward', 'reversed'])
 def test_ac1_mixed_fallback_plan(tmp_path, reverse):
     beams = _mixed_beams()
-    check(tmp_path, beams[::-1] if reverse else beams)
+    check(tmp_path, beams[::-1] if reverse else beams, fallback=True)
+
+
+@NO_WARNINGS
+@pytest.mark.parametrize('reverse', [False, True], ids=['forward', 'reversed'])
+def test_ac2_mixed_plan_runs_both_paths_in_point_order(tmp_path, monkeypatch, reverse):  # float32 sums are order-sensitive
+    ct = ct_image()
+    plan = written(tmp_path, _mixed_beams()[::-1] if reverse else _mixed_beams())
+    rows = plan_table.plan_rows(plan, ct)
+    monkeypatch.setattr(beam_volume, 'CHUNK_VOXELS', 61 * 61 * 20)  # four chunks
+    CALLS.clear()
+    beam_volume.beam_mu(plan, rows, ct, 'HFS')
+    paths = {path for path, _ in CALLS}
+    assert paths == {'fallback', 'rows'}
+    per_chunk = len(CALLS) // 4
+    assert len(CALLS) == 4 * per_chunk and all(CALLS[i:i + per_chunk] == CALLS[:per_chunk] for i in range(0, len(CALLS), per_chunk))
+    points = beam_volume._points(plan, rows, 'HFS', grid(ct))
+    expected = ['fallback' if p['sad'] == 400.0 else 'rows' for p in points]
+    assert [path for path, _ in CALLS[:per_chunk]] == expected
+
+
+@NO_WARNINGS
+@pytest.mark.parametrize('fraction', [0.0, 1e9], ids=['all_rows', 'all_fallback'])
+def test_ac2_fallback_threshold_does_not_change_the_output(tmp_path, monkeypatch, fraction):
+    monkeypatch.setattr(beam_volume, 'FALLBACK_DEPTH_FRACTION', fraction)
+    check(tmp_path, mlc_beam(gantry=45), fallback=fraction > 1)
 
 
 @NO_WARNINGS
