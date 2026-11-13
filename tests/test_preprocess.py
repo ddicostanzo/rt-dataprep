@@ -7,12 +7,15 @@ import inspect
 import json
 import logging
 import os
+import pathlib
 import re
 import time
 import traceback
 import weakref
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import series_files as sf
 import SimpleITK as sitk
@@ -1560,7 +1563,6 @@ GEOMETRIC = [SMALL, PreprocessSteps(resample=True), PreprocessSteps(reshape=True
 
 @pytest.mark.parametrize('steps', GEOMETRIC, ids=['four_steps', 'resample', 'reshape'])
 def test_a_geometric_run_rewrites_the_plan_parquet_isocenter_index_for_the_final_ct(tmp_path, steps):
-    import pyarrow.parquet as pq
 
     from rt_dataprep import plan_table
     converted, folder = photon_converted(tmp_path)
@@ -1587,8 +1589,6 @@ def test_a_geometric_run_rewrites_the_plan_parquet_isocenter_index_for_the_final
 
 
 def test_a_geometric_run_leaves_out_an_unreadable_or_non_schema_plan_parquet(tmp_path, caplog):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
     converted, folder = photon_converted(tmp_path)
     for k, writer in enumerate([lambda path: path.write_bytes(b'not parquet'),
                                 lambda path: pq.write_table(pa.table({'isocenter_x': [1.0]}), path)]):
@@ -1602,6 +1602,38 @@ def test_a_geometric_run_leaves_out_an_unreadable_or_non_schema_plan_parquet(tmp
         assert not (done / conv.PLAN_NAME).exists() and conv.PLAN_NAME not in plan_row(report).files
         assert [r for r in sf.read(done) if r['kind'] == 'plan'] == []
         assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and 'roi_interpreted_type' not in r.getMessage()] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+
+
+def test_a_full_length_plan_parquet_with_a_corrupt_footer_drops_only_that_table(tmp_path, caplog):
+    converted, folder = photon_converted(tmp_path)
+    path = folder / conv.PLAN_NAME
+    data = bytearray(path.read_bytes())
+    data[-24:-8] = b'\xff' * 16  # the footer thrift just before <4-byte length>PAR1; same length, tail intact
+    path.write_bytes(bytes(data))
+    with pytest.raises(OSError):  # plain OSError, not ArrowInvalid, is what this test pins
+        pq.read_table(path)
+    out = tmp_path / 'out'
+    with caplog.at_level(logging.WARNING, logger='rt_dataprep.preprocess'):
+        report = pre.preprocess(converted, out, SMALL)
+    assert [(r.folder, r.outcome, r.reason) for r in report.rows] == [('plan_1', 'preprocessed', '')]
+    done = out / folder.parent.name / 'plan_1'
+    assert not (done / conv.PLAN_NAME).exists() and conv.PLAN_NAME not in plan_row(report).files
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and 'roi_interpreted_type' not in r.getMessage()] == [f'preprocess: {pre.REASON_PLAN_INDEX}']
+
+
+def test_a_read_error_on_the_plan_parquet_refuses_the_patient(tmp_path, monkeypatch):
+    converted, folder = photon_converted(tmp_path)
+    real = pathlib.Path.read_bytes
+
+    def read_bytes(self):
+        if self.name == conv.PLAN_NAME:
+            raise OSError('simulated read failure')
+        return real(self)
+
+    monkeypatch.setattr(pathlib.Path, 'read_bytes', read_bytes)
+    report = pre.preprocess(converted, tmp_path / 'out', SMALL)
+    assert [(r.folder, r.outcome, r.reason) for r in report.rows] == [('', 'refused', pre.REASON_IO_ERROR)]
+    assert not (tmp_path / 'out' / folder.parent.name).exists()
 
 
 BEAM_FILE = pre.output_name(conv.BEAM_NAME, SMALL)
@@ -1727,7 +1759,6 @@ def test_an_ion_plan_parquet_is_copied_byte_identical_on_a_non_geometric_run(tmp
 
 @pytest.mark.parametrize('steps', GEOMETRIC, ids=['four_steps', 'resample', 'reshape'])
 def test_a_geometric_run_rewrites_the_ion_plan_parquet_isocenter_index_for_the_final_ct(tmp_path, steps):
-    import pyarrow.parquet as pq
 
     from rt_dataprep import ion_plan_table
     folder, _ = write_plan(tmp_path / 'converted')
@@ -3425,7 +3456,6 @@ def test_a_dwell_parquet_is_copied_byte_identical_on_a_non_geometric_run(tmp_pat
 
 @pytest.mark.parametrize('steps', GEOMETRIC, ids=['four_steps', 'resample', 'reshape'])
 def test_a_geometric_run_rewrites_the_dwell_parquet_position_index_for_the_final_ct(tmp_path, steps):
-    import pyarrow.parquet as pq
 
     from rt_dataprep import dwell_table
     folder, _ = write_plan(tmp_path / 'converted')
@@ -3471,7 +3501,6 @@ def test_the_plan_index_reason_names_all_three_plan_tables():
 
 
 def test_index_plan_table_without_a_prefix_writes_the_isocenter_index_columns(tmp_path):
-    import pyarrow.parquet as pq
 
     converted, folder = photon_converted(tmp_path)
     final = sitk.ReadImage(str(folder / conv.CT_NAME))

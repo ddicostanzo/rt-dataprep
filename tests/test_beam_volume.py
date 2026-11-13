@@ -296,6 +296,13 @@ def test_aperture_of_a_jaws_only_row(tmp_path):
     assert jaws == {'x': (-30.0, 40.0), 'y': (-50.0, 60.0)} and leaves is None
 
 
+@pytest.mark.parametrize('boundaries', [[0.0], []], ids=['one', 'none'])
+def test_aperture_is_none_for_fewer_than_two_leaf_boundaries(tmp_path, boundaries):
+    row = plan_table.plan_rows(written(tmp_path, [static(mlc=True)]), ct_image())[0]
+    assert beam_volume.aperture(row) is not None
+    assert beam_volume.aperture(row | dict(leaf_position_boundaries=boundaries, mlc_positions=[])) is None
+
+
 def test_aperture_of_an_mlc_row(tmp_path):
     beam = static(mlc=True, pairs=2)
     set_mlc(beam, [-10.0, 0.0, 10.0], {0: ([-5.0, 7.0], [5.0, 3.0])})  # pair 1 has X1 >= X2: closed
@@ -323,6 +330,24 @@ def test_zero_table_top_angles_are_modelled(tmp_path):
     assert lit(volume(tmp_path, beam))[1].size
 
 
+@pytest.mark.parametrize('keyword', beam_volume.TABLE_TOP_ANGLES)
+def test_ac8_a_setup_beam_with_a_non_zero_table_top_angle_is_not_refused(tmp_path, keyword):  # setup beams add no dose
+    setup = sd.photon_beam(2, kind='setup')
+    for point in setup['ControlPointSequence']:
+        point[keyword] = 5.0
+    assert lit(volume(tmp_path, [static(), setup]))[1].size
+
+
+@pytest.mark.parametrize('keyword', beam_volume.TABLE_TOP_ANGLES)
+def test_ac8_table_top_angle_first_listed_on_a_later_control_point_is_refused(tmp_path, keyword):
+    beam = static()
+    beam['ControlPointSequence'][0].update({k: 0.0 for k in beam_volume.TABLE_TOP_ANGLES})
+    beam['ControlPointSequence'][1][keyword] = 5.0
+    with pytest.raises(CaseRefused) as raised:
+        volume(tmp_path, beam)
+    assert str(raised.value) == REASON_BEAM_VOLUME
+
+
 @pytest.mark.parametrize('position', ['HFDR', 'hfs', '', None])
 def test_ac8_unsupported_patient_position_is_refused(tmp_path, position):
     with pytest.raises(CaseRefused) as raised:
@@ -343,6 +368,41 @@ def test_ac8_setup_position_must_match_the_ct(tmp_path, setup, ok):  # #288: els
     if ok:
         assert lit(run())[1].size
         return
+    with pytest.raises(CaseRefused) as raised:
+        run()
+    assert str(raised.value) == REASON_BEAM_VOLUME
+
+
+def _with_setups(tmp_path, *setups):  # each setup is a dict of PatientPosition / PatientAdditionalPosition; None = absent
+    ct = ct_image()
+    plan = written(tmp_path, [static()])
+    items = []
+    for number, setup in enumerate(setups, 1):
+        item = sd.Dataset()
+        item.PatientSetupNumber = number
+        for keyword, value in setup.items():
+            if value is not None:
+                setattr(item, keyword, value)
+        items.append(item)
+    plan.PatientSetupSequence = items
+    return lambda: beam_volume.beam_mu(plan, plan_table.plan_rows(plan, ct), ct, 'HFS')
+
+
+@pytest.mark.parametrize('position', ['', None])
+def test_ac8_setup_item_with_no_position_but_an_additional_position_is_refused(tmp_path, position):  # #335
+    run = _with_setups(tmp_path, {'PatientPosition': position, 'PatientAdditionalPosition': 'arms up'})
+    with pytest.raises(CaseRefused) as raised:
+        run()
+    assert str(raised.value) == REASON_BEAM_VOLUME
+
+
+def test_ac8_setup_item_with_a_position_and_an_additional_position_is_accepted(tmp_path):  # #335: PS3.3 C.8.8.12
+    run = _with_setups(tmp_path, {'PatientPosition': 'HFS', 'PatientAdditionalPosition': 'arms up'})
+    assert lit(run())[1].size
+
+
+def test_ac8_every_setup_item_must_match_the_ct(tmp_path):  # #335: one matching item does not excuse a mirrored one
+    run = _with_setups(tmp_path, {'PatientPosition': 'HFS'}, {'PatientPosition': 'FFS'})
     with pytest.raises(CaseRefused) as raised:
         run()
     assert str(raised.value) == REASON_BEAM_VOLUME

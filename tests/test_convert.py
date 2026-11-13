@@ -2119,7 +2119,7 @@ def test_a_plan_whose_beam_mu_is_refused_for_table_top_pitch_still_gets_fluence(
 
 
 def test_fluence_mu_has_one_slice_per_beam_and_its_row_lists_the_beam_numbers_in_slice_order(tree):
-    plan, rows, out = photon_plan(tree, beams=[sd.photon_beam(7), sd.photon_beam(2), sd.photon_beam(5, kind='3d')], rois=[BOX])
+    plan, rows, out = photon_plan(tree, beams=[sd.photon_beam(7), sd.photon_beam(2), sd.photon_beam(5, kind='3d')], rois=[BOX], plan_meta=dict(frame_uid=sd.generate_uid()))
     folder = out / PID / 'plan_1'
     image = read(folder / 'fluence_mu.nii.gz')
     assert image.GetSize() == (400, 400, 3) and image.GetPixelID() == sitk.sitkFloat32
@@ -2130,7 +2130,7 @@ def test_fluence_mu_has_one_slice_per_beam_and_its_row_lists_the_beam_numbers_in
     assert list(fluence_row['dicom']) == [*plan_row['dicom'], 'beam_numbers'] and fluence_row['dicom']['beam_numbers'] == '7;2;5'
     assert {k: v for k, v in fluence_row['dicom'].items() if k != 'beam_numbers'} == plan_row['dicom']
     assert fluence_row == plan_row | dict(file='fluence_mu.nii.gz', kind='fluence', dicom=fluence_row['dicom'])
-    assert fluence_row['modality'] == 'RTPLAN' and fluence_row['frame_of_reference_uid'] == plan_row['frame_of_reference_uid']
+    assert fluence_row['modality'] == 'RTPLAN' and fluence_row['frame_of_reference_uid'] == plan_row['frame_of_reference_uid'] != ''
 
 
 def test_a_plan_with_no_plan_rows_logs_no_fluence_line_and_writes_no_fluence(tree, caplog):
@@ -2199,6 +2199,17 @@ def pbs_plan(tree, beams=None, **kwargs):
     """(plan, rows, out) of a converted tree whose plan is a proton PBS RT Ion plan of `beams` (default: the writer's two)."""
     plan_meta = dict(tags=dict(RTPlanLabel='SYNTHETIC_PLAN'), **({'beams': beams} if beams else {}), **kwargs.pop('plan_meta', {}))  # no label argument
     return one_plan(tree, plan_meta=plan_meta, plan_writer=sd.write_pbs_rtplan, **kwargs)
+
+
+@pytest.mark.parametrize('error', [pa.ArrowInvalid, pa.ArrowTypeError])
+def test_an_arrow_error_in_ion_to_table_only_drops_ion_plan_parquet(tree, caplog, monkeypatch, error):  # #299: same #276 contract as plan.parquet
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(ion_plan_table, 'to_table', lambda rows: (_ for _ in ()).throw(error('SYNTHETIC_VALUE')))
+    plan, rows, out = pbs_plan(tree, rois=[BOX])
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
+    assert not (out / PID / 'plan_1' / 'ion_plan.parquet').exists() and (out / PID / 'plan_1' / 'planning_ct.nii.gz').exists()
+    assert len(logged(caplog, ion_plan_table.REASON_ION_PLAN)) == 1 and 'SYNTHETIC_VALUE' not in caplog.text
+    assert_no_leak(caplog, out, secrets_of(plan, tree))
 
 
 def test_a_pbs_plan_converts_with_ion_plan_parquet_and_none_of_the_photon_files(tree):
@@ -2312,6 +2323,17 @@ def hdr_plan(tree, channels=None, **kwargs):
     """(plan, rows, out) of a converted tree whose plan is an HDR brachy plan (two channels x three dwells by default)."""
     plan_meta = dict(treatment_type='HDR', sources=[sd.brachy_source()], channels=channels or default_channels(), **kwargs.pop('plan_meta', {}))
     return one_plan(tree, plan_meta=plan_meta, **kwargs)
+
+
+@pytest.mark.parametrize('error', [pa.ArrowInvalid, pa.ArrowTypeError])
+def test_an_arrow_error_in_dwell_to_table_only_drops_dwell_parquet(tree, caplog, monkeypatch, error):  # #299: same #276 contract as plan.parquet
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(dwell_table, 'to_table', lambda rows: (_ for _ in ()).throw(error('SYNTHETIC_VALUE')))
+    plan, rows, out = hdr_plan(tree, rois=[BOX])
+    assert row_of(rows).outcome == conv.OUTCOME_CONVERTED
+    assert not (out / PID / 'plan_1' / 'dwell.parquet').exists() and (out / PID / 'plan_1' / 'planning_ct.nii.gz').exists()
+    assert len(logged(caplog, dwell_table.REASON_DWELL)) == 1 and 'SYNTHETIC_VALUE' not in caplog.text
+    assert_no_leak(caplog, out, secrets_of(plan, tree))
 
 
 def test_an_hdr_plan_converts_with_dwell_parquet_after_the_other_files(tree):

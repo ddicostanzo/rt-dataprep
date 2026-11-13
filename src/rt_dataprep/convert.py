@@ -433,7 +433,7 @@ def _table(to_table, rows, reason):
         return None
     try:
         return to_table(rows)
-    except (pa.ArrowInvalid, pa.ArrowTypeError):
+    except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError):
         pass
     log.warning('convert: %s', reason)  # outside the except: nothing chained
     return None

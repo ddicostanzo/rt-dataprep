@@ -782,10 +782,11 @@ def native_retained(native, final, region=None):
 
 def index_plan_table(source, path, final, schema=plan_table.SCHEMA, prefix='isocenter'):
     """Write `source` (plan.parquet, ion_plan.parquet with schema=ion_plan_table.ION_SCHEMA, or dwell.parquet with schema=dwell_table.DWELL_SCHEMA and prefix='position') to `path` with <prefix>_i/j/k replaced by the continuous index of
-    <prefix>_x/y/z on `final`; False, nothing written, when it is unreadable or not `schema` (compared as fields: file metadata is not part of it). An OSError propagates."""
+    <prefix>_x/y/z on `final`; False, nothing written, when it is corrupt (a parse error of any kind) or not `schema` (compared as fields: file metadata is not part of it). Only an OSError reading the file, or from the write, propagates."""
+    data = source.read_bytes()  # a file-system error here propagates; the parse below is from memory, so an OSError out of it is a corrupt file (a full-length bad footer or page raises plain OSError)
     try:
-        table = pq.read_table(source)
-    except pa.ArrowInvalid:
+        table = pq.read_table(pa.BufferReader(data))
+    except (OSError, pa.ArrowException):  # every Arrow error class; a MemoryError-like ArrowMemoryError is one too
         return False
     if table.schema != schema:
         return False
@@ -821,7 +822,8 @@ def preprocess_plan(plan_dir, out_dir, steps):
             shutil.copyfile(source, out_dir / name)
         else:  # one image at a time: read, resampled, written, released
             native = read_image(source)
-            if kind != 'beam':  # a beam volume is a field footprint: a reshape that cuts it is neither refused nor counted, and it has no `retained`
+            checked = kind != 'beam'  # a beam volume is a field footprint: a reshape that cuts it is neither refused nor counted, and it has no `retained`
+            if checked:
                 if steps.allow_crop:
                     crossed = crosses_final(native, final)
                 else:
@@ -831,7 +833,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
                 # a dose is judged on its dose_region; crosses_final, process_dose and has_voxels keep the unthresholded native
                 cell = repr(native_retained(native, final, functools.partial(dose_region, gy=steps.dose_retained_gy, fraction=steps.dose_retained_fraction) if kind == 'dose' else None) if crossed else 1.0)  # exactly 1.0 when nothing lies outside
             image = process_dose(native, final) if kind in ('dose', 'beam') else process_mask(native, final, steps)
-            if kind != 'beam' and has_voxels(native) and not has_voxels(image):
+            if checked and has_voxels(native) and not has_voxels(image):
                 raise CaseRefused(REASON_CROP)
             if kind == 'mask' and steps.min_mask_retention is not None:
                 ratio = mask_retention(native, image, steps.legacy_linear_masks)

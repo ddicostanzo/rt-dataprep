@@ -1,0 +1,175 @@
+{
+  "metadata": {
+    "title": "Hardening sprint: #299 #290 #291 #295 #284 #335 #327 #325",
+    "spec": "docs/specs/2026-11-12-hardening-sprint.md",
+    "issues": [
+      299,
+      290,
+      291,
+      295,
+      284,
+      335,
+      327,
+      325
+    ],
+    "branch": "feat/hardening-sprint",
+    "created": "2026-11-13"
+  },
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "#284: a corrupt full-length plan table drops only that table",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify"
+      },
+      "test_approach": "RED first: in tests/test_preprocess.py, beside test_a_geometric_run_leaves_out_an_unreadable_or_non_schema_plan_parquet, (a) write a full-length plan.parquet with its footer thrift bytes overwritten (same file length, trailing <len>PAR1 intact), assert in-test that pq.read_table raises OSError and not ArrowInvalid, then a geometric preprocess run gives ('plan_1','preprocessed',''), no plan.parquet, exactly one REASON_PLAN_INDEX warning, no REASON_IO_ERROR. Must fail on current code. (b) monkeypatch pathlib.Path.read_bytes to raise OSError only for plan.parquet: the patient gets REASON_IO_ERROR. See spec docs/specs/2026-11-12-hardening-sprint.md #284. Test (b) is red on current code (which never calls read_bytes) and needs a geometric run. Corruption recipe: overwrite ~16 bytes just before the trailing <4-byte footer length>PAR1 with 0xFF; if the in-test assert reports ArrowInvalid instead of OSError, corrupt bytes mid-file (a data page) instead, or the snappy block. The stress test confirmed footer, data-page and snappy corruption each raise OSError.",
+      "criteria": [
+        "index_plan_table reads source.read_bytes() outside any try (an OSError there propagates), then parses pq.read_table(pa.BufferReader(data)) catching (OSError, pa.ArrowInvalid, pa.ArrowNotImplementedError, pa.ArrowTypeError) and returns False",
+        "Test (a) fails on the pre-change code and passes after; its corruption is asserted to raise OSError",
+        "Test (b) passes: a read_bytes OSError gives REASON_IO_ERROR for the patient",
+        "The later write's OSError still propagates (not inside the try)",
+        "index_plan_table docstring updated to say a parse error of any kind returns False and only a read OSError propagates",
+        "Full suite and ruff pass"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "#290: one beam-exemption flag in the preprocess image loop",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify"
+      },
+      "test_approach": "Pure refactor, no new test: existing preprocess tests cover beam, dose and mask paths and must stay green.",
+      "criteria": [
+        "The image branch sets checked = kind != 'beam' once (keeping the existing beam-footprint comment on it) and both former kind != 'beam' conditions use it",
+        "Not kind in ('dose','mask')",
+        "No behavior change: full suite and ruff pass"
+      ]
+    },
+    {
+      "id": "task-03",
+      "title": "#335: refuse a setup item whose position cannot be checked",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/beam_volume.py",
+        "tests/test_beam_volume.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/beam_volume.py": "modify",
+        "tests/test_beam_volume.py": "modify"
+      },
+      "test_approach": "RED first in tests/test_beam_volume.py, next to the #288 setup-position tests: (1) a setup item with PatientPosition '' (and one with it absent) plus PatientAdditionalPosition set is refused with REASON_BEAM_VOLUME; (2) PatientPosition HFS plus PatientAdditionalPosition on an HFS CT is accepted; (3) two setup items, one HFS matching and one FFS, on an HFS CT is refused. Red mutation for (3): all -> any in the setup check; apply, see red, revert. Red mutation for (2): refuse whenever PatientAdditionalPosition is non-empty.",
+      "criteria": [
+        "_points refuses (REASON_BEAM_VOLUME) a PatientSetupSequence item with empty/absent PatientPosition and non-empty PatientAdditionalPosition",
+        "An item with a valid PatientPosition plus PatientAdditionalPosition goes through the existing PatientPosition == CT check unchanged",
+        "Test (1) fails on pre-change code; (3) fails under the all->any mutation",
+        "Full suite and ruff pass",
+        "Red mutations reverted: the only src/ change is the new setup-item condition in beam_volume._points"
+      ]
+    },
+    {
+      "id": "task-04",
+      "title": "#291: table-top check test gaps",
+      "depends_on": [
+        "task-03"
+      ],
+      "files": [
+        "tests/test_beam_volume.py"
+      ],
+      "file_ops": {
+        "tests/test_beam_volume.py": "modify"
+      },
+      "test_approach": "Tests only, behavior already correct. (1) a SETUP beam with a non-zero TableTopPitchAngle (and the plan otherwise valid) is not refused; (2) a treatment beam whose control point 0 is flat but control point 1 (or later) lists a non-zero table-top angle is refused. Red mutations: make _table_top_flat also check SETUP beams -> (1) red; make it check only control point 0 -> (2) red. Apply each, see red, revert. Record the red runs in docs/plans/hardening-sprint/findings.md.",
+      "criteria": [
+        "Both tests added and passing",
+        "Each test is shown red under its named mutation (recorded in docs/plans/hardening-sprint/findings.md)",
+        "360.0 behavior is not changed",
+        "Full suite and ruff pass",
+        "No src/ file changed (every red mutation is reverted)"
+      ]
+    },
+    {
+      "id": "task-05",
+      "title": "#327 + #299: catch OverflowError in convert._table; Arrow-error pins for ion and dwell tables",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/convert.py",
+        "tests/test_convert.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/convert.py": "modify",
+        "tests/test_convert.py": "modify"
+      },
+      "test_approach": "Add OverflowError to the caught tuple in convert._table (no test: unreachable from IS-VR inputs). Tests: mirror test_an_arrow_error_in_to_table_only_drops_that_plans_parquet for ion_plan_table.to_table (pbs_plan builder, REASON_ION_PLAN, ion_plan.parquet absent) and dwell_table.to_table (hdr_plan builder, dwell_table's reason, dwell.parquet absent), parametrized over pa.ArrowInvalid and pa.ArrowTypeError: plan outcome converted, exactly one warning with the table's reason, the SYNTHETIC value not logged, assert_no_leak. Red mutation: replace the _table call with _header_call(to_table, rows) at that site; apply, see red, revert.",
+      "criteria": [
+        "convert._table catches (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError)",
+        "Ion and dwell Arrow-error tests added for both error types and passing",
+        "Each is shown red under the named mutation",
+        "Full suite and ruff pass",
+        "The only src/ change is the except tuple in convert._table (the red mutation is reverted)"
+      ]
+    },
+    {
+      "id": "task-06",
+      "title": "#295 + #325: fluence and aperture test gaps",
+      "depends_on": [
+        "task-04",
+        "task-05"
+      ],
+      "files": [
+        "tests/test_fluence.py",
+        "tests/test_beam_volume.py",
+        "tests/test_convert.py"
+      ],
+      "file_ops": {
+        "tests/test_fluence.py": "modify",
+        "tests/test_beam_volume.py": "modify",
+        "tests/test_convert.py": "modify"
+      },
+      "test_approach": "Tests only, behavior already correct; each names its red mutation (apply, see red, revert, record in docs/plans/hardening-sprint/findings.md). See spec docs/specs/2026-11-12-hardening-sprint.md #295/#325. (1) call beam_volume.aperture(row) directly with one leaf boundary -> not modelled (mutation: remove only the `len(boundaries) < 2 or` clause; np.all of an empty diff is True). (2) fluence_mu: a not-modelled aperture on a weight-0 control point is refused. Hand-build it: take plan_rows output and set number_of_blocks=1 or mlc_type='MLCY' on the weight-0 row (mutation: call aperture only when weight != 0). (3) float64 accumulation: plan_rows gives control point 0 mu=0, so build the plan through the maps helper with cumulative weights [0, 2^25, 2^25, 2^25+2, 2^25+2, 2^25+4] and BeamMeterset equal to the final weight (MU 0, 2^25, 0, 2, 0, 2; trapezoid weights 2^24, 2^24, 1, 1, 1, 1). Alternatively, hand-build rows with mu=[2^25, 0, 2, 0, 2]. Use integer jaw edges so the checked pixel's overlap is exactly 1.0. The expected pixel is exactly 2^25+4; a float32 accumulator gives 2^25, because float32 spacing there is 4 (mutation: np.float64 -> np.float32 accumulator). (4) exactly-200 mm field accepted at -X, +Y, -Y (mutation: < -LIMIT -> <= -LIMIT, etc.). (5) a SETUP beam sharing a BeamNumber with a treatment beam is accepted (mutation: drop the SETUP filter in the duplicate check). (6) AC1 all-zero-outside checks: the field covers rows 170..229 and columns 150..249, so check a[0,:170], a[0,230:], a[0,:,:150] and a[0,:,250:] are all zero. (7) the convert fluence test at tests/test_convert.py:~2133: pass frame_uid=sd.generate_uid() and assert the compared UID is non-empty. (8) #325: plan_rows refuses duplicate BeamNumbers first, so build rows from a plan without duplicates, then call fluence_mu(dup_plan, rows) where dup_plan has two treatment beams sharing a BeamNumber -> REASON_FLUENCE (mutation: delete the duplicate check). For (3), first check that plan_rows accepts BeamMeterset 2^25+4; if it bounds it, hand-build the rows.",
+      "criteria": [
+        "All eight items have a test, passing",
+        "Items 1-5 and 8 each shown red under their named mutation",
+        "No src/ file changed",
+        "Full suite and ruff pass"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01",
+      "task-03",
+      "task-05"
+    ],
+    [
+      "task-02",
+      "task-04"
+    ],
+    [
+      "task-06"
+    ]
+  ],
+  "Deferred": [
+    "Real-data bullets of #327, #325, #335 and the #291 360-degree tolerance: posted as one comment on #283 before merge.",
+    "Sharing _refuse/_check across modules (#290): declined by the owner; stated in the PR body."
+  ],
+  "orchestrator_steps": [
+    "Before merge: comment on #283 with the moved bullets.",
+    "PR body: eight separate Closes #N lines."
+  ],
+  "decisions": [
+    "#284: the parse-side except also catches ArrowNotImplementedError and ArrowTypeError (advisor suggestion, consistent with the owner's choice that parse errors drop only the table; the bytes are in memory, so none of these is a file-system error).",
+    "#299: the issue asked that the error propagate; since #276, convert._table catches Arrow errors, so the delivered pin is that the plan converts and only that table is dropped. Moving the call into _header_call would turn that red."
+  ]
+}
