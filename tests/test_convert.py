@@ -2119,7 +2119,7 @@ def test_a_plan_whose_beam_mu_is_refused_for_table_top_pitch_still_gets_fluence(
 
 
 def test_fluence_mu_has_one_slice_per_beam_and_its_row_lists_the_beam_numbers_in_slice_order(tree):
-    plan, rows, out = photon_plan(tree, beams=[sd.photon_beam(7), sd.photon_beam(2), sd.photon_beam(5, kind='3d')], rois=[BOX])
+    plan, rows, out = photon_plan(tree, beams=[sd.photon_beam(7), sd.photon_beam(2), sd.photon_beam(5, kind='3d')], rois=[BOX], plan_meta=dict(frame_uid=sd.generate_uid()))
     folder = out / PID / 'plan_1'
     image = read(folder / 'fluence_mu.nii.gz')
     assert image.GetSize() == (400, 400, 3) and image.GetPixelID() == sitk.sitkFloat32
@@ -2130,7 +2130,7 @@ def test_fluence_mu_has_one_slice_per_beam_and_its_row_lists_the_beam_numbers_in
     assert list(fluence_row['dicom']) == [*plan_row['dicom'], 'beam_numbers'] and fluence_row['dicom']['beam_numbers'] == '7;2;5'
     assert {k: v for k, v in fluence_row['dicom'].items() if k != 'beam_numbers'} == plan_row['dicom']
     assert fluence_row == plan_row | dict(file='fluence_mu.nii.gz', kind='fluence', dicom=fluence_row['dicom'])
-    assert fluence_row['modality'] == 'RTPLAN' and fluence_row['frame_of_reference_uid'] == plan_row['frame_of_reference_uid']
+    assert fluence_row['modality'] == 'RTPLAN' and fluence_row['frame_of_reference_uid'] == plan_row['frame_of_reference_uid'] != ''
 
 
 def test_a_plan_with_no_plan_rows_logs_no_fluence_line_and_writes_no_fluence(tree, caplog):

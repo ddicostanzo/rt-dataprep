@@ -296,6 +296,13 @@ def test_aperture_of_a_jaws_only_row(tmp_path):
     assert jaws == {'x': (-30.0, 40.0), 'y': (-50.0, 60.0)} and leaves is None
 
 
+@pytest.mark.parametrize('boundaries', [[0.0], []], ids=['one', 'none'])
+def test_aperture_is_none_for_fewer_than_two_leaf_boundaries(tmp_path, boundaries):
+    row = plan_table.plan_rows(written(tmp_path, [static(mlc=True)]), ct_image())[0]
+    assert beam_volume.aperture(row) is not None
+    assert beam_volume.aperture(row | dict(leaf_position_boundaries=boundaries, mlc_positions=[])) is None
+
+
 def test_aperture_of_an_mlc_row(tmp_path):
     beam = static(mlc=True, pairs=2)
     set_mlc(beam, [-10.0, 0.0, 10.0], {0: ([-5.0, 7.0], [5.0, 3.0])})  # pair 1 has X1 >= X2: closed

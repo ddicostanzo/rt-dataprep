@@ -53,7 +53,7 @@ def test_ac1_static_jaw_field(tmp_path):
     a = sitk.GetArrayFromImage(image)
     assert a.shape == (1, 400, 400) and a.dtype == np.float32 and numbers == [1]
     assert np.allclose(a[0, 171:229, 151:249], 100.0, atol=1e-4, rtol=0)  # Y -29..29, X -49..49
-    assert a[0, :169].sum() == 0 and a[0, 231:].sum() == 0 and a[0, :, :149].sum() == 0 and a[0, :, 251:].sum() == 0
+    assert not a[0, :170].any() and not a[0, 230:].any() and not a[0, :, :150].any() and not a[0, :, 250:].any()  # rows 170..229, columns 150..249 are the field
     assert image.GetOrigin() == (-199.5, -199.5, 0.0) and image.GetSpacing() == (1.0, 1.0, 1.0)
     assert image.GetDirection() == (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
 
@@ -174,6 +174,57 @@ def test_ac8_edge_at_200_is_inside_and_200_01_is_not(tmp_path):
     refused(tmp_path, static(jaws=(-100.0, 200.01, -50.0, 50.0)))
     refused(tmp_path, static(jaws=(-200.01, 100.0, -50.0, 50.0)))
     refused(tmp_path, static(jaws=(-100.0, 100.0, -50.0, 200.01)))
+
+
+@pytest.mark.parametrize('jaws', [(-200.0, 100.0, -50.0, 50.0), (-100.0, 100.0, -50.0, 200.0), (-100.0, 100.0, -200.0, 50.0)],
+                         ids=['-X', '+Y', '-Y'])
+def test_ac8_edge_at_exactly_200_is_inside_at_minus_x_plus_y_and_minus_y(tmp_path, jaws):
+    assert array(tmp_path, static(jaws=jaws)).sum() > 0
+
+
+@pytest.mark.parametrize('order', ['setup_last', 'setup_first'])
+def test_ac8_a_setup_beam_sharing_a_beam_number_with_a_treatment_beam_is_accepted(tmp_path, order):
+    beams = [static(number=1), sd.photon_beam(1, kind='setup')]
+    image, numbers = maps(tmp_path, beams if order == 'setup_last' else beams[::-1])
+    assert numbers == [1] and sitk.GetArrayFromImage(image).max() == pytest.approx(100.0)
+
+
+def test_ac8_duplicate_treatment_beam_numbers_are_refused_by_fluence_itself(tmp_path):  # #325: not only by plan_rows
+    rows = plan_table.plan_rows(written(tmp_path, [static(number=1), static(number=2)]), ct_image())
+    duplicated = written(tmp_path, [static(number=1), static(number=1)])
+    with pytest.raises(CaseRefused) as raised:
+        fluence.fluence_mu(duplicated, rows)
+    assert str(raised.value) == REASON_FLUENCE
+
+
+def test_accumulation_is_float64_so_small_weights_are_not_lost_beside_a_large_one(tmp_path):
+    big = 2 ** 25  # float32 spacing is 4 from here: 2^25 + 1 and + 2 round back down
+    beam = static(jaws=(-50.0, 50.0, -30.0, 30.0), mu=float(big + 4))
+    beam['ControlPointSequence'][0]['CumulativeMetersetWeight'] = 0.0
+    points = beam['ControlPointSequence'] = beam['ControlPointSequence'][:1]
+    for i, weight in enumerate((big, big, big + 2, big + 2, big + 4), start=1):
+        points.append(dict(ControlPointIndex=i, CumulativeMetersetWeight=float(weight)))
+    beam.update(NumberOfControlPoints=6, FinalCumulativeMetersetWeight=float(big + 4))
+    plan = written(tmp_path, [beam])
+    rows = plan_table.plan_rows(plan, ct_image())
+    assert [r['mu'] for r in rows] == [0.0, big, 0.0, 2.0, 0.0, 2.0]
+    a = sitk.GetArrayFromImage(fluence.fluence_mu(plan, rows)[0])
+    assert a[0, 200, 200] == big + 4  # overlap is exactly 1 mm2; trapezoid weights are 2^24, 2^24, 1, 1, 1, 1
+
+
+@pytest.mark.parametrize('spoil', [dict(number_of_blocks=1), dict(mlc_type='MLCY')], ids=['blocks', 'mlcy'])
+def test_ac8_a_not_modelled_aperture_on_a_weight_zero_control_point_is_still_refused(tmp_path, spoil):
+    beam = static(jaws=(-50.0, 50.0, -50.0, 50.0), mu=40.0)
+    beam['ControlPointSequence'][1]['CumulativeMetersetWeight'] = 0.0
+    beam['ControlPointSequence'].append(dict(ControlPointIndex=2, CumulativeMetersetWeight=1.0))
+    beam['NumberOfControlPoints'] = 3
+    plan = written(tmp_path, [beam])
+    rows = plan_table.plan_rows(plan, ct_image())
+    assert [r['mu'] for r in rows] == [0.0, 0.0, 40.0] and fluence.fluence_mu(plan, rows)[0]  # row 0 has weight 0: accepted as built
+    rows[0].update(spoil)
+    with pytest.raises(CaseRefused) as raised:
+        fluence.fluence_mu(plan, rows)
+    assert str(raised.value) == REASON_FLUENCE
 
 
 def test_ac8_table_top_angle_and_missing_sad_are_accepted(tmp_path):
