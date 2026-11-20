@@ -650,6 +650,26 @@ def test_a_second_organize_run_on_a_locked_root_exits_1_with_the_fixed_reason(tm
     assert not (out / org.REPORT_NAME).exists()
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='no flock')
+@pytest.mark.parametrize('command, flags', [('convert', []), ('preprocess', ['--rescale'])])
+def test_a_second_convert_or_preprocess_run_on_a_locked_root_exits_1_with_the_fixed_reason(tmp_path, command, flags):
+    # #359: a second run's recover() would delete the partial folders the first run is writing
+    import fcntl  # noqa: PLC0415
+    import importlib  # noqa: PLC0415
+    stage = importlib.import_module(f'rt_dataprep.{command}')
+    src, out = tmp_path / 'src', tmp_path / 'out'
+    src.mkdir()
+    out.mkdir()
+    with open(out / stage.LOCK_NAME, 'a') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run([sys.executable, '-m', 'rt_dataprep', command, str(src), str(out), *flags], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert result.stderr == f'rt_dataprep: {stage.REASON_LOCKED}\n' and result.stdout == ''
+    assert not (out / stage.REPORT_NAME).exists()
+    again = subprocess.run([sys.executable, '-m', 'rt_dataprep', command, str(src), str(out), *flags], capture_output=True, text=True)
+    assert again.returncode == 0 and (out / stage.REPORT_NAME).exists()  # the lock went with its holder
+
+
 @pytest.mark.parametrize('command', ['manifest', 'split'])
 def test_manifest_and_split_help_name_manifest_jsonl(command, capfd):
     with pytest.raises(SystemExit):

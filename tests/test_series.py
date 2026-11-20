@@ -34,8 +34,8 @@ def tree(tmp_path):
     return org, out
 
 def listing(root):
-    """Sorted names under root, without the dated per-run copies of the report."""
-    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv', p.name))
+    """Sorted names under root, without the dated per-run copies of the report and the run lock file."""
+    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv|\.\w+\.lock', p.name))
 
 
 
@@ -1605,7 +1605,7 @@ def test_each_series_skip_kind_adds_one_to_the_skipped_count_of_the_report(tree,
 # ---------------------------------------------------------------- task-02 (#17): study_<n>/ folders replace images/
 
 def hidden_names(root):
-    return sorted(p.name for p in root.rglob('.*') if p.name != '.')
+    return sorted(p.name for p in root.rglob('.*') if p.name not in ('.', conv.LOCK_NAME))
 
 
 def test_a_plan_less_patient_with_two_studies_converts_to_two_study_folders(tree):
