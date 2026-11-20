@@ -174,7 +174,7 @@ def test_a1_6_hostile_patient_id_stays_inside_out_root(tree, tmp_path):
     src, out = tree
     planning_study(src / 'p', pid='../evil')
     organize(src, out)
-    created = out / 'evil'
+    created = out / '_evil'  # every unsafe character, a separator too, is '_'; the leading dots are stripped
     assert created.resolve().is_relative_to(out.resolve())
     assert (created / 'plan_1').is_dir()
     assert not (tmp_path / 'evil').exists()

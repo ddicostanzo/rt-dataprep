@@ -123,7 +123,11 @@ export/
 ```
 
 `organize` reads DICOM files with a DICOM preamble and copies them into `<patient>/plan_<n>/` plus `misc_files/` as needed.
-The patient directory name is a sanitized PatientID, not an anonymous identifier. A source folder containing multiple
+The patient directory name is a sanitized PatientID, not an anonymous identifier: surrounding whitespace and dots are dropped, every other
+character outside `A-Z a-z 0-9 . _ -`, a path separator included, becomes `_` (`SITE1/0001` is `SITE1_0001`), at most 64 characters are
+kept, a Windows reserved name gets a leading `_`, and an empty result is `UNKNOWN`. Versions up to 0.5.0 kept only the text after the last
+separator (`0001`): in an output root they organized, such a patient is organized again under the new name, so remove its old folder
+before building a manifest, or the patient is listed twice. A source folder containing multiple
 nonblank PatientIDs is refused. Files are copied, never moved, renamed, or deleted in the source tree.
 
 Zip archives in a source folder are read too, recognized by content rather than extension. Stored and deflate
