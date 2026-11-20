@@ -1,4 +1,4 @@
-# Runs the checks of CONTRIBUTING.md "Verify" on every pull request and on main. Tests use synthetic data only.
+# Runs ruff and pytest (two of the CONTRIBUTING.md "Verify" checks) on every pull request and on main. Tests use synthetic data only.
 name: tests
 on:
   pull_request:
@@ -8,14 +8,16 @@ permissions:
   contents: read
 concurrency:
   group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}  # every commit on main keeps its result
 jobs:
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
         with:
           python-version: "3.12"  # the oldest supported (requires-python)
       - run: uv sync --locked --group dev
