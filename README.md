@@ -580,7 +580,7 @@ uv run rt-dataprep convert /secure/organized /secure/converted --overwrite
   `--overwrite` output root), `manifest`, and `split`. `manifest.jsonl` and `splits.json` are not regenerated for you, and
   `split` still refuses changed content: once a root holds a `splits.json`, preprocess the new cohort into a fresh root
   rather than overwriting that one.
-- **One writer per output root.** `--overwrite` does not coordinate simultaneous runs.
+- **One writer per output root.** `--overwrite` does not coordinate simultaneous runs; a second run of the same stage on a root is refused while the first holds its lock file (`.organize.lock`, `.convert.lock`, `.preprocess.lock`), where the file system supports `flock`.
 
 ## Python API
 

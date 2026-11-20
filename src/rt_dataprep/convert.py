@@ -50,6 +50,9 @@ PLAN_COLUMNS = ('rtplan_uid', 'rtplan_label', 'rtplan_date', 'fractions_planned'
 
 REASON_OUTSIDE_ORG = 'output root is the organized root or inside it'
 REASON_EXISTS = 'output folder already exists'
+REASON_LOCKED = 'another convert run holds the output root lock'
+LOCK_NAME = '.convert.lock'
+WARN_NO_LOCK = 'convert: the output root cannot be locked here; running without a lock'
 REASON_NAME_CLAIMED = 'another folder of this run already maps to this output name (case-insensitive)'
 REASON_NO_PLANS = 'patient folder holds no plan folder'
 REASON_NO_STUDIES = 'every other series was skipped; no study folder was written'
@@ -146,13 +149,20 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwr
             aborted = True
             return pool.ABORT
 
+    # One writer per output root (#359): a second run's recover() would delete the partial folders this one is writing.
+    lock = dicom_io.lock_root(out_root, LOCK_NAME, REASON_LOCKED)
+    if lock is None and sys.platform != 'win32':
+        log.warning(WARN_NO_LOCK)
     started = time.monotonic()
     try:
         workers = pool.run_auto(workers, tasks, handle, lambda k: any(r.outcome == OUTCOME_CONVERTED for r in results[dispatched[k]][0]))  # an int from here on
     finally:  # Ctrl-C too: the report lists what was done
-        rows = rows_in_order(len(folders), refused, {i: r[0] for i, r in results.items()})
-        write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'],
-                     ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows))
+        try:
+            rows = rows_in_order(len(folders), refused, {i: r[0] for i, r in results.items()})
+            write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'],
+                         ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows))
+        finally:
+            dicom_io.unlock(lock)
     # A refused or aborted patient adds no reading seconds or files; every patient adds its own time minus its reading.
     reading, files = sum(r[1] for r in results.values()), sum(r[2] for r in results.values())
     converting = sum(r[4] - r[1] for r in results.values())
@@ -359,11 +369,16 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
         study_uid = _tag(first, 'StudyInstanceUID')  # one study per series: at_risk skipped the rest
         hidden = study_folders.setdefault(study_uid, f'.study_{len(study_folders)}')  # an index, never the UID
         study_dates.setdefault(study_uid, []).append(tuple(_tag(first, tag).strip() for tag in ('StudyDate', 'StudyTime')))
+        first_file = None  # the series is compressed once: its other folders get a copy of that file (#360)
         for folder_name, text, plan_columns, extra_keys in [*targets, (hidden, '', dict.fromkeys(PLAN_COLUMNS, ''), {})]:
             k = counts[folder_name, modality] = counts.get((folder_name, modality), 0) + 1
             name = f'series_{modality}_{k}.nii.gz'
             (partial / folder_name).mkdir(exist_ok=True)
-            write_atomic(image, partial / folder_name / name)
+            if first_file is None:
+                first_file = partial / folder_name / name
+                write_atomic(image, first_file)
+            else:
+                _atomic(lambda temp, source=first_file: shutil.copyfile(source, temp), partial / folder_name / name)
             written.setdefault(folder_name, []).append((modality, k, dict(
                 file=name, kind='series', modality=modality, roi_name='', dose_summation_type='', reg_matrix=text,
                 frame_of_reference_uid=frame, **plan_columns, dicom=series_keys | extra_keys,  # a new dict per folder
@@ -480,6 +495,8 @@ def _convert_plan(headers, unreadable, case_dir):
     offsets = [_header_call(_check_dose_header, ds, ct_frame_uid) for _, ds in used]  # every used dose is checked before any is read
     dose, dose_heads = _read_dose_sum(used, offsets, ct)
     rois = _header_call(masks.classify, struct, plan, ct_frame_uid, taken=(CT_NAME, DOSE_NAME), ct=ct)
+    if rois.named_out:  # a count only: a target named that way gets no mask, and no report cell says so (#361)
+        log.info("convert: %d contoured ROIs left out for a name containing 'dose'", rois.named_out)
     struct_path = next(p for p, ds in headers if ds is struct)
     # The scratch folder of DicomRTTool goes in the patient's partial folder: a stale partial's cleanup removes it too.
     mask_images = masks.build_masks(rois.kept, [p for p, _ in ct_slices], struct_path, struct_series_uid,

@@ -220,6 +220,14 @@ def sanitize_path_component(value, fallback='UNKNOWN'):
     return text[:64]
 
 
+def no_duplicate_keys(pairs):
+    """json's object_pairs_hook: the dict of `pairs`, a bare ValueError (no content in it) when a key repeats; the caller maps it to its fixed reason."""
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError
+    return dict(pairs)
+
+
 def write_report(out_root, name, header, rows):
     """
     `rows` under `header` at out_root/<stem>_<UTC time><suffix of name>, one file per run so a rerun loses nothing (#50), then
@@ -244,6 +252,32 @@ def write_report(out_root, name, header, rows):
     finally:
         with contextlib.suppress(OSError):  # gone after a replace; a failed copy leaves no hidden temp (#81)
             latest.unlink()
+
+
+def lock_root(out_root, name, reason):
+    """
+    The open lock file out_root/`name`, holding flock(LOCK_EX) while it stays open (unlock closes it), or None where there is no
+    flock (Windows, or a file system that refuses it: the caller warns and runs unlocked). ValueError(reason) when another run holds it.
+    """
+    if sys.platform == 'win32':
+        return None
+    import fcntl  # POSIX only
+    handle = None
+    try:
+        handle = open(Path(out_root) / name, 'a')
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:  # before OSError: it is a subclass
+        unlock(handle)
+        raise ValueError(reason) from None
+    except OSError:
+        unlock(handle)
+        return None
+    return handle
+
+
+def unlock(handle):
+    if handle is not None:
+        handle.close()
 
 
 def rename_dir(src, dst):

@@ -214,26 +214,13 @@ def _lock_root(out_root):
     The open lock file, holding flock(LOCK_EX) while it stays open, or None where there is no flock (Windows, or a file system
     that refuses it: one fixed warning, and the caller must not sweep). ValueError(REASON_LOCKED) when another run holds it.
     """
-    if sys.platform == 'win32':
-        return None
-    import fcntl  # POSIX only
-    handle = None
-    try:
-        handle = open(out_root / LOCK_NAME, 'a')
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:  # before OSError: it is a subclass
-        _unlock(handle)
-        raise ValueError(REASON_LOCKED) from None
-    except OSError:
-        _unlock(handle)
+    handle = dicom_io.lock_root(out_root, LOCK_NAME, REASON_LOCKED)
+    if handle is None and sys.platform != 'win32':
         log.warning(WARN_NO_LOCK)
-        return None
     return handle
 
 
-def _unlock(handle):
-    if handle is not None:
-        handle.close()
+_unlock = dicom_io.unlock
 
 
 def _drop(path):

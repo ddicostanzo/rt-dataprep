@@ -44,6 +44,9 @@ REASON_NO_STEPS = 'no preprocessing step is on'
 REASON_ALLOW_CROP_STEPS = 'allow_crop needs a geometric step: resample, harmonize_spacing or reshape'
 REASON_NO_SERIES_STEPS = 'no preprocessing step that is on applies to an MR or PT series'
 REASON_EXISTS = 'output folder already exists'
+REASON_LOCKED = 'another preprocess run holds the output root lock'
+LOCK_NAME = '.preprocess.lock'
+WARN_NO_LOCK = 'preprocess: the output root cannot be locked here; running without a lock'
 REASON_NAME_CLAIMED = 'another folder of this run already maps to this output name (case-insensitive)'
 REASON_NO_CASES = 'patient folder holds no plan or study folder with a series.json'
 STUDY_FOLDER = r'study_[0-9]+'
@@ -447,12 +450,19 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
             aborted = True
             return pool.ABORT
 
+    # One writer per output root (#359): a second run's recover() would delete the partial folders this one is writing.
+    lock = dicom_io.lock_root(out_root, LOCK_NAME, REASON_LOCKED)
+    if lock is None and sys.platform != 'win32':
+        log.warning(WARN_NO_LOCK)
     try:
         pool.run_auto(workers, tasks, handle, lambda k: any(r.outcome == OUTCOME_PREPROCESSED for r in results[dispatched[k]][0]))
     finally:  # Ctrl-C too: the report lists what was done
-        rows = conv.rows_in_order(len(folders), refused, {i: r[0] for i, r in results.items()})
-        write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series', 'cropped'],
-                     ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series, r.cropped] for r in rows))
+        try:
+            rows = conv.rows_in_order(len(folders), refused, {i: r[0] for i, r in results.items()})
+            write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series', 'cropped'],
+                         ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series, r.cropped] for r in rows))
+        finally:
+            dicom_io.unlock(lock)
     replaced, kept = (sum(r[1] == status for r in results.values()) for status in ('replaced', 'kept'))
     imaging_rows = [r for r in rows if r.folder.startswith('study_')]
     plan_rows = [r for r in rows if r.folder and not r.folder.startswith('study_')]
@@ -655,13 +665,6 @@ def is_legacy(folder):
     return (folder / LEGACY_SERIES_NAME).is_file() and not (folder / conv.SERIES_NAME).is_file()
 
 
-def _no_duplicate_keys(pairs):
-    keys = [key for key, _ in pairs]
-    if len(set(keys)) != len(keys):
-        raise ValueError  # no content in it: read_series_json maps it to the fixed reason
-    return dict(pairs)
-
-
 def read_series_json(folder):
     """(rows, malformed) of a plan's or study's series.json. malformed: not UTF-8 JSON (a BOM, duplicate keys or deep nesting included), not an array,
     an item that is not an object, key sets other than SERIES_COLUMNS or SERIES_COLUMNS + `retained`, each with or without `dicom` (one set for the whole file: on every item or none),
@@ -669,7 +672,7 @@ def read_series_json(folder):
     rows is the array when it is one, else []; an OSError (the file cannot be opened) propagates."""
     try:
         with open(folder / conv.SERIES_NAME, encoding='utf-8') as handle:
-            rows = json.load(handle, object_pairs_hook=_no_duplicate_keys)
+            rows = json.load(handle, object_pairs_hook=dicom_io.no_duplicate_keys)
     except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors; no `from`: they quote the file
         return [], True
     if not isinstance(rows, list):

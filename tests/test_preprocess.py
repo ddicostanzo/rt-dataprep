@@ -34,8 +34,8 @@ ROTATED = (0.8660254037844387, -0.5, 0.0, 0.5, 0.8660254037844387, 0.0, 0.0, 0.0
 QUARTER = (0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)  # 90 degrees about z: D @ (a, b, c) = (-b, a, c)
 
 def listing(root):
-    """Sorted names under root, without the dated per-run copies of the report."""
-    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv', p.name))
+    """Sorted names under root, without the dated per-run copies of the report and the run lock file."""
+    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv|\.\w+\.lock', p.name))
 
 
 

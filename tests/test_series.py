@@ -34,8 +34,8 @@ def tree(tmp_path):
     return org, out
 
 def listing(root):
-    """Sorted names under root, without the dated per-run copies of the report."""
-    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv', p.name))
+    """Sorted names under root, without the dated per-run copies of the report and the run lock file."""
+    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv|\.\w+\.lock', p.name))
 
 
 
@@ -923,8 +923,9 @@ def test_b6_a_series_in_two_plan_folders_and_misc_is_read_once_and_written_once_
     monkeypatch.setattr(conv, 'write_atomic', lambda image, path: writes.append(Path(path).parent.name + '/' + Path(path).name) or real_write(image, path))
     rows = conv.convert(org, out).rows
     assert reads == [4]
-    assert sorted(w for w in writes if '/series_' in w) == [  # the study volume is written under its hidden index name, renamed later
-        '.study_0/series_MR_1.nii.gz', 'plan_1/series_MR_1.nii.gz', 'plan_2/series_MR_1.nii.gz']
+    assert [w for w in writes if '/series_' in w] == ['plan_1/series_MR_1.nii.gz']  # compressed once; the other folders get a copy of the file (#360)
+    copies = {(out / PID / folder / 'series_MR_1.nii.gz').read_bytes() for folder in ('plan_1', 'plan_2', 'study_1')}
+    assert len(copies) == 1
     for name in ('plan_1', 'plan_2'):
         assert [r['series_instance_uid'] for r in sf.read(out / PID / name)[1:]] == [mr['series_uid']]
     assert [(r.folder, r.outcome, r.reason, r.files, r.skipped_series) for r in rows if r.folder != 'plan_1' and r.folder != 'plan_2'] == [
@@ -1604,7 +1605,7 @@ def test_each_series_skip_kind_adds_one_to_the_skipped_count_of_the_report(tree,
 # ---------------------------------------------------------------- task-02 (#17): study_<n>/ folders replace images/
 
 def hidden_names(root):
-    return sorted(p.name for p in root.rglob('.*') if p.name != '.')
+    return sorted(p.name for p in root.rglob('.*') if p.name not in ('.', conv.LOCK_NAME))
 
 
 def test_a_plan_less_patient_with_two_studies_converts_to_two_study_folders(tree):
@@ -1736,7 +1737,8 @@ def test_a_study_volume_is_the_image_read_series_returned_and_is_not_read_again(
     monkeypatch.setattr(conv, 'write_atomic', lambda image, path: (written.append(image), real_write(image, path))[1]
                         if Path(path).name.startswith('series_') else real_write(image, path))
     conv.convert(org, out)
-    assert len(returned) == 1 and len(written) == 2 and all(image is returned[0] for image in written)
+    assert len(returned) == 1 and len(written) == 1 and written[0] is returned[0]  # the study file is a copy of the plan folder's (#360)
+    assert (out / PID / 'plan_1' / 'series_MR_1.nii.gz').read_bytes() == (study(out) / 'series_MR_1.nii.gz').read_bytes()
 
 
 def test_report_rows_are_the_plans_then_the_summary_then_the_series_by_study_modality_and_k(tree):

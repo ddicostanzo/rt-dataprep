@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 
 from rt_dataprep import convert as conv
+from rt_dataprep.dicom_io import no_duplicate_keys
 
 log = logging.getLogger(__name__)
 
@@ -31,13 +32,6 @@ REASON_LEGACY = 'only a v0.1 manifest.csv is here; rerun manifest to write manif
 REASON_ROWS = 'a manifest is not UTF-8 JSON Lines of objects whose patient and case_dir are non-empty strings'
 
 
-def _no_duplicate_keys(pairs):
-    keys = [key for key, _ in pairs]
-    if len(set(keys)) != len(keys):
-        raise ValueError  # no content in it: _read maps it to the fixed reason
-    return dict(pairs)
-
-
 def _read(manifest_path):
     rows, reason = [], None
     manifest_path = Path(manifest_path)
@@ -48,7 +42,7 @@ def _read(manifest_path):
             for line in handle:
                 if not line.strip():
                     continue
-                row = json.loads(line, object_pairs_hook=_no_duplicate_keys)
+                row = json.loads(line, object_pairs_hook=no_duplicate_keys)
                 if not isinstance(row, dict):
                     reason = REASON_ROWS
                 elif not {'patient', 'case_dir'} <= row.keys():

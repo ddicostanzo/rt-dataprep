@@ -40,8 +40,8 @@ ORIGIN = (-3.0, 5.0, 7.0)
 SCALING = 0.5
 
 def listing(root):
-    """Sorted names under root, without the dated per-run copies of the report."""
-    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv', p.name))
+    """Sorted names under root, without the dated per-run copies of the report and the run lock file."""
+    return sorted(p.name for p in root.iterdir() if not re.fullmatch(r'\w+_report_\d{8}T\d{6}Z\.csv|\.\w+\.lock', p.name))
 
 
 
@@ -437,7 +437,7 @@ def test_refused_plan_leaves_no_folder_while_the_other_plans_are_written(tree):
     assert [(r.folder, r.outcome) for r in rows] == [('plan_1', 'converted'), ('plan_2', 'refused'), ('plan_3', 'converted'),
                                                       ('studies', 'converted'), ('study_1/series_CT_1', 'converted')]  # the refused plan's CT
     assert sorted(p.name for p in (out / PID).iterdir()) == ['plan_1', 'plan_3', 'study_1']
-    assert [p.name for p in out.iterdir() if p.name.startswith('.')] == []
+    assert [p.name for p in out.iterdir() if p.name.startswith('.')] == [conv.LOCK_NAME]  # no partial or old folder left
 
 
 def test_plan_folders_are_read_in_numeric_order(tree):
