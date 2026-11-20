@@ -36,12 +36,12 @@ SimpleITK, DicomRTTool, and scikit-image; no GPU is required.
 git clone https://github.com/ddicostanzo/rt-dataprep.git
 cd rt-dataprep
 uv sync --locked --group dev
-uv run python -m rt_dataprep --help
+uv run rt-dataprep --help
 ```
 
 Repository access is required while the repository is private. For an existing checkout, run the last two commands from
 its root. Every command below assumes that working directory. Use `uv run` to select the project environment; the CLI is
-invoked as `python -m rt_dataprep`.
+`rt-dataprep` (`python -m rt_dataprep` is the same).
 
 To use rt-dataprep from your own project without a checkout, install a tagged release; see
 [Add rt-dataprep to another project](#add-rt-dataprep-to-another-project).
@@ -70,10 +70,10 @@ Use approved storage and replace these illustrative paths. Input holds one top-l
 in that folder or its subfolders. Each stage writes to a separate directory outside its input tree.
 
 ```bash
-uv run python -m rt_dataprep organize /secure/export /secure/organized --workers 4
-uv run python -m rt_dataprep convert /secure/organized /secure/converted --workers 4
-uv run python -m rt_dataprep manifest /secure/converted
-uv run python -m rt_dataprep split /secure/converted --test-size 0.2 --val-size 0.2 --seed 42
+uv run rt-dataprep organize /secure/export /secure/organized --workers 4
+uv run rt-dataprep convert /secure/organized /secure/converted --workers 4
+uv run rt-dataprep manifest /secure/converted
+uv run rt-dataprep split /secure/converted --test-size 0.2 --val-size 0.2 --seed 42
 ```
 
 This also works for imaging-only patients. Review `organize_report.csv`, `convert_report.csv`, and the manifest refusal
@@ -89,7 +89,7 @@ count before accepting the cohort. Successful process completion can include ref
 | `manifest ROOT` | Write `ROOT/manifest.jsonl` and a dated copy. | Works on converted or preprocessed trees. |
 | `split ROOT` | Read `ROOT/manifest.jsonl`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
 
-Use `uv run python -m rt_dataprep COMMAND --help` for exact arguments. Study exclusion defaults to a case-sensitive
+Use `uv run rt-dataprep COMMAND --help` for exact arguments. Study exclusion defaults to a case-sensitive
 `Acuity` substring in `ManufacturerModelName`; `organize()` and `convert()` expose `exclude_models` through the Python API.
 
 ### Parallel patients (`--workers`)
@@ -379,9 +379,9 @@ Each preprocessing step has its own opt-in flag, and any combination is allowed.
 `--initial-resample --rescale --resample --reshape`:
 
 ```bash
-uv run python -m rt_dataprep preprocess /secure/converted /secure/preprocessed --initial-resample --rescale --resample --reshape --series-fov-mask
-uv run python -m rt_dataprep manifest /secure/preprocessed
-uv run python -m rt_dataprep split /secure/preprocessed --test-size 0.2 --val-size 0.2 --seed 42
+uv run rt-dataprep preprocess /secure/converted /secure/preprocessed --initial-resample --rescale --resample --reshape --series-fov-mask
+uv run rt-dataprep manifest /secure/preprocessed
+uv run rt-dataprep split /secure/preprocessed --test-size 0.2 --val-size 0.2 --seed 42
 ```
 
 | Flag | Step | Output prefix |
@@ -445,15 +445,15 @@ This is not a numerical parity port of legacy mclahe.
 For AHE without the large `--reshape` grid, use a fresh output root:
 
 ```bash
-uv run python -m rt_dataprep preprocess /secure/converted /secure/equalized --ahe
-uv run python -m rt_dataprep manifest /secure/equalized
+uv run rt-dataprep preprocess /secure/converted /secure/equalized --ahe
+uv run rt-dataprep manifest /secure/equalized
 ```
 
 Combine `--ahe` with any other step flag. AHE can require several additional volume-sized arrays; include those in
 memory planning; real-data peak-memory profiling remains tracked in #209. Tune the histogram or use a physical window:
 
 ```bash
-uv run python -m rt_dataprep preprocess /secure/converted /secure/equalized-tuned --ahe --ahe-kernel-mm 16 16 16 --ahe-bins 128 --ahe-clip-limit 0.05 --series-fov-mask
+uv run rt-dataprep preprocess /secure/converted /secure/equalized-tuned --ahe --ahe-kernel-mm 16 16 16 --ahe-bins 128 --ahe-clip-limit 0.05 --series-fov-mask
 ```
 
 `--ahe-kernel-mm X Y Z` uses positive mm widths, rounded up to whole voxels on the grid being equalized (at least one
@@ -519,7 +519,7 @@ imaging patients, can change assignments despite the same seed.
 Check an external cohort for overlapping patient strings before writing a split:
 
 ```bash
-uv run python -m rt_dataprep split /secure/converted --test-size 0.2 --val-size 0.2 --seed 42 --external /secure/external/manifest.jsonl
+uv run rt-dataprep split /secure/converted --test-size 0.2 --val-size 0.2 --seed 42 --external /secure/external/manifest.jsonl
 ```
 
 This checks patient IDs, not cross-institution identity linkage or clinical stratification. Maintain consistent patient
@@ -553,7 +553,7 @@ By default a patient whose output folder already exists is skipped. `organize`, 
 `--overwrite` to replace such a folder instead:
 
 ```bash
-uv run python -m rt_dataprep convert /secure/organized /secure/converted --overwrite
+uv run rt-dataprep convert /secure/organized /secure/converted --overwrite
 ```
 
 - **When it replaces.** The patient is rebuilt in a hidden partial folder. The old folder is replaced only once the new
@@ -704,7 +704,7 @@ rt-dataprep organize /secure/export /secure/organized
 
 Inside a uv project, prefix it with `uv run`. The Python API imports as described above
 (`from rt_dataprep.convert import convert`, and so on). Every example in this README that starts with
-`uv run python -m rt_dataprep` works the same with `rt-dataprep`.
+`uv run rt-dataprep` works the same without `uv run` once the environment is active.
 
 ### Gate each stage on its report, not on the exit status
 
