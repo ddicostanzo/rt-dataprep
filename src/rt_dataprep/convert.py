@@ -9,6 +9,7 @@ carry counts and the fixed REASON_ constants only, never a PatientID, folder nam
 the output root is the one place the folder names appear; the series.json files hold the UIDs, dates and descriptions. Every third-party read runs inside dicom_io's quiet wrapper.
 """
 import contextlib
+import gzip
 import json
 import logging
 import os
@@ -63,10 +64,10 @@ REASON_CT_NOT_VOLUME = 'the planning CT is not one uniform volume of at least tw
 REASON_NO_CONTOUR_IMAGES = 'the RTSTRUCT lists no contour images for the planning CT'
 REASON_CT_SLICE_MISSING = 'a CT slice the RTSTRUCT lists is not in the plan folder'
 REASON_CT_UNREADABLE = 'the planning CT series is unreadable'
-REASON_DOSE_RULE = 'the RTDOSEs of the plan fit no dose rule'
+REASON_DOSE_RULE = 'the RTDOSEs of the plan fit no dose rule, or its beam doses do not name each treatment beam exactly once'
 REASON_DOSE_UNITS = 'DoseUnits is not GY'
 REASON_DOSE_TYPE = 'DoseType is not PHYSICAL'
-REASON_DOSE_GRID = 'the RTDOSE frame offsets are not uniform or differ from NumberOfFrames'
+REASON_DOSE_GRID = 'the RTDOSE frame offsets are not uniform, differ from NumberOfFrames, or are absolute on a non-standard orientation'
 REASON_DOSE_FRAME = 'the RTDOSE FrameOfReferenceUID differs from the planning CT'
 REASON_DOSE_UNREADABLE = 'an RTDOSE is unreadable or lacks a required tag'
 REASON_INTERNAL = 'an unexpected error stopped the conversion; the report lists what was finished'
@@ -524,7 +525,7 @@ def _convert_plan(headers, unreadable, case_dir):
         write_atomic(image, case_dir / name)
         files.append(name)
     for _, name, points, _ in rois.applicators + rois.lines:
-        _atomic(lambda temp, points=points: np.savetxt(temp, points, fmt='%.4f'), case_dir / name)  # gzip text: the name ends .nii.gz
+        _atomic(lambda temp, points=points: save_points(points, temp), case_dir / name)  # gzip text: the name ends .nii.gz
         files.append(name)
     if table is not None:
         _atomic(lambda temp: plan_table.write_plan_table(table, temp), case_dir / PLAN_NAME)
@@ -663,6 +664,9 @@ def _dose_candidates(headers, plan):
              if any(str(item.ReferencedSOPInstanceUID) == plan_uid for item in ds.get('ReferencedRTPlanSequence', []))]
     kind = lambda name: [c for c in found if str(c[1].DoseSummationType).strip() == name]  # noqa: E731
     plans, fractions = kind('PLAN'), kind('FRACTION')
+    # A proton export can hold the PHYSICAL and the EFFECTIVE plan dose: the physical one is the plan dose (#356). With none
+    # physical the list stays, so a lone EFFECTIVE dose keeps REASON_DOSE_TYPE.
+    plans = [c for c in plans if str(c[1].get('DoseType', '')).strip() == 'PHYSICAL'] or plans
     if not found:
         return []
     if len(plans) > 1:
@@ -672,8 +676,26 @@ def _dose_candidates(headers, plan):
     if len(fractions) == 1:
         return fractions
     if not fractions and len(kind('BEAM')) == len(found):
+        _check_beam_doses(found, plan)
         return found  # beams only: their sum is the plan dose
     raise CaseRefused(REASON_DOSE_RULE)
+
+
+def _check_beam_doses(found, plan):
+    """Refuse (REASON_DOSE_RULE) unless the BEAM doses name every treatment beam of the plan exactly once: a missing beam's
+    dose would be left out of the sum and a repeated one counted twice (#354). A dose that names no beam, or several, refuses too."""
+    plan_uid = str(plan.SOPInstanceUID)
+    beams = [*(plan.get('BeamSequence') or []), *(plan.get('IonBeamSequence') or [])]
+    expected = sorted(int(b.BeamNumber) for b in beams if b.get('TreatmentDeliveryType') != 'SETUP')  # the plan tables' filter
+    named = []
+    for _, ds in found:
+        numbers = [beam.get('ReferencedBeamNumber') for item in ds.ReferencedRTPlanSequence if str(item.ReferencedSOPInstanceUID) == plan_uid
+                   for group in item.get('ReferencedFractionGroupSequence') or [] for beam in group.get('ReferencedBeamSequence') or []]
+        if len(numbers) != 1 or numbers[0] in (None, ''):  # an item with no number names no beam either
+            raise CaseRefused(REASON_DOSE_RULE)
+        named.append(int(numbers[0]))
+    if sorted(named) != expected:
+        raise CaseRefused(REASON_DOSE_RULE)
 
 
 def _check_dose_header(ds, ct_frame_uid):
@@ -687,6 +709,9 @@ def _check_dose_header(ds, ct_frame_uid):
     frames = int(ds.NumberOfFrames)
     offsets = np.asarray([float(o) for o in ds.GridFrameOffsetVector])
     if not np.all(np.isfinite(offsets)):  # before np.diff: inf - inf warns
+        raise CaseRefused(REASON_DOSE_GRID)
+    # PS3.3 C.8.8.3.2: a non-zero first offset (patient z per frame) is defined for this one orientation only (#357).
+    if offsets[0] != 0 and not np.allclose([float(v) for v in ds.ImageOrientationPatient], (1, 0, 0, 0, 1, 0), rtol=0, atol=DIRECTION_ATOL):
         raise CaseRefused(REASON_DOSE_GRID)
     steps = np.diff(offsets)
     if (frames < 2 or len(offsets) != frames or np.any(np.abs(steps - steps[0]) > OFFSET_TOL_MM) or steps[0] == 0):
@@ -810,6 +835,12 @@ def _series_rows(plan, struct, ct_slices, dose_heads, rois, files, beam_numbers)
         rows.append(row(FLUENCE_NAME, 'fluence', [plan], 'RTPLAN', _tag(plan, 'FrameOfReferenceUID'), (metadata.ALL, metadata.RTPLAN),
                         extra_dicom=dict(beam_numbers=';'.join(map(str, beam_numbers)))))
     return rows
+
+
+def save_points(points, path):
+    """`points` as gzip text at `path`, with no time or file name in the gzip header: the same points give the same bytes (#346)."""
+    with open(path, 'wb') as raw, gzip.GzipFile(filename='', fileobj=raw, mode='wb', mtime=0) as handle:
+        np.savetxt(handle, points, fmt='%.4f')
 
 
 def write_series_json(rows, path):

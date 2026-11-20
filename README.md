@@ -358,7 +358,7 @@ resampled, cropped or counted in `retained`), and `manifest` lists it in the pla
   The planning CT path requires an axial volume with consistent orientation, image dimensions, and uniform slice spacing;
   gantry tilt is refused. Other imaging series may be oblique but must still form a regular single-frame volume.
 - Planning CT is float32 HU. Supported physical RTDOSE is converted to Gy and resampled onto its planning CT grid;
-  supported beam-dose inputs are summed. Ambiguous or unsupported dose combinations refuse the plan.
+  beam doses are summed only when they name each treatment beam of the plan exactly once. Ambiguous or unsupported dose combinations refuse the plan.
 - Kept RTSTRUCT ROIs become binary masks on the planning CT grid. Empty, mismatched, or inconsistent mask results refuse
   the plan. Point-only ROIs and names containing `dose` are excluded. Brachy applicator outputs are **gzip-compressed
   coordinate text**, despite their legacy `.nii.gz` extension; consult `kind` in `series.json` before opening a file as NIfTI.
