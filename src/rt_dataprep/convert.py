@@ -49,6 +49,9 @@ PLAN_COLUMNS = ('rtplan_uid', 'rtplan_label', 'rtplan_date', 'fractions_planned'
 
 REASON_OUTSIDE_ORG = 'output root is the organized root or inside it'
 REASON_EXISTS = 'output folder already exists'
+REASON_LOCKED = 'another convert run holds the output root lock'
+LOCK_NAME = '.convert.lock'
+WARN_NO_LOCK = 'convert: the output root cannot be locked here; running without a lock'
 REASON_NAME_CLAIMED = 'another folder of this run already maps to this output name (case-insensitive)'
 REASON_NO_PLANS = 'patient folder holds no plan folder'
 REASON_NO_STUDIES = 'every other series was skipped; no study folder was written'
@@ -145,13 +148,20 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwr
             aborted = True
             return pool.ABORT
 
+    # One writer per output root (#359): a second run's recover() would delete the partial folders this one is writing.
+    lock = dicom_io.lock_root(out_root, LOCK_NAME, REASON_LOCKED)
+    if lock is None and sys.platform != 'win32':
+        log.warning(WARN_NO_LOCK)
     started = time.monotonic()
     try:
         workers = pool.run_auto(workers, tasks, handle, lambda k: any(r.outcome == OUTCOME_CONVERTED for r in results[dispatched[k]][0]))  # an int from here on
     finally:  # Ctrl-C too: the report lists what was done
-        rows = rows_in_order(len(folders), refused, {i: r[0] for i, r in results.items()})
-        write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'],
-                     ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows))
+        try:
+            rows = rows_in_order(len(folders), refused, {i: r[0] for i, r in results.items()})
+            write_report(out_root, REPORT_NAME, ['patient', 'folder', 'outcome', 'reason', 'files', 'skipped_series'],
+                         ([r.patient, r.folder, r.outcome, r.reason, ';'.join(r.files), r.skipped_series] for r in rows))
+        finally:
+            dicom_io.unlock(lock)
     # A refused or aborted patient adds no reading seconds or files; every patient adds its own time minus its reading.
     reading, files = sum(r[1] for r in results.values()), sum(r[2] for r in results.values())
     converting = sum(r[4] - r[1] for r in results.values())

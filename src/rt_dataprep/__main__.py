@@ -8,6 +8,7 @@ from pathlib import Path
 
 from rt_dataprep.dicom_io import REASON_INPUT_INSIDE_OUTPUT
 from rt_dataprep.convert import REASON_INTERNAL, REASON_OUTSIDE_ORG, ConvertAborted, convert, crash_site
+from rt_dataprep.convert import REASON_LOCKED as CONVERT_REASON_LOCKED
 from rt_dataprep.manifest import MANIFEST_NAME, manifest
 from rt_dataprep.organize import REASON_INTERNAL as ORGANIZE_REASON_INTERNAL
 from rt_dataprep.organize import REASON_LOCKED, REASON_OUTSIDE_SRC, OrganizeAborted, organize
@@ -23,6 +24,7 @@ from rt_dataprep.preprocess import (
     preprocess,
 )
 from rt_dataprep.preprocess import REASON_INTERNAL as PREPROCESS_REASON_INTERNAL
+from rt_dataprep.preprocess import REASON_LOCKED as PREPROCESS_REASON_LOCKED
 from rt_dataprep.split import REASON_COLUMNS, REASON_EXISTS, REASON_LEGACY, REASON_NO_TRAIN, REASON_OVERLAP, REASON_ROWS, REASON_SIZE, SPLIT_NAMES, split
 
 
@@ -144,7 +146,7 @@ def main(argv=None):
         if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_AHE_OPTIONS,
                             REASON_MASK_RETENTION_LIMIT, REASON_DOSE_RETAINED_LIMIT, REASON_OUTSIDE_SRC, REASON_INPUT_INSIDE_OUTPUT,
                             REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS, REASON_LEGACY,
-                            REASON_LOCKED):
+                            REASON_LOCKED, CONVERT_REASON_LOCKED, PREPROCESS_REASON_LOCKED):
             parser.exit(1, unexpected(exc))
         parser.exit(1, f'rt_dataprep: {exc}\n')
     except ConvertAborted:  # the report is written; the text is fixed, nothing of the original reaches the terminal
