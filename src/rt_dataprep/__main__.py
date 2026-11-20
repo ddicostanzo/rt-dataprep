@@ -1,6 +1,7 @@
 import argparse
 import logging
 import math
+import os
 import sys
 from importlib.metadata import version
 from pathlib import Path
@@ -154,7 +155,7 @@ def main(argv=None):
         parser.exit(1, f'rt_dataprep: {PREPROCESS_REASON_INTERNAL}\n')
     except OSError:  # the message names a path, which can hold a patient id
         root = next(getattr(args, name) for name in ('src', 'org', 'converted', 'root') if hasattr(args, name))  # every command's first path is its input folder
-        if not Path(root).is_dir():  # the commonest cause, a mistyped path, gets its own fixed text
+        if not os.path.isdir(root):  # the commonest cause, a mistyped path, gets its own fixed text; os.path.isdir never raises (Path.is_dir does on EACCES, and its message names the path)
             parser.exit(1, f'rt_dataprep: {REASON_NO_INPUT}\n')
         parser.exit(1, 'rt_dataprep: file system error on the source or output root\n')
     except Exception as exc:  # a bug: its type and site only, never its message, which may name a path (#26)

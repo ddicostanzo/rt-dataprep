@@ -678,6 +678,21 @@ def test_a_missing_input_root_exits_1_with_its_own_path_free_text(argv, tmp_path
     assert exc.value.code == 1 and captured.err == f'rt_dataprep: {cli.REASON_NO_INPUT}\n' and captured.out == ''
 
 
+@pytest.mark.skipif(not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a folder this user cannot search')
+def test_an_unsearchable_input_parent_exits_1_with_one_fixed_line_and_no_path(tmp_path, capsys):
+    locked = tmp_path / 'SYNTHETIC_locked'
+    (locked / 'SYNTHETIC_patient').mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            cli.main(['convert', str(locked / 'SYNTHETIC_patient'), str(tmp_path / 'out')])
+    finally:
+        locked.chmod(0o700)
+    captured = capsys.readouterr()
+    assert exc.value.code == 1 and captured.out == '' and 'SYNTHETIC_' not in captured.err
+    assert captured.err in (f'rt_dataprep: {cli.REASON_NO_INPUT}\n', 'rt_dataprep: file system error on the source or output root\n')
+
+
 def test_convert_logs_one_progress_line_per_patient(tmp_path, caplog):
     org = tmp_path / 'org'
     for name in ('SYNTHETIC_a', 'SYNTHETIC_b'):
