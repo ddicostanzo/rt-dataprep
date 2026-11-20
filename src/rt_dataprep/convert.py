@@ -140,6 +140,7 @@ def convert(org_root, out_root, *, exclude_models=('Acuity',), workers=1, overwr
             log.error('convert: %s: %s', REASON_INTERNAL, result.type_name)
             result = [ConvertRow(folders[i].name, '', OUTCOME_REFUSED, REASON_INTERNAL)], 0.0, 0, None, 0.0, True
         results[i] = result
+        log.info('convert: %d of %d patients done', len(results), len(dispatched))  # counts only
         if result[-1]:
             aborted = True
             return pool.ABORT

@@ -113,6 +113,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
     def finish(i, row, read_s, walked, name, copy_s=0.0, status=None):
         nonlocal reading, copying, files
         done[i] = row
+        log.info('organize: %d of %d patients done', len(done), len(folders))  # counts only
         reading, copying, files = reading + read_s, copying + copy_s, files + walked
         if status is not None:
             statuses[name.casefold()] = status  # a later status for the same name overwrites an earlier one
