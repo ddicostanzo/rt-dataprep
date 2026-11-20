@@ -68,6 +68,7 @@ uv run --group dev python -m compileall -q src examples
 git diff --check
 ```
 
+GitHub Actions (`.github/workflows/tests.yml`) runs ruff and pytest on Linux for every pull request and on `main`.
 Use `pytest -rs` to inspect skips. TorchIO is an optional comparison dependency used by selected tests; it is not required
 by the runtime pipeline. Report skipped checks and environment limitations instead of claiming they passed. If changing
 dependencies, update `pyproject.toml` and `uv.lock` together and explain why.
