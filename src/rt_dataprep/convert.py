@@ -484,6 +484,8 @@ def _convert_plan(headers, unreadable, case_dir):
     offsets = [_header_call(_check_dose_header, ds, ct_frame_uid) for _, ds in used]  # every used dose is checked before any is read
     dose, dose_heads = _read_dose_sum(used, offsets, ct)
     rois = _header_call(masks.classify, struct, plan, ct_frame_uid, taken=(CT_NAME, DOSE_NAME), ct=ct)
+    if rois.named_out:  # a count only: a target named that way gets no mask, and no report cell says so (#361)
+        log.info("convert: %d contoured ROIs left out for a name containing 'dose'", rois.named_out)
     struct_path = next(p for p, ds in headers if ds is struct)
     # The scratch folder of DicomRTTool goes in the patient's partial folder: a stale partial's cleanup removes it too.
     mask_images = masks.build_masks(rois.kept, [p for p, _ in ct_slices], struct_path, struct_series_uid,

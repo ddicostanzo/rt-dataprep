@@ -35,6 +35,7 @@ class RoiPlan:
     kept: list = field(default_factory=list)  # [(ROINumber, ROIName, '<format_name>.nii.gz', [(N, 3) non-POINT contours in patient mm])] in RTSTRUCT order
     applicators: list = field(default_factory=list)  # [(ROINumber, '<name>.nii.gz', (N, 3) points in patient mm, ROIName)] in RTSTRUCT order
     lines: list = field(default_factory=list)  # [(ROINumber, '<format_name>.nii.gz', (N, 3) points in patient mm, ROIName)] in RTSTRUCT order
+    named_out: int = 0  # contoured ROIs left out for a name containing 'dose'
 
 
 def format_name(text):
@@ -73,7 +74,10 @@ def classify(struct, plan, frame_uid, taken=(), ct=None):
         items = list(contours[number].get('ContourSequence', [])) if number in contours else []
         points = [np.asarray([float(v) for v in item.ContourData]).reshape(-1, 3) for item in items]
         types = {str(item.ContourGeometricType) for item in items}
-        if not points or sum(len(p) for p in points) == 0 or types == {'POINT'} or 'dose' in name.lower():
+        if not points or sum(len(p) for p in points) == 0 or types == {'POINT'}:
+            continue
+        if 'dose' in name.lower():
+            result.named_out += 1  # counted for the log: nothing else says a contoured ROI was left out (#361)
             continue
         if str(roi.ReferencedFrameOfReferenceUID) != frame_uid:  # its points would be read as CT coordinates
             raise CaseRefused(REASON_ROI_FRAME)

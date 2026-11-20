@@ -2,6 +2,7 @@
 import ast
 import gzip
 import inspect
+import logging
 import os
 
 import numpy as np
@@ -230,12 +231,14 @@ def test_a_kept_roi_on_another_frame_of_reference_refuses_the_plan(tmp_path):
 
 # ---------------------------------------------------------------- which ROIs are kept
 
-def test_point_empty_and_dose_rois_produce_no_file_and_the_plan_converts(tmp_path):
+def test_point_empty_and_dose_rois_produce_no_file_and_the_plan_converts(tmp_path, caplog):
     rois = [box(1, 'Kept', (1, 2), (1, 2), (1, 2)), dict(number=2, name='Marker', kind='point', point=(0.0, 5.0, 8.0)),
             dict(number=3, name='Nothing', kind='empty'), box(4, 'Dose_Max', (1, 2), (1, 2), (1, 2)),
             box(5, 'DOSE 50', (1, 2), (1, 2), (1, 2)), box(6, 'Overdosed', (1, 2), (1, 2), (1, 2))]
     folder = make_plan(tmp_path, rois)
-    result, case = run(tmp_path, folder)
+    with caplog.at_level(logging.INFO, logger='rt_dataprep.convert'):
+        result, case = run(tmp_path, folder)
+    assert "convert: 3 contoured ROIs left out for a name containing 'dose'" in caplog.messages  # the count only, never a name (#361)
     assert result.files == ['planning_ct.nii.gz', 'kept.nii.gz']
     assert sorted(p.name for p in case.iterdir()) == ['kept.nii.gz', 'planning_ct.nii.gz']  # series.json: the patient level's
     assert [r['file'] for r in result.series_rows] == result.files
