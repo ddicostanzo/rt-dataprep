@@ -656,3 +656,47 @@ def test_manifest_and_split_help_name_manifest_jsonl(command, capfd):
         cli.main([command, '--help'])
     text = capfd.readouterr().out
     assert 'manifest.jsonl' in text and 'manifest.csv' not in text
+
+
+# ---------------------------------------------------------------- --version, a missing input root, the per-patient progress line
+
+
+def test_version_prints_the_installed_version(capsys):
+    from importlib.metadata import version
+    with pytest.raises(SystemExit) as exc:
+        cli.main(['--version'])
+    assert exc.value.code == 0 and capsys.readouterr().out == f'rt_dataprep {version("rt-dataprep")}\n'
+
+
+@pytest.mark.parametrize('argv', [['organize', '{}', 'out'], ['convert', '{}', 'out'], ['preprocess', '{}', 'out', '--rescale'],
+                                  ['manifest', '{}'], ['split', '{}', '--test-size', '0.2', '--val-size', '0.2', '--seed', '0']])
+def test_a_missing_input_root_exits_1_with_its_own_path_free_text(argv, tmp_path, capsys):
+    missing = tmp_path / 'SYNTHETIC_typo'
+    with pytest.raises(SystemExit) as exc:
+        cli.main([a.format(missing) if a == '{}' else str(tmp_path / a) if a == 'out' else a for a in argv])
+    captured = capsys.readouterr()
+    assert exc.value.code == 1 and captured.err == f'rt_dataprep: {cli.REASON_NO_INPUT}\n' and captured.out == ''
+
+
+@pytest.mark.skipif(not hasattr(os, 'geteuid') or os.geteuid() == 0, reason='needs a folder this user cannot search')
+def test_an_unsearchable_input_parent_exits_1_with_one_fixed_line_and_no_path(tmp_path, capsys):
+    locked = tmp_path / 'SYNTHETIC_locked'
+    (locked / 'SYNTHETIC_patient').mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            cli.main(['convert', str(locked / 'SYNTHETIC_patient'), str(tmp_path / 'out')])
+    finally:
+        locked.chmod(0o700)
+    captured = capsys.readouterr()
+    assert exc.value.code == 1 and captured.out == '' and 'SYNTHETIC_' not in captured.err
+    assert captured.err in (f'rt_dataprep: {cli.REASON_NO_INPUT}\n', 'rt_dataprep: file system error on the source or output root\n')
+
+
+def test_convert_logs_one_progress_line_per_patient(tmp_path, caplog):
+    org = tmp_path / 'org'
+    for name in ('SYNTHETIC_a', 'SYNTHETIC_b'):
+        (org / name).mkdir(parents=True)
+    with caplog.at_level('INFO'):
+        conv.convert(org, tmp_path / 'out', workers=1)
+    assert [m for m in caplog.messages if 'patients done' in m] == ['convert: 1 of 2 patients done', 'convert: 2 of 2 patients done']

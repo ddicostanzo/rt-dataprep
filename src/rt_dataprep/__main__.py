@@ -1,7 +1,9 @@
 import argparse
 import logging
 import math
+import os
 import sys
+from importlib.metadata import version
 from pathlib import Path
 
 from rt_dataprep.dicom_io import REASON_INPUT_INSIDE_OUTPUT
@@ -28,6 +30,7 @@ PREPROCESS_HELP = 'resample, rescale and crop/pad a converted tree into a separa
 WORKERS_HELP = ("number of patients processed in parallel, each in its own process (about 7 GB RAM each at 701x701x433); "
                 "default 'auto' sizes it from the first processed patient's peak RAM (0.8 of available memory, capped by CPUs), "
                 "an integer sets it; output is the same for any value")
+REASON_NO_INPUT = 'the input root is not a folder (check the first path)'
 OVERWRITE_HELP = "replace a patient's existing output folder once its new output holds at least one successful case"
 
 
@@ -56,6 +59,7 @@ def spacing_mm(text):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='rt_dataprep', description='Turn radiotherapy DICOM exports into ML-ready cases.')
+    parser.add_argument('--version', action='version', version=f'%(prog)s {version("rt-dataprep")}')
     commands = parser.add_subparsers(dest='command', required=True)
     sub = commands.add_parser('organize', help='sort an export tree into <patient>/plan_<n>/ folders, one per RTPLAN')
     sub.add_argument('src', help='export root, one folder per patient')
@@ -120,16 +124,14 @@ def main(argv=None):
                     parser.error(f'{option} requires --allow-crop')
             grids = {name: tuple(value) for name, value in (('new_shape', args.new_shape), ('new_spacing', args.new_spacing),
                                                            ('final_spacing', args.final_spacing)) if value is not None}
-            dose_limits = {name: value for name, value in (('dose_retained_gy', args.dose_retained_gy),
-                                                           ('dose_retained_fraction', args.dose_retained_fraction)) if value is not None}
+            optional = {name: value for name, value in (('dose_retained_gy', args.dose_retained_gy), ('dose_retained_fraction', args.dose_retained_fraction),
+                                                        ('ahe_bins', args.ahe_bins), ('ahe_clip_limit', args.ahe_clip_limit)) if value is not None}  # unset: the PreprocessSteps default
             # flags are named after the output prefix: --initial-resample is the resample field, --resample is harmonize_spacing
             preprocess(args.converted, args.out, PreprocessSteps(
                 resample=args.initial_resample, rescale=args.rescale, ahe=args.ahe, harmonize_spacing=args.resample, reshape=args.reshape,
                 legacy_linear_masks=args.legacy_linear_masks, series_fov_mask=args.series_fov_mask,
-                min_mask_retention=args.min_mask_retention, allow_crop=args.allow_crop, **grids, **dose_limits,
-                ahe_kernel_mm=None if args.ahe_kernel_mm is None else tuple(args.ahe_kernel_mm),
-                ahe_bins=128 if args.ahe_bins is None else args.ahe_bins,
-                ahe_clip_limit=0.05 if args.ahe_clip_limit is None else args.ahe_clip_limit), workers=args.workers, overwrite=args.overwrite)
+                min_mask_retention=args.min_mask_retention, allow_crop=args.allow_crop, **grids, **optional,
+                ahe_kernel_mm=None if args.ahe_kernel_mm is None else tuple(args.ahe_kernel_mm)), workers=args.workers, overwrite=args.overwrite)
         elif args.command == 'manifest':
             manifest(args.root)  # logs its own counts line
         elif args.command == 'split':
@@ -152,6 +154,9 @@ def main(argv=None):
     except PreprocessAborted:  # same as above, with preprocess's own fixed text
         parser.exit(1, f'rt_dataprep: {PREPROCESS_REASON_INTERNAL}\n')
     except OSError:  # the message names a path, which can hold a patient id
+        root = next(getattr(args, name) for name in ('src', 'org', 'converted', 'root') if hasattr(args, name))  # every command's first path is its input folder
+        if not os.path.isdir(root):  # the commonest cause, a mistyped path, gets its own fixed text; os.path.isdir never raises (Path.is_dir does on EACCES, and its message names the path)
+            parser.exit(1, f'rt_dataprep: {REASON_NO_INPUT}\n')
         parser.exit(1, 'rt_dataprep: file system error on the source or output root\n')
     except Exception as exc:  # a bug: its type and site only, never its message, which may name a path (#26)
         parser.exit(1, unexpected(exc))

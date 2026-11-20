@@ -113,6 +113,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
     def finish(i, row, read_s, walked, name, copy_s=0.0, status=None):
         nonlocal reading, copying, files
         done[i] = row
+        log.info('organize: %d of %d patients done', len(done), len(folders))  # counts only
         reading, copying, files = reading + read_s, copying + copy_s, files + walked
         if status is not None:
             statuses[name.casefold()] = status  # a later status for the same name overwrites an earlier one
@@ -130,6 +131,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
         if failure is not None:  # an OSError (go on) or an unexpected error (stop), already logged by the worker
             held.pop(i, None)
             done[i] = failure
+            log.info('organize: %d of %d patients done', len(done), len(folders))  # counts only
             if failure.reason == REASON_INTERNAL:
                 aborted = True
                 return pool.ABORT
@@ -164,6 +166,7 @@ def organize(src_root, out_root, *, exclude_models=('Acuity',), workers=1, overw
             _drop(staging)
             done[i] = _failure_row(folder, REASON_IO_ERROR)
             log.warning('organize: %s', REASON_IO_ERROR)
+            log.info('organize: %d of %d patients done', len(done), len(folders))  # counts only
             return None
         # cases None: task A saw the target and did not group; recover never removes a target, so it is still a skip
         if cases is None or (not overwrite and os.path.lexists(target)):  # lexists, as publish: a dangling link is an existing target

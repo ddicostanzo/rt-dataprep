@@ -38,10 +38,10 @@ for demonstration. These phantoms are not a clinical validation dataset, PET SUV
 To exercise the CLI independently on the generated export, choose fresh sibling directories:
 
 ```bash
-uv run python -m rt_dataprep organize /tmp/rt-dataprep-demo/export /tmp/rt-dataprep-cli-organized --workers 2
-uv run python -m rt_dataprep convert /tmp/rt-dataprep-cli-organized /tmp/rt-dataprep-cli-converted --workers 2
-uv run python -m rt_dataprep manifest /tmp/rt-dataprep-cli-converted
-uv run python -m rt_dataprep split /tmp/rt-dataprep-cli-converted --test-size 0.2 --val-size 0.2 --seed 42
+uv run rt-dataprep organize /tmp/rt-dataprep-demo/export /tmp/rt-dataprep-cli-organized --workers 2
+uv run rt-dataprep convert /tmp/rt-dataprep-cli-organized /tmp/rt-dataprep-cli-converted --workers 2
+uv run rt-dataprep manifest /tmp/rt-dataprep-cli-converted
+uv run rt-dataprep split /tmp/rt-dataprep-cli-converted --test-size 0.2 --val-size 0.2 --seed 42
 ```
 
 ## Custom preprocessing
@@ -50,7 +50,7 @@ Use the API example to select a practical grid rather than the CLI `--reshape` 7
 
 ```bash
 uv run python examples/custom_preprocess.py /tmp/rt-dataprep-demo/converted /tmp/rt-dataprep-custom --shape 16 16 8 --spacing 1.25 1.25 2
-uv run python -m rt_dataprep split /tmp/rt-dataprep-custom --test-size 0.2 --val-size 0.2 --seed 42
+uv run rt-dataprep split /tmp/rt-dataprep-custom --test-size 0.2 --val-size 0.2 --seed 42
 ```
 
 Dimensions are x/y/z voxels and spacing is x/y/z in mm. The script enables initial resampling, CT HU rescaling, final
@@ -66,8 +66,8 @@ Add `--ahe` to the custom example to include adaptive histogram equalization. To
 resampling to the large `--reshape` grid:
 
 ```bash
-uv run python -m rt_dataprep preprocess /tmp/rt-dataprep-demo/converted /tmp/rt-dataprep-ahe --ahe
-uv run python -m rt_dataprep manifest /tmp/rt-dataprep-ahe
+uv run rt-dataprep preprocess /tmp/rt-dataprep-demo/converted /tmp/rt-dataprep-ahe --ahe
+uv run rt-dataprep manifest /tmp/rt-dataprep-ahe
 ```
 
 AHE is opt-in for CT/MR/PT image volumes and never equalizes dose or masks. It min-max scales each volume and applies
@@ -84,10 +84,10 @@ Each immediate child of the export root must contain one patient's export. Origi
 sensitive after organization. See [SECURITY.md](../SECURITY.md).
 
 ```bash
-uv run python -m rt_dataprep organize /secure/export /secure/organized --workers 4
-uv run python -m rt_dataprep convert /secure/organized /secure/converted --workers 4
-uv run python -m rt_dataprep manifest /secure/converted
-uv run python -m rt_dataprep split /secure/converted --test-size 0.2 --val-size 0.2 --seed 42
+uv run rt-dataprep organize /secure/export /secure/organized --workers 4
+uv run rt-dataprep convert /secure/organized /secure/converted --workers 4
+uv run rt-dataprep manifest /secure/converted
+uv run rt-dataprep split /secure/converted --test-size 0.2 --val-size 0.2 --seed 42
 ```
 
 A complete supported RTPLAN → RTSTRUCT → planning CT chain produces `plan_<n>/` output. Other eligible CT/MR/PT series
@@ -97,9 +97,9 @@ can appear in both a plan and their study; they remain native-grid images during
 Optional preprocessing with the four step flags (`--initial-resample --rescale --resample --reshape`) aligns registered plan series to the final planning CT grid:
 
 ```bash
-uv run python -m rt_dataprep preprocess /secure/converted /secure/preprocessed --initial-resample --rescale --resample --reshape --series-fov-mask
-uv run python -m rt_dataprep manifest /secure/preprocessed
-uv run python -m rt_dataprep split /secure/preprocessed --test-size 0.2 --val-size 0.2 --seed 42
+uv run rt-dataprep preprocess /secure/converted /secure/preprocessed --initial-resample --rescale --resample --reshape --series-fov-mask
+uv run rt-dataprep manifest /secure/preprocessed
+uv run rt-dataprep split /secure/preprocessed --test-size 0.2 --val-size 0.2 --seed 42
 ```
 
 The `--reshape` shape requires about 812 MiB per float32 volume before processing copies. Review report refusals/skips,

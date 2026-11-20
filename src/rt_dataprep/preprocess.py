@@ -442,6 +442,7 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
             log.error('preprocess: %s: %s', REASON_INTERNAL, result.type_name)
             result = [PreprocessRow(folders[i].name, '', conv.OUTCOME_REFUSED, REASON_INTERNAL)], None, True
         results[i] = result
+        log.info('preprocess: %d of %d patients done', len(results), len(dispatched))  # counts only
         if result[-1]:
             aborted = True
             return pool.ABORT
