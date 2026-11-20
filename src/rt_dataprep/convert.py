@@ -358,11 +358,16 @@ def _place_series(patient, headers, exclude_models, outcomes, partial, short=fro
         study_uid = _tag(first, 'StudyInstanceUID')  # one study per series: at_risk skipped the rest
         hidden = study_folders.setdefault(study_uid, f'.study_{len(study_folders)}')  # an index, never the UID
         study_dates.setdefault(study_uid, []).append(tuple(_tag(first, tag).strip() for tag in ('StudyDate', 'StudyTime')))
+        first_file = None  # the series is compressed once: its other folders get a copy of that file (#360)
         for folder_name, text, plan_columns, extra_keys in [*targets, (hidden, '', dict.fromkeys(PLAN_COLUMNS, ''), {})]:
             k = counts[folder_name, modality] = counts.get((folder_name, modality), 0) + 1
             name = f'series_{modality}_{k}.nii.gz'
             (partial / folder_name).mkdir(exist_ok=True)
-            write_atomic(image, partial / folder_name / name)
+            if first_file is None:
+                first_file = partial / folder_name / name
+                write_atomic(image, first_file)
+            else:
+                _atomic(lambda temp, source=first_file: shutil.copyfile(source, temp), partial / folder_name / name)
             written.setdefault(folder_name, []).append((modality, k, dict(
                 file=name, kind='series', modality=modality, roi_name='', dose_summation_type='', reg_matrix=text,
                 frame_of_reference_uid=frame, **plan_columns, dicom=series_keys | extra_keys,  # a new dict per folder
