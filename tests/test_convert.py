@@ -188,8 +188,8 @@ def test_dose_two_beams_are_summed(tree):
     assert np.allclose(written_dose(rows, out), 40 * SCALING)
 
 
-@pytest.mark.parametrize('numbers', [(1,), (1, 1), (1, 2, 2), (1, 3), (1, None), (None, None)],
-                         ids=['a beam missing', 'one beam twice', 'an extra copy', 'a beam not in the plan', 'one unnamed', 'none named'])
+@pytest.mark.parametrize('numbers', [(1,), (1, 1), (1, 2, 2), (1, 3), (1, None), (None, None), (1, '')],
+                         ids=['a beam missing', 'one beam twice', 'an extra copy', 'a beam not in the plan', 'one unnamed', 'none named', 'a beam item with no number'])
 def test_beam_doses_that_do_not_name_each_treatment_beam_once_refuse_the_plan(tree, numbers):
     _, rows, _ = one_plan(tree, doses=[dose_spec(10, 'BEAM', beam_number=n) for n in numbers], **two_beams())
     assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_RULE)

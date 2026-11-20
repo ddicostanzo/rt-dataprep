@@ -597,7 +597,8 @@ def write_rtdose(path, stored, scaling=1e-4, position=(0.0, 0.0, 0.0), orientati
         reference.ReferencedSOPInstanceUID = plan_sop_uid
         if beam_number is not None:
             beam, group = Dataset(), Dataset()
-            beam.ReferencedBeamNumber = beam_number
+            if beam_number != '':  # '': a beam item that carries no number
+                beam.ReferencedBeamNumber = beam_number
             group.ReferencedFractionGroupNumber, group.ReferencedBeamSequence = 1, [beam]
             reference.ReferencedFractionGroupSequence = [group]
         ds.ReferencedRTPlanSequence = [reference]

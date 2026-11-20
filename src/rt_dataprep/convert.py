@@ -689,11 +689,11 @@ def _check_beam_doses(found, plan):
     expected = sorted(int(b.BeamNumber) for b in beams if b.get('TreatmentDeliveryType') != 'SETUP')  # the plan tables' filter
     named = []
     for _, ds in found:
-        numbers = [int(beam.ReferencedBeamNumber) for item in ds.ReferencedRTPlanSequence if str(item.ReferencedSOPInstanceUID) == plan_uid
+        numbers = [beam.get('ReferencedBeamNumber') for item in ds.ReferencedRTPlanSequence if str(item.ReferencedSOPInstanceUID) == plan_uid
                    for group in item.get('ReferencedFractionGroupSequence') or [] for beam in group.get('ReferencedBeamSequence') or []]
-        if len(numbers) != 1:
+        if len(numbers) != 1 or numbers[0] in (None, ''):  # an item with no number names no beam either
             raise CaseRefused(REASON_DOSE_RULE)
-        named += numbers
+        named.append(int(numbers[0]))
     if sorted(named) != expected:
         raise CaseRefused(REASON_DOSE_RULE)
 
