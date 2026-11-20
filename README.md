@@ -123,7 +123,8 @@ export/
 ```
 
 `organize` reads DICOM files with a DICOM preamble and copies them into `<patient>/plan_<n>/` plus `misc_files/` as needed.
-The patient directory name is a sanitized PatientID, not an anonymous identifier. A source folder containing multiple
+The patient directory name is a sanitized PatientID, not an anonymous identifier: every character outside `A-Z a-z 0-9 . _ -`, a path
+separator included, becomes `_` (`SITE1/0001` is `SITE1_0001`; before v0.5.1 it was `0001`), and at most 64 characters are kept. A source folder containing multiple
 nonblank PatientIDs is refused. Files are copied, never moved, renamed, or deleted in the source tree.
 
 Zip archives in a source folder are read too, recognized by content rather than extension. Stored and deflate

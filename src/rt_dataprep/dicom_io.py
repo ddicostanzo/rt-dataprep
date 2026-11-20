@@ -209,9 +209,9 @@ def sanitize_path_component(value, fallback='UNKNOWN'):
     """A single safe path component from an untrusted value (a PatientID): no separator, no traversal, <= 64 chars."""
     if value is None:
         return fallback
-    # Only the final component, so "../../x" and "C:\\Windows\\x" both reduce to "x".
-    text = str(value).replace('\\', '/').split('/')[-1].strip()
-    text = _UNSAFE_PATH_CHARS.sub('_', text)
+    # A separator becomes "_" like any other unsafe character: keeping only the text after the last one gave the ids
+    # "SITE1/7" and "SITE2/7" one folder (#355).
+    text = _UNSAFE_PATH_CHARS.sub('_', str(value).strip())
     text = text.strip('.')  # "." and ".." carry traversal meaning even with no separator left
     if not text or set(text) <= {'_'}:
         return fallback
