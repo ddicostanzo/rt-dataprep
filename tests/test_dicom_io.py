@@ -74,8 +74,10 @@ def test_sanitize_is_one_safe_component(value):
 
 
 def test_sanitize_values():
-    assert sanitize_path_component('../evil') == 'evil'
-    assert sanitize_path_component('a/b') == 'b'
+    assert sanitize_path_component('../evil') == '_evil'
+    assert sanitize_path_component('a/b') == 'a_b'
+    assert sanitize_path_component('SYNTHETIC_1/7') != sanitize_path_component('SYNTHETIC_2/7')  # #355: two ids, two folders
+    assert sanitize_path_component('../..') == 'UNKNOWN'
     assert sanitize_path_component('ok-1.2_x') == 'ok-1.2_x'
     assert sanitize_path_component('a b') == 'a_b'
     assert sanitize_path_component('') == 'UNKNOWN'

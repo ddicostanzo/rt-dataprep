@@ -123,7 +123,11 @@ export/
 ```
 
 `organize` reads DICOM files with a DICOM preamble and copies them into `<patient>/plan_<n>/` plus `misc_files/` as needed.
-The patient directory name is a sanitized PatientID, not an anonymous identifier. A source folder containing multiple
+The patient directory name is a sanitized PatientID, not an anonymous identifier: surrounding whitespace and dots are dropped, every other
+character outside `A-Z a-z 0-9 . _ -`, a path separator included, becomes `_` (`SITE1/0001` is `SITE1_0001`), at most 64 characters are
+kept, a Windows reserved name gets a leading `_`, and an empty result is `UNKNOWN`. Versions up to 0.5.0 kept only the text after the last
+separator (`0001`): in an output root they organized, such a patient is organized again under the new name, so remove its old folder
+before building a manifest, or the patient is listed twice. A source folder containing multiple
 nonblank PatientIDs is refused. Files are copied, never moved, renamed, or deleted in the source tree.
 
 Zip archives in a source folder are read too, recognized by content rather than extension. Stored and deflate
@@ -354,7 +358,7 @@ resampled, cropped or counted in `retained`), and `manifest` lists it in the pla
   The planning CT path requires an axial volume with consistent orientation, image dimensions, and uniform slice spacing;
   gantry tilt is refused. Other imaging series may be oblique but must still form a regular single-frame volume.
 - Planning CT is float32 HU. Supported physical RTDOSE is converted to Gy and resampled onto its planning CT grid;
-  supported beam-dose inputs are summed. Ambiguous or unsupported dose combinations refuse the plan.
+  beam doses are summed only when they name each treatment beam of the plan exactly once. Ambiguous or unsupported dose combinations refuse the plan.
 - Kept RTSTRUCT ROIs become binary masks on the planning CT grid. Empty, mismatched, or inconsistent mask results refuse
   the plan. Point-only ROIs and names containing `dose` are excluded. Brachy applicator outputs are **gzip-compressed
   coordinate text**, despite their legacy `.nii.gz` extension; consult `kind` in `series.json` before opening a file as NIfTI.

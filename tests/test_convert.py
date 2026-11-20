@@ -59,6 +59,11 @@ def dose_spec(value, summation='PLAN', **kwargs):
     return spec
 
 
+def two_beams():
+    """make_plan keywords for a photon plan with treatment beams 1 and 2: what a summed BEAM dose pair must name (#354)."""
+    return dict(plan_writer=sd.write_photon_rtplan, plan_meta=dict(beams=[sd.photon_beam(1), sd.photon_beam(2)]))
+
+
 def make_plan(folder, doses=(), rois=(), values=None, contour_images=True, patient=PID, ct_meta=None, plan_meta=None, struct_meta=None,
               plan_writer=sd.write_rtplan):
     """One plan folder: CT, RTSTRUCT, RTPLAN (by `plan_writer`, the brachy builder by default) and an RTDOSE per entry of `doses`."""
@@ -179,8 +184,32 @@ def test_dose_one_fraction_is_used(tree):
 
 
 def test_dose_two_beams_are_summed(tree):
-    _, rows, out = one_plan(tree, doses=[dose_spec(10, 'BEAM'), dose_spec(30, 'BEAM')])
+    _, rows, out = one_plan(tree, doses=[dose_spec(10, 'BEAM', beam_number=1), dose_spec(30, 'BEAM', beam_number=2)], **two_beams())
     assert np.allclose(written_dose(rows, out), 40 * SCALING)
+
+
+@pytest.mark.parametrize('numbers', [(1,), (1, 1), (1, 2, 2), (1, 3), (1, None), (None, None), (1, '')],
+                         ids=['a beam missing', 'one beam twice', 'an extra copy', 'a beam not in the plan', 'one unnamed', 'none named', 'a beam item with no number'])
+def test_beam_doses_that_do_not_name_each_treatment_beam_once_refuse_the_plan(tree, numbers):
+    _, rows, _ = one_plan(tree, doses=[dose_spec(10, 'BEAM', beam_number=n) for n in numbers], **two_beams())
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_RULE)
+
+
+def test_a_setup_beam_needs_no_beam_dose(tree):
+    beams = [sd.photon_beam(1), sd.photon_beam(2), sd.photon_beam(3, tags=dict(TreatmentDeliveryType='SETUP'))]
+    _, rows, out = one_plan(tree, doses=[dose_spec(10, 'BEAM', beam_number=1), dose_spec(30, 'BEAM', beam_number=2)],
+                            plan_writer=sd.write_photon_rtplan, plan_meta=dict(beams=beams))
+    assert np.allclose(written_dose(rows, out), 40 * SCALING)
+
+
+def test_the_physical_plan_dose_is_used_beside_an_effective_one(tree):
+    _, rows, out = one_plan(tree, doses=[dose_spec(22, dose_type='EFFECTIVE'), dose_spec(20)])
+    assert np.allclose(written_dose(rows, out), 20 * SCALING)
+
+
+def test_two_physical_plan_doses_beside_an_effective_one_still_refuse(tree):
+    _, rows, _ = one_plan(tree, doses=[dose_spec(22, dose_type='EFFECTIVE'), dose_spec(20), dose_spec(21)])
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_RULE)
 
 
 def test_dose_none_converts_without_dose_file(tree):
@@ -614,7 +643,7 @@ def test_series_json_has_one_row_per_written_file_with_the_values_of_each_kind(t
 def test_series_json_of_a_summed_beam_dose_joins_the_series_uids(tree):
     org, out = tree
     uids = [pydicom.uid.generate_uid(), pydicom.uid.generate_uid()]
-    make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'BEAM', series_uid=uid) for uid in uids])
+    make_plan(org / PID / 'plan_1', doses=[dose_spec(10, 'BEAM', series_uid=uid, beam_number=n) for n, uid in enumerate(uids, 1)], **two_beams())
     conv.convert(org, out)
     dose_row = series_rows(out)[1]
     assert (dose_row['file'], dose_row['modality'], dose_row['dose_summation_type']) == ('dose.nii.gz', 'RTDOSE', 'BEAM')
@@ -1135,6 +1164,15 @@ def test_a_dose_with_negative_or_absolute_frame_offsets_converts_to_the_grid_of_
     assert got.GetOrigin() == ct.GetOrigin() and got.GetSize() == ct.GetSize()
     np.testing.assert_allclose(sitk.GetArrayFromImage(got), STORED * SCALING, atol=1e-5)  # the relative-positive form's dose
     assert value_at(got, physical_point((1, 0, 0, 0, 1, 0), NAMED)) == pytest.approx(STORED[NAMED] * SCALING, abs=1e-5)
+
+
+def test_absolute_frame_offsets_on_another_orientation_refuse_the_plan(tree):
+    # PS3.3 C.8.8.3.2 defines a non-zero first offset for orientation (1,0,0,0,1,0) only (#357); the relative form keeps any orientation
+    top_y = ORIGIN[1] + (SHAPE[1] - 1) * SPACING[1]
+    dose = dose_spec(0, stored=STORED, orientation=(1, 0, 0, 0, -1, 0), position=(ORIGIN[0], top_y, ORIGIN[2]),
+                     offsets=[ORIGIN[2] + k * SPACING[2] for k in range(SHAPE[0])])
+    _, rows, _ = one_plan(tree, doses=[dose])
+    assert (row_of(rows).outcome, row_of(rows).reason) == (conv.OUTCOME_REFUSED, conv.REASON_DOSE_GRID)
 
 
 def test_a_kept_roi_whose_only_points_are_point_items_refuses_the_plan(tree):
