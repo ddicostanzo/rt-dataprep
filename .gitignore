@@ -27,3 +27,5 @@ series.json
 plan.parquet
 ion_plan.parquet
 dwell.parquet
+# session notes stay local (pyproject excludes them from the sdist too)
+docs/handoffs/

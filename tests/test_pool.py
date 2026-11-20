@@ -323,9 +323,11 @@ def test_abort_on_a_read_result_starts_no_new_patient_but_finishes_started_ones(
 @BOTH
 @pytest.mark.parametrize('fn', [w.convert_patient, w.preprocess_patient, w.organize_read, w.organize_copy])
 def test_per_stage_raisers_fail_on_the_chosen_folder_only(fn, workers, tmp_path):
+    (tmp_path / w.RAISE_NAME).mkdir()  # the raiser writes its marker here: without the folder it fails on the write, not on its own raise
+    (tmp_path / w.RAISE_NAME / 'raised').write_text('')  # already there: at N=1 'ok' runs first and would wait 30 s for it
     delivered, error = run_guarded(workers, [Task(fn, (tmp_path / name,)) for name in ('ok', w.RAISE_NAME)])
     assert error is None
-    assert [isinstance(r, Failed) for _, r in delivered] == [False, True]
+    assert [isinstance(r, Failed) for _, r in delivered] == [False, True] and delivered[1][1] == Failed('RuntimeError')
 
 
 def test_a_real_ctrl_c_keeps_the_row_of_a_running_task_while_another_worker_is_idle(tmp_path):
