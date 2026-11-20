@@ -220,6 +220,14 @@ def sanitize_path_component(value, fallback='UNKNOWN'):
     return text[:64]
 
 
+def no_duplicate_keys(pairs):
+    """json's object_pairs_hook: the dict of `pairs`, a bare ValueError (no content in it) when a key repeats; the caller maps it to its fixed reason."""
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError
+    return dict(pairs)
+
+
 def write_report(out_root, name, header, rows):
     """
     `rows` under `header` at out_root/<stem>_<UTC time><suffix of name>, one file per run so a rerun loses nothing (#50), then
