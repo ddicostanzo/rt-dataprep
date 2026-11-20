@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import series_files as sf
 import synthetic_dicom as sd
-from test_convert import RING, RING_CHANNEL, SHAPE, dose_spec, make_plan
+from test_convert import RING, RING_CHANNEL, SHAPE, dose_spec, make_plan, two_beams
 from test_metadata import ALL_TAGS, IMAGES_TAGS, PLAN_TAGS
 from test_series import VALUES, copy_renamed, rigid
 
@@ -266,8 +266,8 @@ def test_a_series_aggregates_over_every_slice_in_its_plan_row_and_its_study_row(
 def test_a_two_file_dose_row_aggregates_over_both_files(tmp_path):
     def build(org):
         return make_plan(org / PID / 'plan_1', patient=PID, doses=[
-            dose_spec(5, 'BEAM', tags=dict(Manufacturer='SYNTHETIC_MAKER_A', SeriesNumber='2', DoseComment='SYNTHETIC_ONE')),
-            dose_spec(6, 'BEAM', tags=dict(Manufacturer='SYNTHETIC_MAKER_B', SeriesNumber='10'))])
+            dose_spec(5, 'BEAM', beam_number=1, tags=dict(Manufacturer='SYNTHETIC_MAKER_A', SeriesNumber='2', DoseComment='SYNTHETIC_ONE')),
+            dose_spec(6, 'BEAM', beam_number=2, tags=dict(Manufacturer='SYNTHETIC_MAKER_B', SeriesNumber='10'))], **two_beams())
     _, rows, out = convert_tree(tmp_path, build)
     assert rows[0].outcome == 'converted'
     dose = next(r for r in sf.read(out / PID / 'plan_1') if r['kind'] == 'dose')
@@ -288,8 +288,8 @@ def test_a_two_file_dose_with_different_dose_types_is_distinct_on_the_dose_row(t
     monkeypatch.setattr(conv, '_check_dose_header', lenient)
 
     def build(org):
-        return make_plan(org / PID / 'plan_1', patient=PID, doses=[dose_spec(5, 'BEAM', dose_type='PHYSICAL'),
-                                                                   dose_spec(6, 'BEAM', dose_type='EFFECTIVE')])
+        return make_plan(org / PID / 'plan_1', patient=PID, doses=[dose_spec(5, 'BEAM', dose_type='PHYSICAL', beam_number=1),
+                                                                   dose_spec(6, 'BEAM', dose_type='EFFECTIVE', beam_number=2)], **two_beams())
     _, rows, out = convert_tree(tmp_path, build)
     assert rows[0].outcome == 'converted'
     dose = next(r for r in sf.read(out / PID / 'plan_1') if r['kind'] == 'dose')

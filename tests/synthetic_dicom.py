@@ -577,12 +577,12 @@ def write_rtstruct_rois(path, ct, rois, contour_images=True, sop_uid=None, **met
 
 def write_rtdose(path, stored, scaling=1e-4, position=(0.0, 0.0, 0.0), orientation=(1, 0, 0, 0, 1, 0),
                  pixel_spacing=(2.0, 3.0), offsets=None, plan_sop_uid=None, frame_uid=None, units='GY',
-                 dose_type='PHYSICAL', summation='PLAN', number_of_frames=None, invalid_values=False, sop_uid=None, **meta):
+                 dose_type='PHYSICAL', summation='PLAN', number_of_frames=None, invalid_values=False, sop_uid=None, beam_number=None, **meta):
     """
     A multi-frame RTDOSE. stored: (frames, rows, columns) unsigned ints, the dose is stored x `scaling` Gy.
     position: ImagePositionPatient of the first frame. offsets: GridFrameOffsetVector (default 0, 1, 2 ... mm);
     pass the first frame's position along the slice axis for the absolute convention. plan_sop_uid=None omits
-    ReferencedRTPlanSequence. number_of_frames overrides the NumberOfFrames tag. invalid_values writes an invalid PN
+    ReferencedRTPlanSequence. beam_number: the ReferencedBeamNumber a BEAM dose names (None: none). number_of_frames overrides the NumberOfFrames tag. invalid_values writes an invalid PN
     and DA that contain a SYNTHETIC_ string. Returns its SOPInstanceUID.
     """
     stored = np.asarray(stored, dtype=np.uint32)
@@ -595,6 +595,11 @@ def write_rtdose(path, stored, scaling=1e-4, position=(0.0, 0.0, 0.0), orientati
         reference = Dataset()
         reference.ReferencedSOPClassUID = pydicom.uid.RTPlanStorage
         reference.ReferencedSOPInstanceUID = plan_sop_uid
+        if beam_number is not None:
+            beam, group = Dataset(), Dataset()
+            beam.ReferencedBeamNumber = beam_number
+            group.ReferencedFractionGroupNumber, group.ReferencedBeamSequence = 1, [beam]
+            reference.ReferencedFractionGroupSequence = [group]
         ds.ReferencedRTPlanSequence = [reference]
     ds.ImagePositionPatient = [float(v) for v in position]
     ds.ImageOrientationPatient = [float(v) for v in orientation]

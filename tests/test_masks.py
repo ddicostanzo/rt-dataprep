@@ -566,18 +566,25 @@ def test_a_line_named_like_a_mask_refuses(tmp_path):
     assert refused(tmp_path, make_plan(tmp_path, rois)) == masks.REASON_ROI_NAMES
 
 
-def test_applicator_text_goes_through_a_temp_name_that_ends_nii_gz(tmp_path, monkeypatch):
+def test_applicator_text_goes_through_a_temp_name(tmp_path, monkeypatch):
     names = []
-    original = np.savetxt
+    original = conv.save_points
 
-    def record(fname, points, **kwargs):
-        names.append((os.path.basename(fname), kwargs))
-        return original(fname, points, **kwargs)
-    monkeypatch.setattr(masks.np, 'savetxt', record)
+    def record(points, path):
+        names.append(os.path.basename(path))
+        return original(points, path)
+    monkeypatch.setattr(conv, 'save_points', record)
     rois = [dict(number=1, name='Ring', kind='channel', points=channel_points(3))]
     run(tmp_path, make_plan(tmp_path, rois))
-    assert len(names) == 1 and names[0][0].endswith('.nii.gz') and names[0][0] != 'Ring.nii.gz'
-    assert names[0][1] == dict(fmt='%.4f')
+    assert len(names) == 1 and names[0] != 'Ring.nii.gz'
+
+
+def test_applicator_text_is_gzip_with_no_time_or_name_in_its_header(tmp_path):
+    points = channel_points(3)
+    conv.save_points(points, tmp_path / 'a.nii.gz')
+    data = (tmp_path / 'a.nii.gz').read_bytes()
+    assert data[:4] == b'\x1f\x8b\x08\x00' and data[4:8] == bytes(4)  # no FNAME flag, MTIME 0: the same points give the same bytes (#346)
+    np.testing.assert_allclose(np.loadtxt(tmp_path / 'a.nii.gz'), points, atol=5e-5)
 
 
 # ---------------------------------------------------------------- guardrails on the source
