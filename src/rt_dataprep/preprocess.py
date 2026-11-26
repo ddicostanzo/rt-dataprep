@@ -450,7 +450,7 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
     if overwrite and converted_root.resolve().is_relative_to(out_root.resolve()):  # a replaced patient folder could hold the input
         raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
     if (steps.reshape_centre not in RESHAPE_CENTRES or (steps.reshape_centre != 'image' and not steps.reshape)
-            or (steps.reshape_centre == 'roi') != bool(steps.reshape_roi) or steps.reshape_centre in ('roi', 'dose')):  # roi and dose are not implemented yet
+            or (steps.reshape_centre == 'roi') != bool(steps.reshape_roi)):
         raise ValueError(REASON_RESHAPE_CENTRE)
     if not (steps.resample or steps.rescale or steps.hu_window or steps.harmonize_spacing or steps.reshape or steps.ahe):
         raise ValueError(REASON_NO_STEPS)
@@ -874,13 +874,41 @@ def table_points(plan_dir, kept, mode):
     return np.unique(points, axis=0) if mode == 'isocenter' else points  # a plan repeats its isocentre on every control point
 
 
-def reshape_centre_voxel(plan_dir, kept, info, steps):
-    """Voxel c, (x, y, z), of the grid entering reshape that is nearest the folder's `steps.reshape_centre` point: floor(x + 0.5) of its continuous index. None when there is no usable centre: no table or no rows, a point that is not finite, or a reshape range (c - N // 2 to c - N // 2 + N - 1) that misses the image on an axis. `info` is the CT's read_info."""
-    points = table_points(plan_dir, kept, steps.reshape_centre)
-    if points is None or not len(points):
+def roi_row(kept, names):
+    """The mask row `names` pick: for each name in order, the exact roi_name match, else the first case-insensitive match in series.json order. None when no name matches."""
+    masks = [row for row in kept if row['kind'] == 'mask']
+    for name in names:
+        hit = next((row for row in masks if row['roi_name'] == name), None) or next((row for row in masks if row['roi_name'].casefold() == name.casefold()), None)
+        if hit is not None:
+            return hit
+    return None
+
+
+def weighted_centroid(image, weighted):
+    """The physical (x, y, z) centroid of `image`'s nonzero voxels, or of its values as weights when `weighted`. From the per-axis marginal sums in float64 (arrays are (z, y, x)); None when the weight is zero."""
+    values = sitk.GetArrayFromImage(image)
+    marginals = [(values if weighted else values != 0).sum(axis=axes, dtype=np.float64) for axes in ((0, 1), (0, 2), (1, 2))]  # along x, y, z
+    total = marginals[0].sum()
+    if total == 0:
         return None
-    point = points.mean(axis=0)
-    if not np.isfinite(point).all():  # a NaN or an inf in any row makes the mean so
+    index = [float(m @ np.arange(len(m))) / total for m in marginals]
+    return np.array(quiet_call(lambda: image.TransformContinuousIndexToPhysicalPoint(index), REASON_INTERNAL))
+
+
+def centre_point(plan_dir, kept, steps):
+    """The physical (x, y, z) point of the folder's `steps.reshape_centre`: the mean of its table points, or the centroid of the matched mask or of the dose. None when no table, mask or dose gives one. An unreadable mask or dose raises CaseRefused(REASON_FILE_UNREADABLE) from read_image."""
+    mode = steps.reshape_centre
+    if mode in ('roi', 'dose'):
+        row = roi_row(kept, steps.reshape_roi) if mode == 'roi' else next((r for r in kept if r['kind'] == 'dose'), None)
+        return None if row is None else weighted_centroid(read_image(plan_dir / row['file']), mode == 'dose')
+    points = table_points(plan_dir, kept, mode)
+    return None if points is None or not len(points) else points.mean(axis=0)
+
+
+def reshape_centre_voxel(plan_dir, kept, info, steps):
+    """Voxel c, (x, y, z), of the grid entering reshape that is nearest the folder's `steps.reshape_centre` point (centre_point): floor(x + 0.5) of its continuous index. None when there is no usable centre: no table, rows, mask or dose, a point that is not finite, or a reshape range (c - N // 2 to c - N // 2 + N - 1) that misses the image on an axis. `info` is the CT's read_info."""
+    point = centre_point(plan_dir, kept, steps)
+    if point is None or not np.isfinite(point).all():  # a NaN or an inf in any row makes the mean so
         return None
     size, origin, spacing, direction = entering_reshape_grid(info, steps)
     def run():

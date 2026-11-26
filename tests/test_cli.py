@@ -811,3 +811,14 @@ def test_an_isocenter_run_on_a_plan_without_a_plan_table_reports_it_refused_with
     assert result.returncode == 0 and str(tmp_path) not in result.stderr
     assert [(r['outcome'], r['reason']) for r in report_rows(out)] == [(conv.OUTCOME_REFUSED, pre.REASON_NO_CENTRE)]
     assert not (out / 'SYNTHETICPTA' / 'plan_1').exists()
+
+
+def test_a_roi_run_centres_the_output_on_the_named_mask(tmp_path):
+    from test_preprocess import BLOCK, CENTRED_SHAPE, MARKER, centred_plan
+    root, out = tmp_path / 'converted', tmp_path / 'out'
+    centred_plan(tmp_path, root, masks={'PTV': BLOCK})
+    result = subprocess.run([sys.executable, '-c', PRE_RUN % (CENTRED_SHAPE, ''), str(root), str(out), '--reshape', '--allow-crop', '--reshape-centre', 'roi', '--reshape-roi', 'ptv_missing', 'PTV'], capture_output=True, text=True)
+    assert result.returncode == 0 and str(tmp_path) not in result.stderr
+    assert [(r['outcome'], r['reason']) for r in report_rows(out)] == [(pre.OUTCOME_PREPROCESSED, '')]
+    array = sitk.GetArrayFromImage(sitk.ReadImage(str(out / 'SYNTHETICPTA' / 'plan_1' / pre.output_name(conv.CT_NAME, pre.PreprocessSteps(reshape=True), ct=True, image=True))))
+    assert array[4, 3, 3] == MARKER and (array == MARKER).sum() == 1  # N // 2 reversed to (z, y, x)

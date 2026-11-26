@@ -3698,10 +3698,10 @@ def centred_ct(done, steps):
     return sitk.GetArrayFromImage(read_out(done, pre.output_name(conv.CT_NAME, steps, ct=True, image=True)))
 
 
-def assert_marker_centred(tmp_path, tables, steps=CENTRED):
+def assert_marker_centred(tmp_path, tables, steps=CENTRED, **plan):
     """The marker voxel is at output index N // 2 per axis, once; the image-centred run puts it elsewhere. Arrays are (z, y, x)."""
-    report, done, _ = run_centred(tmp_path, steps, tables)
-    base_report, base_done, _ = run_centred(tmp_path, dataclasses.replace(steps, reshape_centre='image'), tables, name='image')
+    report, done, _ = run_centred(tmp_path, steps, tables, **plan)
+    base_report, base_done, _ = run_centred(tmp_path, dataclasses.replace(steps, reshape_centre='image', reshape_roi=()), tables, name='image', **plan)
     assert plan_row(report).outcome == plan_row(base_report).outcome == 'preprocessed'
     out, base = centred_ct(done, steps), centred_ct(base_done, steps)
     assert out.shape == base.shape == (8, 7, 6)
@@ -3847,8 +3847,7 @@ def test_a_study_folder_in_an_isocenter_run_is_image_centred(tmp_path):
     PreprocessSteps(reshape=True, reshape_centre='roi'),
     PreprocessSteps(reshape=True, reshape_roi=('PTV',)),
     PreprocessSteps(reshape=True, reshape_centre='dwells', reshape_roi=('PTV',)),
-    PreprocessSteps(reshape=True, reshape_centre='roi', reshape_roi=('PTV',)),  # roi and dose are accepted by validation only once they are implemented
-    PreprocessSteps(reshape=True, reshape_centre='dose'),
+    PreprocessSteps(reshape=True, reshape_centre='dose', reshape_roi=('PTV',)),
 ])
 def test_a_bad_reshape_centre_raises_before_any_output(tmp_path, steps):
     centred_plan(tmp_path, tmp_path / 'converted', [('plan', [ISO])])
@@ -3860,3 +3859,81 @@ def test_a_bad_reshape_centre_raises_before_any_output(tmp_path, steps):
 def test_the_centre_reasons_are_fixed_text_with_no_digits_and_the_default_is_the_image_centre():
     assert not any(c.isdigit() for c in pre.REASON_NO_CENTRE + pre.REASON_RESHAPE_CENTRE) and pre.REASON_NO_CENTRE != pre.REASON_RESHAPE_CENTRE
     assert (PreprocessSteps().reshape_centre, PreprocessSteps().reshape_roi) == ('image', ())
+
+
+# ---- centred reshape (#372) task-02: the roi and dose centres. Both reuse the task-01 fixture: marker voxel (11, 9, 5), a different offset per axis. ----
+
+def test_weighted_centroid_is_the_physical_point_of_the_marginal_means_in_x_y_z_order():
+    array = np.zeros((4, 5, 6))  # (z, y, x)
+    array[3, 2, 1], array[1, 0, 4] = 3.0, 1.0  # voxels (x, y, z) = (1, 2, 3) with weight 3 and (4, 0, 1) with weight 1
+    image = make_image(array, spacing=(0.5, 1.25, 2.0), origin=(10.0, 20.0, 30.0))
+    assert pre.weighted_centroid(image, True) == pytest.approx((10.0 + 1.75 * 0.5, 20.0 + 1.5 * 1.25, 30.0 + 2.5 * 2.0), abs=1e-9)
+    assert pre.weighted_centroid(image, False) == pytest.approx((10.0 + 2.5 * 0.5, 20.0 + 1.0 * 1.25, 30.0 + 2.0 * 2.0), abs=1e-9)
+    assert pre.weighted_centroid(make_image(np.zeros((2, 2, 2))), False) is None
+
+
+ROI = dataclasses.replace(CENTRED, reshape_centre='roi', reshape_roi=('PTV',), allow_crop=True)  # allow_crop: the image-centred control run cuts the blocks
+BLOCK = box((10, 7, 3), (13, 12, 8), CENTRED_N)  # 3x5x5 voxels centred on voxel (11, 9, 5)
+FAR_BLOCK = box((8, 6, 3), (10, 8, 5), CENTRED_N)  # centroid voxel (8.5, 6.5, 3.5): rounds to (9, 7, 4), off the marker on every axis; kept by the image-centred window too
+FAR_VOXEL = BLOCK.copy()
+FAR_VOXEL[9, 13, 15] = 1.0  # one outlier: the centroid moves by 0.05 voxel (still the marker) while the bounding box centre moves to (12.5, 10, 6)
+
+
+def test_roi_centres_on_the_centroid_of_the_mask_not_the_middle_of_its_bounding_box(tmp_path):
+    assert_marker_centred(tmp_path, [], ROI, masks={'PTV': FAR_VOXEL, 'bladder': FAR_BLOCK})
+
+
+@pytest.mark.parametrize(('names', 'masks'), [
+    (('ptv_missing', 'PTV'), {'ptv': BLOCK, 'bladder': FAR_BLOCK}),  # the first name matches nothing; PTV matches ptv ignoring case
+    (('PTV',), {'ptv': FAR_BLOCK, 'PTV': BLOCK}),  # an exact match wins over an earlier case-insensitive one
+    (('PTV',), {'Ptv': BLOCK, 'pTV': FAR_BLOCK}),  # no exact match: the first in series.json order
+    (('bladder', 'PTV'), {'PTV': FAR_BLOCK, 'bladder': BLOCK}),  # the first name that matches decides
+], ids=['missing_name_then_case_insensitive', 'exact_wins', 'first_case_insensitive', 'first_name_wins'])
+def test_roi_names_pick_the_mask_exact_then_case_insensitive_in_name_order(tmp_path, names, masks):
+    assert_marker_centred(tmp_path, [], dataclasses.replace(ROI, reshape_roi=names), masks=masks)
+
+
+def test_a_dose_centres_on_its_weighted_centroid_not_the_centroid_of_its_nonzero_voxels(tmp_path):
+    dose = box((10, 8, 4), (13, 11, 7), CENTRED_N, 100.0) + box((8, 6, 3), (10, 8, 5), CENTRED_N, 0.5)  # a hot block at voxel (11, 9, 5), a faint one at (8.5, 6.5, 3.5)
+    assert_marker_centred(tmp_path, [], dataclasses.replace(ROI, reshape_centre='dose', reshape_roi=()), dose=dose)  # the nonzero voxels' centroid (10.4, 8.4, 4.7) would put it at voxel (10, 8, 5)
+
+
+@pytest.mark.parametrize('plan', [
+    dict(masks={'bladder': BLOCK}),  # no name matches
+    dict(masks={'PTV': np.zeros_like(BLOCK)}),  # the matched mask is empty
+    dict(masks={'PTV_2': BLOCK}),  # a longer name is not a match
+    dict(masks={}),  # no mask at all
+], ids=['no_match', 'empty_mask', 'no_partial_match', 'no_masks'])
+def test_a_roi_with_no_usable_mask_is_refused_alone_with_no_centre_and_writes_nothing(tmp_path, plan):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    centred_plan(tmp_path, converted, **plan)
+    centred_plan(tmp_path, converted, patient='SYNTHETICPTB', masks={'PTV': BLOCK})
+    report = pre.preprocess(converted, out, ROI)
+    assert [(r.patient, r.outcome, r.reason) for r in report.rows] == [
+        ('SYNTHETICPTA', conv.OUTCOME_REFUSED, pre.REASON_NO_CENTRE), ('SYNTHETICPTB', pre.OUTCOME_PREPROCESSED, '')]
+    assert not (out / 'SYNTHETICPTA' / 'plan_1').exists()
+
+
+@pytest.mark.parametrize('dose', [np.zeros_like(BLOCK), None], ids=['all_zero', 'no_dose'])
+def test_a_dose_with_no_weight_or_no_dose_is_refused_alone_with_no_centre_and_writes_nothing(tmp_path, dose):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    centred_plan(tmp_path, converted, dose=dose)
+    centred_plan(tmp_path, converted, patient='SYNTHETICPTB', dose=BLOCK * 2.0)
+    report = pre.preprocess(converted, out, dataclasses.replace(ROI, reshape_centre='dose', reshape_roi=()))
+    assert [(r.patient, r.outcome, r.reason) for r in report.rows] == [
+        ('SYNTHETICPTA', conv.OUTCOME_REFUSED, pre.REASON_NO_CENTRE), ('SYNTHETICPTB', pre.OUTCOME_PREPROCESSED, '')]
+    assert not (out / 'SYNTHETICPTA' / 'plan_1').exists()
+
+
+@pytest.mark.parametrize(('mode', 'file'), [('roi', 'PTV.nii.gz'), ('dose', conv.DOSE_NAME)])
+def test_an_unreadable_mask_or_dose_keeps_the_file_unreadable_reason(tmp_path, mode, file):
+    folder = centred_plan(tmp_path, tmp_path / 'converted', masks={'PTV': BLOCK}, dose=BLOCK)
+    (folder / file).write_bytes(b'not a nifti')
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', dataclasses.replace(ROI, reshape_centre=mode, reshape_roi=ROI.reshape_roi if mode == 'roi' else ()))
+    assert [(r.outcome, r.reason) for r in report.rows] == [(conv.OUTCOME_REFUSED, pre.REASON_FILE_UNREADABLE)] and not (tmp_path / 'out' / 'SYNTHETICPTA' / 'plan_1').exists()
+
+
+def test_roi_matches_mask_rows_only_not_an_applicator_of_that_name(tmp_path):
+    centred_plan(tmp_path, tmp_path / 'converted', masks={'bladder': BLOCK})  # write_plan adds the applicator row 'applicator_a'
+    report = pre.preprocess(tmp_path / 'converted', tmp_path / 'out', dataclasses.replace(ROI, reshape_roi=('applicator_a',)))
+    assert [(r.outcome, r.reason) for r in report.rows] == [(conv.OUTCOME_REFUSED, pre.REASON_NO_CENTRE)]
