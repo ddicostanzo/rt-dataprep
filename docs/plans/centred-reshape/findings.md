@@ -22,3 +22,20 @@ Gotchas
 - Marker tests use reshape only: a linear resample blurs the marker. The resample test checks the output plan indices instead.
 - Spacing and origin are dyadic because a NIfTI header stores float32; the halfway case (11b) uses lower indices 10 and 4 (even), so round-half-even would fail it.
 - Mutation-checked by hand: `shape // 2` to `(shape - 1) // 2`, `floor(x + 0.5)` to `rint` and to `floor`, the distinct step, the dwell weight filter, the pre-reshape grid, the origin, the FOV centre argument and the range check each fail at least one test.
+
+## task-02
+
+Files: `src/rt_dataprep/preprocess.py`, `tests/test_preprocess.py`, `tests/test_cli.py`, `README.md`.
+
+Decisions
+- One path: `centre_point(plan_dir, kept, steps)` returns the physical point for every mode (table mean, or `weighted_centroid` of the matched mask or the dose) and `reshape_centre_voxel` calls it where it called `table_points` before. The `REASON_RESHAPE_CENTRE` clause for roi and dose is gone from `preprocess()`.
+- `weighted_centroid(image, weighted)`: per-axis marginal sums in float64 (`sum(axis=..., dtype=float64)`, no float64 copy of the array), index centroid per axis, then the image's `TransformContinuousIndexToPhysicalPoint` (only that call is in `quiet_call`). Arrays are (z, y, x); the marginals along x, y, z are the sums over axes (0, 1), (0, 2), (1, 2). A zero total is None (-> `REASON_NO_CENTRE`); a NaN total flows to the non-finite check in `reshape_centre_voxel`.
+- `roi_row(kept, names)`: mask rows only (an applicator or line row of that name does not match); per name, exact `roi_name`, else the first `casefold()` match in series.json order (`kept` keeps that order after the CT is moved first).
+- The mask or dose is read with `read_image` in `centre_point`, outside `quiet_call`: an unreadable file is `REASON_FILE_UNREADABLE`, no mask, no dose, no name match, an empty mask and an all-zero dose are `REASON_NO_CENTRE`. The file is read once here and once more in the row loop.
+
+Gotchas
+- A roi/dose test needs `allow_crop=True`: the image-centred control run cuts the blocks, and a mask lost entirely refuses with `REASON_CROP`. The control run must also keep each fixture mask partly inside the image window, else it refuses rather than differs.
+- `assert_marker_centred` clears `reshape_roi` for its image-centred control (`image` with names is a validation error); it also takes `**plan` for masks and dose.
+- A dose that sums to a negative total is not refused (deferred in the spec: negative dose voxels).
+
+Mutation-checked by hand: x/z swap, x/y swap, dropping the dose weighting, bounding-box centre instead of centroid, ignoring the origin, exact-only and case-insensitive-only matching, last-instead-of-first case-insensitive match, names tried in reverse order, a zero total not refused, matching non-mask rows (caught by the applicator test added for it): each fails at least one test.
