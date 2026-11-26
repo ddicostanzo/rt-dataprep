@@ -85,7 +85,7 @@ count before accepting the cohort. Successful process completion can include ref
 | --- | --- | --- |
 | `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers auto` or `1..64` (default `auto`); `--overwrite` |
 | `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers auto` or `1..64` (default `auto`); `--overwrite` |
-| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers auto` or `1..64` (default `auto`); at least one step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--new-spacing`, `--final-spacing`, `--new-shape`, `--allow-crop`, `--dose-retained-gy`, `--dose-retained-fraction`, `--min-mask-retention`, `--ahe-kernel-mm`, `--ahe-bins`, `--ahe-clip-limit`, `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
+| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers auto` or `1..64` (default `auto`); at least one step flag (`--initial-resample`, `--hu-window LO HI`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--new-spacing`, `--final-spacing`, `--new-shape`, `--allow-crop`, `--dose-retained-gy`, `--dose-retained-fraction`, `--min-mask-retention`, `--ahe-kernel-mm`, `--ahe-bins`, `--ahe-clip-limit`, `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
 | `manifest ROOT` | Write `ROOT/manifest.jsonl` and a dated copy. | Works on converted or preprocessed trees. |
 | `split ROOT` | Read `ROOT/manifest.jsonl`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
 
@@ -391,7 +391,8 @@ uv run rt-dataprep split /secure/preprocessed --test-size 0.2 --val-size 0.2 --s
 | Flag | Step | Output prefix |
 | --- | --- | --- |
 | `--initial-resample` | Resample to 1 mm spacing (`--new-spacing X Y Z`) | `initialresample_` |
-| `--rescale` | Apply `(HU + 1024) / 4096` to CT | `rescale_` |
+| `--hu-window LO HI` | Clip CT to `LO..HI` HU (`LO < HI`, finite), after the initial resample and before `--rescale` | `huwindow_` |
+| `--rescale` | Apply `(HU + 1024) / 4096` to CT, after the HU window if given | `rescale_` |
 | `--ahe` | CLAHE adaptive histogram equalization | `ahe_` |
 | `--resample` | Resample to 1.25 mm spacing (`--final-spacing X Y Z`) | `resample_` |
 | `--reshape` | Centred crop/pad to **701 × 701 × 433 voxels (x, y, z)** (`--new-shape X Y Z`) | `reshape_` |
@@ -417,9 +418,11 @@ dose cut only below that threshold counts as cropped but has `retained` `1.0`. A
 `retained`, but is left out of the plan's lowest `retained` and of `cropped`. A mask without a single `roi_interpreted_type` (a tree converted before dicom metadata) still counts, and the run log warns how many such masks the final grid cut. The run's closing log line counts the cropped plans and how many of them have a
 lowest `retained` below 0.9. A dose or mask that the final grid empties entirely refuses the plan, with or without `--allow-crop`.
 
-CT study series receive all enabled steps. MR/PT study series receive geometric steps and optional AHE, and skip HU rescaling. `--rescale`
-alone (or the same Python configuration) refuses MR/PT because it has no applicable step. With no geometric step (`--rescale` and/or
-`--ahe` only), dose and masks are copied unchanged. Registered plan series are resampled onto
+CT study series receive all enabled steps. MR/PT study series receive geometric steps and optional AHE, and skip the HU window and HU rescaling. `--hu-window`
+and/or `--rescale` alone (or the same Python configuration) refuses MR/PT because it has no applicable step. With no geometric step (`--hu-window`, `--rescale` and/or
+`--ahe` only), dose and masks are copied unchanged; `--allow-crop` still needs a geometric step. The order on a CT is initial resample, HU window, rescale, AHE, final resample, reshape; a registered CT
+series is windowed, rescaled and equalized before its one resample onto the final CT. Resampling keeps filling with 0, so with a resample step the region outside the original CT may lie
+outside `LO..HI`; `--series-fov-mask` marks it. Registered plan series are resampled onto
 the final planning CT grid; unusable alignment, no overlap, or unreadable data skips that series and increments the plan's
 `skipped_series`. Output `reg_matrix` is `identity` after alignment, but the row's `dicom` object keeps the original REG's `reg_*` keys unchanged.
 
@@ -440,7 +443,7 @@ even when the CLI exits successfully. Python uses `PreprocessSteps(min_mask_rete
 Optional `--ahe` applies per-volume min-max scaling followed by scikit-image CLAHE (default kernel of one eighth of each
 axis, 128 bins, clip limit 0.05) to planning CT and CT/MR/PT image series. It is off by default and never equalizes dose,
 masks, or applicator coordinates. It produces float32 image values in [0, 1]; these are contrast values, not HU or SUV.
-The step runs before final resampling/cropping, after any CT rescale. Registered plan series are equalized on their native
+The step runs before final resampling/cropping, after any CT HU window and rescale. Registered plan series are equalized on their native
 grids before alignment. Constant volumes become zero; if CLAHE collapses a varying tiny/two-level volume to a constant,
 the normalized input is retained instead, preserving contrast. NaN/Inf input is refused before AHE: a study refusal affects
 that series only, a planning CT refuses its plan, and an invalid aligned series is skipped and counted.
@@ -469,8 +472,12 @@ The initial linear resample's edge fill still participates in AHE's histogram; s
 downstream consumers, not a masked CLAHE algorithm. AHE-only avoids introducing that initial-resample fill. A
 `rescale_` prefix records the executed CT processing step even though AHE's subsequent min-max scaling removes its units.
 
-Output filenames acquire step prefixes such as `reshape_resample_rescale_initialresample_`; when enabled, `ahe_` sits
-between `resample_` and `rescale_` (for example `reshape_resample_ahe_rescale_initialresample_`). Generate a new manifest
+`--hu-window LO HI` is the way to put a cohort that mixes 12-bit CTs (HU up to 3071) and 16-bit extended-HU CTs on one scale: `--rescale` alone gives values above 1 for the 16-bit CTs,
+while `--hu-window -1024 3071 --rescale` maps every CT into [0, 1]. Convert already writes every CT in HU. Published windows for dose work (about -1024 to 1500) or segmentation (for example -1000 to 1000, -500 to 500) work the same way. The clip is
+a voxelwise clamp in float32 and the run records only the `huwindow_` prefix, not LO and HI.
+
+Output filenames acquire step prefixes such as `reshape_resample_rescale_huwindow_initialresample_`; when enabled, `ahe_` sits
+between `resample_` and `rescale_` (for example `reshape_resample_ahe_rescale_huwindow_initialresample_`). Generate a new manifest
 after preprocessing so its `image` and `series` fields point to the resulting filenames. Use
 [examples/custom_preprocess.py](examples/custom_preprocess.py) for a smaller, explicit Python configuration.
 
@@ -540,7 +547,8 @@ class/module/line details. Reports, manifests and per-folder `series.json` files
 | A patient is skipped on rerun | Its destination patient folder already exists. Add `--overwrite` to replace it (see below), or use a fresh output root to recompute. |
 | A plan is refused | Read its fixed reason in the conversion report; verify the RTPLAN → RTSTRUCT → CT reference chain and geometry. |
 | Fewer images than expected | Review study summary skips, series eligibility, model exclusions, localizers, and readable pixel data. |
-| Preprocessing reports no step is on | Pass a step flag (`--initial-resample`, `--rescale`, `--ahe`, `--resample`, `--reshape`), or enable applicable `PreprocessSteps` in Python. |
+| Preprocessing reports no step is on | Pass a step flag (`--initial-resample`, `--hu-window`, `--rescale`, `--ahe`, `--resample`, `--reshape`), or enable applicable `PreprocessSteps` in Python. |
+| `--hu-window` is refused as a bad HU window | LO and HI must be finite numbers with LO below HI; `--allow-crop` with only `--hu-window`, `--rescale` or `--ahe` is refused too (it needs a geometric step). |
 | A series or plan is missing from the manifest | Check the refusal count, `series.json`, file presence, and image headers. |
 | Split refuses existing content | Preserve the old cohort record and generate the new cohort in a separate output root. |
 | A patient fails with the I/O-error reason | A disk or permission error while reading one of its inputs fails the whole patient (no plan rows, no partial folder), and the run carries on with the next patient. Check the disk and file permissions, then rerun. A file that is missing or is not a valid image still refuses only its plan or series. |
@@ -647,6 +655,7 @@ their output prefix:
 | `PreprocessSteps` field | CLI flag | Default |
 | --- | --- | --- |
 | `resample` | `--initial-resample` | `False` |
+| `hu_window` | `--hu-window LO HI` | `None` |
 | `rescale` | `--rescale` | `False` |
 | `ahe` | `--ahe` | `False` |
 | `harmonize_spacing` | `--resample` | `False` |
