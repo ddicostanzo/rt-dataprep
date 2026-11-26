@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "Centred reshape mechanics with the isocenter and dwells modes, validation and CLI",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "src/rt_dataprep/__main__.py",
+        "tests/test_preprocess.py",
+        "tests/test_cli.py"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "tests/test_cli.py": "modify"
+      },
+      "notes": "Line numbers in the spec are from main at d31be9e; verify each before relying on it. The centre is computed in preprocess_plan after check_rows and before out_dir.mkdir() (next to too_small). Plan-table x/y/z are already in the CT's physical frame. image mode keeps calling today's crop_or_pad unchanged. The three crop_or_pad callers: process_ct, image_fov_mask (gains the centre as an argument), the study path via preprocess_series (always image centre). roi and dose modes may be accepted by validation in this task but are implemented in task-02; until then they must not silently fall back to image. The test helpers grid() and write_plan build isotropic cubes centred on the origin and write no plan/dwell parquet: extend them (spacing and origin tuples, parquet writers using the real schemas) for 8b. dwell positions are written at dwell_table.py ~169-170. Plan-table fixtures: reuse the to_table / write_*_table helpers test_preprocess.py already uses (~1570, ~1743) and index_plan_table-style read plus schema check, not a second parser. Centroids: per-axis marginal sums in float64, not np.indices/argwhere over the volume.",
+      "test_approach": "TDD on synthetic fixtures built at test time (existing helpers in tests/test_preprocess.py: write_plan, run_plan, make_image; plan tables written with the real schemas). Every fixture puts the centre at a different offset on each axis, on a CT with anisotropic spacing and a non-zero origin, and asserts the output differs from the image run (vault [[alignment-test-needs-a-displacement-guard]]).",
+      "criteria": [
+        "Spec acceptance 1: the image mode (default) leaves every existing reshape test passing with no change to those tests",
+        "Spec acceptance 2: isocenter mode on an off-centre isocentre puts the voxel nearest the isocentre (floor(x + 0.5) of its continuous index on the grid entering reshape) at output index N // 2 per axis; the output plan.parquet isocenter_i/j/k are within 0.5 of N // 2; two distinct isocentres centre on their mean; a repeated isocentre counts once; plan.parquet and ion_plan.parquet in one folder pool their isocentres; the fixture CT carries a unique-value marker voxel at the expected centre and the test asserts that value appears at output index N // 2 (not a re-derivation of the code formula)",
+        "Spec acceptance 3: dwells mode centres on the unweighted mean of dwell.parquet positions with dwell_weight > 0; a zero-weight dwell far from the others does not move the centre",
+        "Spec acceptance 6: with isocenter mode, an off-centre dose hot block and a mask block placed at the isocentre land at output index N // 2 in the output dose and mask",
+        "Spec acceptance 7: a centre near the CT edge keeps new_shape and the padded CT voxels carry the existing pad value (the minimum of the CT entering reshape)",
+        "Spec acceptance 8 (isocenter and dwells parts): the plan is refused with REASON_NO_CENTRE and no output folder for isocenter with no plan table, dwells with no dwell.parquet, dwells with every dwell_weight 0, and an isocentre so far off the CT that the reshape range misses the image on an axis",
+        "Spec acceptance 8b: every mode's fixture has a different centre offset on each axis, anisotropic spacing and a non-zero origin, and asserts its output differs from the image run",
+        "Spec acceptance 9: a study folder in an isocenter run is image-centred (identical to the image run)",
+        "Spec acceptance 10: preprocess() raises ValueError(REASON_RESHAPE_CENTRE) before any output for an unknown mode, a non-image centre without reshape, roi with no names, and names with a mode other than roi; REASON_RESHAPE_CENTRE is in __main__'s known refusals; the CLI uses choices for --reshape-centre and parser.error (exit 2) for a non-image centre without --reshape, --reshape-roi without --reshape-centre roi, and --reshape-centre roi without --reshape-roi; the preprocess help lists the modes",
+        "Spec acceptance 11: with --series-fov-mask and an off-centre isocentre whose reshape range runs past one CT edge, the CT's FOV mask is 1 exactly on the output voxels that come from the CT and 0 on the padded ones",
+        "Spec acceptance 11b: a centre exactly halfway between two voxels rounds up",
+        "Guardrail: REASON_NO_CENTRE and REASON_RESHAPE_CENTRE are fixed string constants; no patient value appears in a log line or exception",
+        "Guardrail: the centre voxel c and the range-misses-the-image check are computed from the header grid entering reshape (reference_grid, as image_fov_mask does) before out_dir.mkdir(); compute may run inside quiet_call and return a value, but the REASON_NO_CENTRE raise happens outside it, so a miss refuses one plan and never becomes REASON_INTERNAL (which stops the run); c is passed to both process_ct and image_fov_mask",
+        "Until task-02: reshape_centre roi or dose raises ValueError(REASON_RESHAPE_CENTRE) from preprocess() (task-02 replaces this)",
+        "Verification: uv run --group dev pytest -q --tb=short and uv run --group dev ruff check . both pass"
+      ]
+    },
+    {
+      "id": "task-02",
+      "title": "roi and dose centre modes, README",
+      "depends_on": [
+        "task-01"
+      ],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "tests/test_preprocess.py",
+        "tests/test_cli.py",
+        "README.md"
+      ],
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "tests/test_cli.py": "modify",
+        "README.md": "modify"
+      },
+      "notes": "roi_name in series.json is the RTSTRUCT ROI name as convert kept it (convert.py ~837). Centroids from numpy arrays are in (z, y, x) order: convert voxel indices to physical points with the image's TransformContinuousIndexToPhysicalPoint on (x, y, z). README checklist: :88 (CLI table), :398 (step table reshape row), :400-406 (option rules), errors: REASON_RESHAPE_CENTRE in the ValueError list near :679, REASON_NO_CENTRE near the plan-refusal row at :548, :662-665 (PreprocessSteps field table), plus one line per mode on where its centre comes from and that the output name stays reshape_ for every mode (one mode per output root). A CLI example with --reshape-roi puts CONVERTED OUT before it.",
+      "test_approach": "TDD on synthetic fixtures as in task-01: different offsets per axis, anisotropic spacing, non-zero origin, and an assertion that the output differs from the image run.",
+      "criteria": [
+        "task-02 removes the task-01 roi/dose refusal: preprocess() accepts reshape_centre roi (with names) and dose",
+        "Spec acceptance 4: roi mode with names ('ptv_missing', 'PTV') and a mask named ptv centres on that mask's nonzero-voxel physical centroid; with masks PTV and ptv both present, PTV wins; with no matching name the plan is refused with REASON_NO_CENTRE and the report row says so",
+        "Spec acceptance 5: dose mode with all the dose weight in one off-centre block centres on that block (sum(dose * position) / sum(dose))",
+        "Spec acceptance 8 (roi and dose parts): an empty matched mask and an all-zero dose are each refused with REASON_NO_CENTRE and no output folder",
+        "Spec acceptance 8b for roi and dose: each fixture has a different centre offset on each axis, anisotropic spacing and a non-zero origin, and asserts its output differs from the image run",
+        "CLI: preprocess CONVERTED OUT --reshape --reshape-centre roi --reshape-roi PTV runs and writes a plan centred on the PTV",
+        "Spec acceptance 12: README's CLI table, step table, option rules, errors table and PreprocessSteps field table gain reshape_centre / reshape_roi and the two reasons, with one line per mode on where its centre comes from and a note that the name stays reshape_ for every mode",
+        "Verification: uv run --group dev pytest -q --tb=short and uv run --group dev ruff check . both pass"
+      ]
+    }
+  ],
+  "groups": [
+    [
+      "task-01"
+    ],
+    [
+      "task-02"
+    ]
+  ],
+  "metadata": {
+    "created": "2026-11-26",
+    "spec": "docs/specs/2026-11-26-centred-reshape.md",
+    "profile": "project-profile.yml",
+    "issue": 372,
+    "notes": "The pre-commit gate refuses commits of more than 5 files: commit code+tests, then docs. Both tasks run directly on feat/centred-reshape, in order. PR body carries `Closes #372`. After merge: wait ~60 s before checking the issue closed; delete the remote branch with gh api; sync the main .venv with uv run --group dev before any push from main."
+  }
+}

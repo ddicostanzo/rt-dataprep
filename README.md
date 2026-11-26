@@ -85,7 +85,7 @@ count before accepting the cohort. Successful process completion can include ref
 | --- | --- | --- |
 | `organize SRC OUT` | Copy a patient export tree into plan folders and `misc_files/`. | `--workers auto` or `1..64` (default `auto`); `--overwrite` |
 | `convert ORG OUT` | Convert an organized tree into plan and study outputs. | `--workers auto` or `1..64` (default `auto`); `--overwrite` |
-| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers auto` or `1..64` (default `auto`); at least one step flag (`--initial-resample`, `--hu-window LO HI`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--new-spacing`, `--final-spacing`, `--new-shape`, `--allow-crop`, `--dose-retained-gy`, `--dose-retained-fraction`, `--min-mask-retention`, `--ahe-kernel-mm`, `--ahe-bins`, `--ahe-clip-limit`, `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
+| `preprocess CONVERTED OUT` | Write a separate preprocessed tree. | `--workers auto` or `1..64` (default `auto`); at least one step flag (`--initial-resample`, `--hu-window LO HI`, `--rescale`, `--ahe`, `--resample`, `--reshape`); also `--new-spacing`, `--final-spacing`, `--new-shape`, `--reshape-centre {image,isocenter,dwells,roi,dose}`, `--reshape-roi NAME [NAME ...]`, `--allow-crop`, `--dose-retained-gy`, `--dose-retained-fraction`, `--min-mask-retention`, `--ahe-kernel-mm`, `--ahe-bins`, `--ahe-clip-limit`, `--legacy-linear-masks`, `--series-fov-mask`, `--overwrite` |
 | `manifest ROOT` | Write `ROOT/manifest.jsonl` and a dated copy. | Works on converted or preprocessed trees. |
 | `split ROOT` | Read `ROOT/manifest.jsonl`; write `ROOT/splits.json`. | Required: `--test-size`, `--val-size`, `--seed`; optional: `--external MANIFEST` |
 
@@ -395,11 +395,29 @@ uv run rt-dataprep split /secure/preprocessed --test-size 0.2 --val-size 0.2 --s
 | `--rescale` | Apply `(HU + 1024) / 4096` to CT, after the HU window if given | `rescale_` |
 | `--ahe` | CLAHE adaptive histogram equalization | `ahe_` |
 | `--resample` | Resample to 1.25 mm spacing (`--final-spacing X Y Z`) | `resample_` |
-| `--reshape` | Centred crop/pad to **701 × 701 × 433 voxels (x, y, z)** (`--new-shape X Y Z`) | `reshape_` |
+| `--reshape` | Centred crop/pad to **701 × 701 × 433 voxels (x, y, z)** (`--new-shape X Y Z`), centred on the image or on `--reshape-centre` | `reshape_` |
 
 `--new-spacing` and `--final-spacing` take finite millimetre values of at least 0.1, `--new-shape` positive integers, all in x y z
 order. Each is refused unless its step flag (`--initial-resample`, `--resample`, `--reshape`) is also given; without them the
 defaults above apply.
+
+`--reshape-centre` picks where `--reshape` centres each plan folder (`image`, the default, is the image-matrix centre). It needs `--reshape`. The centre is a
+physical point in the CT frame, mapped onto the CT entering the reshape and rounded to the nearest voxel (halfway rounds up), which lands at output index
+`N // 2` per axis; a window that runs past the CT is padded. Dose, masks, beams, registered series and the plan-table indices follow the final CT as usual.
+Study folders (`study_<n>/`) are always image-centred. The output name stays `reshape_` for every mode, so one run uses one mode: write a different mode to a different output root.
+
+- `isocenter`: the mean of the distinct isocentres in the folder's `plan.parquet` and `ion_plan.parquet` (pooled when both exist; a repeated isocentre counts once).
+- `dwells`: the mean of the positions in `dwell.parquet` with `dwell_weight > 0` (zero-weight dwells are ignored).
+- `roi`: the centroid of the nonzero voxels of the mask `--reshape-roi NAME [NAME ...]` picks. Names are tried in order; for each, an exact `roi_name` match wins, else the first case-insensitive match in `series.json` order; the first name that matches decides.
+- `dose`: the dose-weighted centroid, sum(dose × position) / sum(dose), of the folder's dose file.
+
+`--reshape-roi` is given only with `--reshape-centre roi` and `roi` needs it. If the mode has no usable centre (no such table, mask or dose, a table with no rows, no active dwell, no name matching a mask, an empty mask, an all-zero dose,
+or a window that misses the CT entirely) the plan is refused with `REASON_NO_CENTRE` and nothing is written for it. An unreadable mask or dose keeps its file-unreadable reason.
+`--reshape-roi` takes several names, so put `CONVERTED OUT` before it:
+
+```bash
+uv run rt-dataprep preprocess /secure/converted /secure/preprocessed --reshape --allow-crop --reshape-centre roi --reshape-roi PTV ptv_total
+```
 
 Steps always run in the order of the table, whichever flags are given. One float32 image at the `--reshape` size occupies
 about **812 MiB** before processing copies and other volumes; plan memory and storage accordingly. The CT formula is not
@@ -546,6 +564,7 @@ class/module/line details. Reports, manifests and per-folder `series.json` files
 | --- | --- |
 | A patient is skipped on rerun | Its destination patient folder already exists. Add `--overwrite` to replace it (see below), or use a fresh output root to recompute. |
 | A plan is refused | Read its fixed reason in the conversion report; verify the RTPLAN → RTSTRUCT → CT reference chain and geometry. |
+| A plan is refused with `REASON_NO_CENTRE` | The `--reshape-centre` mode has no centre for that plan: its plan or dwell table, matching mask (`--reshape-roi`) or dose is missing, unreadable or empty, or the window misses the CT. Pick another mode or fix the folder. |
 | Fewer images than expected | Review study summary skips, series eligibility, model exclusions, localizers, and readable pixel data. |
 | Preprocessing reports no step is on | Pass a step flag (`--initial-resample`, `--hu-window`, `--rescale`, `--ahe`, `--resample`, `--reshape`), or enable applicable `PreprocessSteps` in Python. |
 | `--hu-window` is refused as a bad HU window | LO and HI must be finite numbers with LO below HI; `--allow-crop` with only `--hu-window`, `--rescale` or `--ahe` is refused too (it needs a geometric step). |
@@ -660,6 +679,8 @@ their output prefix:
 | `ahe` | `--ahe` | `False` |
 | `harmonize_spacing` | `--resample` | `False` |
 | `reshape` | `--reshape` | `False` |
+| `reshape_centre` | `--reshape-centre` | `'image'` (or `'isocenter'`, `'dwells'`, `'roi'`, `'dose'`) |
+| `reshape_roi` | `--reshape-roi` | `()` (ROI names tried in order, for `'roi'`) |
 | `new_spacing` | `--new-spacing` | `(1, 1, 1)` mm |
 | `final_spacing` | `--final-spacing` | `(1.25, 1.25, 1.25)` mm |
 | `new_shape` | `--new-shape` | `(701, 701, 433)` voxels |
@@ -677,7 +698,7 @@ consistently when calling Python directly.
 Errors:
 
 - `ValueError` with a fixed reason text refuses the whole call before any patient is processed: an output root inside
-  the input, no step enabled (the `steps` default enables none), an invalid option combination, invalid split sizes, a
+  the input, no step enabled (the `steps` default enables none), an invalid option combination (including a `reshape_centre` that needs `reshape`, `roi` without `reshape_roi` names, or names without `roi`: `REASON_RESHAPE_CENTRE`), invalid split sizes, a
   manifest with a line missing the `patient`/`case_dir` keys, not JSON, or not UTF-8, sizes that leave no patient
   for train, a patient overlap with `external=`, or a `splits.json` with different content. One exception: organize
   raises `ValueError` mid-run when a patient's output folder resolves outside `out_root`; patients before it are

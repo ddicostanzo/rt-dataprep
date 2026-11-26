@@ -758,3 +758,67 @@ def test_convert_logs_one_progress_line_per_patient(tmp_path, caplog):
     with caplog.at_level('INFO'):
         conv.convert(org, tmp_path / 'out', workers=1)
     assert [m for m in caplog.messages if 'patients done' in m] == ['convert: 1 of 2 patients done', 'convert: 2 of 2 patients done']
+
+
+# ---- centred reshape (#372) task-01: --reshape-centre and --reshape-roi ----
+
+@pytest.mark.parametrize('argv, fields', [
+    (['--reshape', '--reshape-centre', 'isocenter'], dict(reshape_centre='isocenter')),
+    (['--reshape', '--reshape-centre', 'dwells'], dict(reshape_centre='dwells')),
+    (['--reshape', '--reshape-centre', 'dose'], dict(reshape_centre='dose')),
+    (['--reshape', '--reshape-centre', 'image'], dict(reshape_centre='image')),
+    (['--reshape', '--reshape-centre', 'roi', '--reshape-roi', 'PTV', 'ptv_2'], dict(reshape_centre='roi', reshape_roi=('PTV', 'ptv_2'))),
+])
+def test_reshape_centre_and_roi_set_their_fields_with_the_roi_names_as_a_tuple_in_order(argv, fields, monkeypatch):
+    assert steps_from(argv, monkeypatch) == pre.PreprocessSteps(reshape=True, **fields)
+    assert steps_from(['--reshape'], monkeypatch).reshape_centre == 'image'
+
+
+@pytest.mark.parametrize('argv', [
+    ['--reshape', '--reshape-centre', 'middle'],
+    ['--reshape-centre', 'isocenter'], ['--rescale', '--reshape-centre', 'dwells'], ['--rescale', '--reshape-centre', 'roi', '--reshape-roi', 'PTV'],
+    ['--reshape', '--reshape-roi', 'PTV'], ['--reshape', '--reshape-centre', 'isocenter', '--reshape-roi', 'PTV'], ['--reshape', '--reshape-centre', 'image', '--reshape-roi', 'PTV'],
+    ['--reshape', '--reshape-centre', 'roi'],
+])
+def test_reshape_centre_usage_errors_exit_2_before_any_work(argv, monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: seen.append(args))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(['preprocess', 'a', 'b', *argv])
+    assert exc.value.code == 2 and seen == [] and 'usage:' in capsys.readouterr().err
+
+
+def test_a_reshape_centre_refusal_from_preprocess_is_a_known_exit_1_with_its_fixed_text(monkeypatch, capsys):
+    def refuse(*args, **kwargs):
+        raise ValueError(pre.REASON_RESHAPE_CENTRE)
+    monkeypatch.setattr(cli, 'preprocess', refuse)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(['preprocess', 'a', 'b', '--reshape'])
+    assert exc.value.code == 1 and capsys.readouterr().err == f'rt_dataprep: {pre.REASON_RESHAPE_CENTRE}\n'
+
+
+def test_preprocess_help_lists_the_reshape_centre_modes():
+    result = subprocess.run([sys.executable, '-m', 'rt_dataprep', 'preprocess', '--help'], capture_output=True, text=True)
+    text = ' '.join(result.stdout.split())
+    entry = ' '.join(next(e for e in re.split(r'\n  (?=-)', result.stdout) if e.startswith('--reshape-centre ')).split())
+    assert result.returncode == 0 and '--reshape-roi NAME' in text
+    assert all(mode in entry for mode in ('image', 'isocenter', 'dwells', 'roi', 'dose')) and '{image,isocenter,dwells,roi,dose}' in entry
+
+
+def test_an_isocenter_run_on_a_plan_without_a_plan_table_reports_it_refused_with_no_centre(tmp_path, converted):
+    out = tmp_path / 'out'
+    result = run_pre(converted, out, '--reshape', '--reshape-centre', 'isocenter')
+    assert result.returncode == 0 and str(tmp_path) not in result.stderr
+    assert [(r['outcome'], r['reason']) for r in report_rows(out)] == [(conv.OUTCOME_REFUSED, pre.REASON_NO_CENTRE)]
+    assert not (out / 'SYNTHETICPTA' / 'plan_1').exists()
+
+
+def test_a_roi_run_centres_the_output_on_the_named_mask(tmp_path):
+    from test_preprocess import BLOCK, CENTRED_SHAPE, MARKER, centred_plan
+    root, out = tmp_path / 'converted', tmp_path / 'out'
+    centred_plan(tmp_path, root, masks={'PTV': BLOCK})
+    result = subprocess.run([sys.executable, '-c', PRE_RUN % (CENTRED_SHAPE, ''), str(root), str(out), '--reshape', '--allow-crop', '--reshape-centre', 'roi', '--reshape-roi', 'ptv_missing', 'PTV'], capture_output=True, text=True)
+    assert result.returncode == 0 and str(tmp_path) not in result.stderr
+    assert [(r['outcome'], r['reason']) for r in report_rows(out)] == [(pre.OUTCOME_PREPROCESSED, '')]
+    array = sitk.GetArrayFromImage(sitk.ReadImage(str(out / 'SYNTHETICPTA' / 'plan_1' / pre.output_name(conv.CT_NAME, pre.PreprocessSteps(reshape=True), ct=True, image=True))))
+    assert array[4, 3, 3] == MARKER and (array == MARKER).sum() == 1  # N // 2 reversed to (z, y, x)
