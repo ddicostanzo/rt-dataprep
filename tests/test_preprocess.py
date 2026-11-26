@@ -3609,6 +3609,9 @@ def test_ac4_a_registered_ct_is_clipped_before_its_resample_and_fills_outside_it
     array = sitk.GetArrayFromImage(image)
     assert (array[outside] == -500.0).all() and array[~outside].max() <= 500.0 + 1e-3
     assert sitk.GetArrayFromImage(base).max() > 500.0  # the control: without the window the block survives the resample
+    clipped = sitk.Clamp(make_image(values, **geometry), sitk.sitkFloat32, -500.0, 500.0)  # clip first, then the one resample
+    expected = sitk.Resample(clipped, image, pre.series_transform(matrix), sitk.sitkLinear, -500.0, sitk.sitkFloat32)
+    assert np.allclose(array, sitk.GetArrayFromImage(expected), rtol=0, atol=1e-4)
 
 
 def test_a_registered_mr_in_a_plan_is_neither_clipped_nor_prefixed_by_the_window(tmp_path):

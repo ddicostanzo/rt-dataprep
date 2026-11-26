@@ -217,13 +217,16 @@ def test_ahe_flag_reaches_preprocess_steps(flags, want, monkeypatch):
     assert seen[0][2].ahe is ('--ahe' in flags)
 
 
-def test_ac5b_hu_window_with_a_negative_low_clips_the_ct_and_writes_the_huwindow_name(tmp_path, converted):
+@pytest.mark.parametrize('window', [('-1024', '1500'), ('-500', '100')])  # the second one cuts the fixture's top (200 HU)
+def test_ac5b_hu_window_with_a_negative_low_clips_the_ct_and_writes_the_huwindow_name(tmp_path, converted, window):
     out = tmp_path / 'out'
-    result = run_pre(converted, out, '--hu-window', '-1024', '1500')
+    result = run_pre(converted, out, '--hu-window', *window)
     assert result.returncode == 0 and result.stdout == ''
     done = out / 'SYNTHETICPTA' / 'plan_1' / f'huwindow_{conv.CT_NAME}'
     values = sitk.GetArrayFromImage(sitk.ReadImage(str(done)))
-    assert done.is_file() and values.min() >= -1024 and values.max() <= 1500 and values.dtype.name == 'float32'
+    source = sitk.GetArrayFromImage(sitk.ReadImage(str(converted / 'SYNTHETICPTA' / 'plan_1' / conv.CT_NAME))).astype('float32')
+    low, high = map(float, window)
+    assert done.is_file() and values.dtype.name == 'float32' and (values == source.clip(low, high)).all()
 
 
 def test_ac5_a_reversed_hu_window_is_a_known_refusal_with_exit_1_and_no_output(tmp_path, converted):
