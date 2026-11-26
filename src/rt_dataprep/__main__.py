@@ -20,6 +20,8 @@ from rt_dataprep.preprocess import (
     REASON_MASK_RETENTION_LIMIT,
     REASON_NO_STEPS,
     REASON_OUTSIDE_INPUT,
+    REASON_RESHAPE_CENTRE,
+    RESHAPE_CENTRES,
     PreprocessAborted,
     PreprocessSteps,
     preprocess,
@@ -85,6 +87,11 @@ def main(argv=None):
     sub.add_argument('--ahe', action='store_true', help='step: CLAHE adaptive histogram equalization of every image volume; writes the ahe_ prefix')
     sub.add_argument('--resample', action='store_true', help='step: resample to 1.25 mm spacing (set it with --final-spacing); writes the resample_ prefix')
     sub.add_argument('--reshape', action='store_true', help='step: centred crop/pad to 701 x 701 x 433 voxels (set it with --new-shape); writes the reshape_ prefix')
+    sub.add_argument('--reshape-centre', choices=RESHAPE_CENTRES, default='image',
+                     help='where --reshape centres, per plan folder: image (the image-matrix centre, the default), isocenter (the mean of the distinct isocentres of plan.parquet and ion_plan.parquet), '
+                          'dwells (the mean of the dwell.parquet positions with dwell_weight > 0), roi (the centroid of the first --reshape-roi name that matches a mask) or dose (the dose-weighted centroid); '
+                          'a plan with no usable centre is refused; study series always use the image centre; requires --reshape')
+    sub.add_argument('--reshape-roi', nargs='+', metavar='NAME', help='ROI names for --reshape-centre roi, tried in order: an exact roi_name match wins, else the first case-insensitive one; put the converted and out paths before it')
     sub.add_argument('--new-shape', type=positive_ints, nargs=3, metavar=('X', 'Y', 'Z'), help='--reshape size in voxels (default 701 701 433); requires --reshape')
     sub.add_argument('--new-spacing', type=spacing_mm, nargs=3, metavar=('X', 'Y', 'Z'), help='--initial-resample spacing in mm (default 1 1 1); requires --initial-resample')
     sub.add_argument('--final-spacing', type=spacing_mm, nargs=3, metavar=('X', 'Y', 'Z'), help='--resample spacing in mm (default 1.25 1.25 1.25); requires --resample')
@@ -117,6 +124,12 @@ def main(argv=None):
         elif args.command == 'preprocess':
             if not args.ahe and any(v is not None for v in (args.ahe_kernel_mm, args.ahe_bins, args.ahe_clip_limit)):
                 parser.error('AHE options require --ahe')
+            if args.reshape_centre != 'image' and not args.reshape:
+                parser.error('--reshape-centre requires --reshape')
+            if args.reshape_roi is not None and args.reshape_centre != 'roi':
+                parser.error('--reshape-roi requires --reshape-centre roi')
+            if args.reshape_centre == 'roi' and args.reshape_roi is None:
+                parser.error('--reshape-centre roi requires --reshape-roi')
             for option, value, step in (('--new-shape', args.new_shape, args.reshape), ('--new-spacing', args.new_spacing, args.initial_resample),
                                         ('--final-spacing', args.final_spacing, args.resample)):
                 if value is not None and not step:
@@ -133,6 +146,7 @@ def main(argv=None):
             # flags are named after the output prefix: --initial-resample is the resample field, --resample is harmonize_spacing
             preprocess(args.converted, args.out, PreprocessSteps(
                 resample=args.initial_resample, rescale=args.rescale, hu_window=None if args.hu_window is None else tuple(args.hu_window), ahe=args.ahe, harmonize_spacing=args.resample, reshape=args.reshape,
+                reshape_centre=args.reshape_centre, reshape_roi=tuple(args.reshape_roi or ()),
                 legacy_linear_masks=args.legacy_linear_masks, series_fov_mask=args.series_fov_mask,
                 min_mask_retention=args.min_mask_retention, allow_crop=args.allow_crop, **grids, **optional,
                 ahe_kernel_mm=None if args.ahe_kernel_mm is None else tuple(args.ahe_kernel_mm)), workers=args.workers, overwrite=args.overwrite)
@@ -145,7 +159,7 @@ def main(argv=None):
         else:
             organize(args.src, args.out, workers=args.workers, overwrite=args.overwrite)
     except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug, reported as below
-        if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_AHE_OPTIONS, REASON_HU_WINDOW,
+        if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_RESHAPE_CENTRE, REASON_AHE_OPTIONS, REASON_HU_WINDOW,
                             REASON_MASK_RETENTION_LIMIT, REASON_DOSE_RETAINED_LIMIT, REASON_OUTSIDE_SRC, REASON_INPUT_INSIDE_OUTPUT,
                             REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS, REASON_LEGACY,
                             REASON_LOCKED, CONVERT_REASON_LOCKED, PREPROCESS_REASON_LOCKED):

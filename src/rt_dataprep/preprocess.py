@@ -22,6 +22,7 @@ import shutil
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pyarrow as pa
@@ -77,6 +78,9 @@ REASON_DOSE_RETAINED_LIMIT = 'dose retained threshold must be finite: the Gy flo
 REASON_IO_ERROR = 'file system error while reading or writing; nothing kept for this patient'
 REASON_FILE_UNREADABLE = 'an input NIfTI file is unreadable'
 REASON_INTERNAL = 'an unexpected error stopped the preprocessing; the report lists what was finished'
+REASON_RESHAPE_CENTRE = 'the reshape centre must be image, isocenter, dwells, roi or dose; anything but image needs reshape, roi needs reshape_roi names, and names need roi'
+REASON_NO_CENTRE = 'no reshape centre: the table, mask or dose the centre mode needs is missing, unreadable or empty, or the reshape range misses the image'
+RESHAPE_CENTRES = ('image', 'isocenter', 'dwells', 'roi', 'dose')
 
 
 @dataclass(frozen=True)
@@ -85,7 +89,9 @@ class PreprocessSteps:
     hu_window: tuple | None = None  # CT only: (LO, HI) HU, a clamp to [LO, HI] before rescale; a step of its own (huwindow_)
     rescale: bool = False  # CT only: (HU + 1024) / 4096
     harmonize_spacing: bool = False  # final resample to final_spacing, linear
-    reshape: bool = False  # centred crop/pad to new_shape
+    reshape: bool = False  # crop/pad to new_shape, centred on the image or on reshape_centre
+    reshape_centre: str = 'image'  # one of RESHAPE_CENTRES: where the reshape centres, a plan folder's own point; study folders always use the image centre
+    reshape_roi: tuple = ()  # ROI names tried in order, for reshape_centre 'roi'
     ahe: bool = False  # CLAHE of every image volume: float32 min-max to [0, 1], then skimage equalize_adapthist
     ahe_kernel_mm: tuple | None = None  # optional physical window, x/y/z mm; None keeps skimage's voxel default
     ahe_bins: int = 128
@@ -250,8 +256,22 @@ def crop_or_pad(image, shape, pad_value):
     return image
 
 
-def process_ct(ct, steps):
-    """The CT through the steps that are on, in legacy order. The result is the reference grid for dose and masks."""
+def crop_or_pad_at(image, shape, pad_value, centre):
+    """`image` cropped or padded with `pad_value` to `shape` (x, y, z) so that voxel `centre` lands at output index N // 2 per axis: the output takes voxels centre - N // 2 to centre - N // 2 + N - 1, padding where that runs past the image."""
+    size, shape = np.array(image.GetSize()), np.array(shape)
+    start = np.array(centre) - shape // 2
+    end = start + shape
+    crop_start, crop_end = np.maximum(start, 0), np.maximum(size - end, 0)
+    pad_start, pad_end = np.maximum(-start, 0), np.maximum(end - size, 0)
+    if crop_start.any() or crop_end.any():
+        image = sitk.Crop(image, crop_start.tolist(), crop_end.tolist())
+    if pad_start.any() or pad_end.any():
+        image = sitk.ConstantPad(image, pad_start.tolist(), pad_end.tolist(), float(pad_value))
+    return image
+
+
+def process_ct(ct, steps, centre=None):
+    """The CT through the steps that are on, in legacy order. The result is the reference grid for dose and masks. `centre` (reshape_centre_voxel) places the reshape; None centres it on the image."""
     if steps.ahe:
         check_ahe_options(*ahe_options(steps))
         if not finite_voxels(ct):
@@ -269,7 +289,8 @@ def process_ct(ct, steps):
         if steps.harmonize_spacing:
             image = resample_to(image, steps.final_spacing)
         if steps.reshape:
-            image = crop_or_pad(image, steps.new_shape, minimum(image))  # the pad value is the minimum of the CT entering reshape
+            pad_value = minimum(image)  # the pad value is the minimum of the CT entering reshape
+            image = crop_or_pad(image, steps.new_shape, pad_value) if centre is None else crop_or_pad_at(image, steps.new_shape, pad_value, centre)
         return image
     return quiet_call(run, REASON_INTERNAL)
 
@@ -347,8 +368,8 @@ def covers_ct(native, final_ct, matrix):
     return quiet_call(run, REASON_INTERNAL)
 
 
-def image_fov_mask(info, steps):
-    """Native support through each geometric step, nearest-neighbour with zero padding; independent of intensity."""
+def image_fov_mask(info, steps, centre=None):
+    """Native support through each geometric step, nearest-neighbour with zero padding; independent of intensity. `centre` places the reshape as in process_ct."""
     def run():
         size, origin, spacing, direction = info
         mask = sitk.Image(size, sitk.sitkUInt8) + 1
@@ -361,7 +382,7 @@ def image_fov_mask(info, steps):
                 mask = sitk.Resample(mask, new_size, sitk.Transform(), sitk.sitkNearestNeighbor,
                                      new_origin, new_spacing, new_direction, 0, sitk.sitkUInt8)
         if steps.reshape:
-            mask = crop_or_pad(mask, steps.new_shape, 0)
+            mask = crop_or_pad(mask, steps.new_shape, 0) if centre is None else crop_or_pad_at(mask, steps.new_shape, 0, centre)
         return mask
     return quiet_call(run, REASON_INTERNAL)
 
@@ -428,6 +449,9 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
         raise ValueError(REASON_OUTSIDE_INPUT)
     if overwrite and converted_root.resolve().is_relative_to(out_root.resolve()):  # a replaced patient folder could hold the input
         raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
+    if (steps.reshape_centre not in RESHAPE_CENTRES or (steps.reshape_centre != 'image' and not steps.reshape)
+            or (steps.reshape_centre == 'roi') != bool(steps.reshape_roi) or steps.reshape_centre in ('roi', 'dose')):  # roi and dose are not implemented yet
+        raise ValueError(REASON_RESHAPE_CENTRE)
     if not (steps.resample or steps.rescale or steps.hu_window or steps.harmonize_spacing or steps.reshape or steps.ahe):
         raise ValueError(REASON_NO_STEPS)
     if steps.allow_crop and not (steps.resample or steps.harmonize_spacing or steps.reshape):
@@ -806,15 +830,24 @@ def native_retained(native, final, region=None):
     return quiet_call(run, REASON_INTERNAL)
 
 
-def index_plan_table(source, path, final, schema=plan_table.SCHEMA, prefix='isocenter'):
-    """Write `source` (plan.parquet, ion_plan.parquet with schema=ion_plan_table.ION_SCHEMA, or dwell.parquet with schema=dwell_table.DWELL_SCHEMA and prefix='position') to `path` with <prefix>_i/j/k replaced by the continuous index of
-    <prefix>_x/y/z on `final`; False, nothing written, when it is corrupt (a parse error of any kind) or not `schema` (compared as fields: file metadata is not part of it). Only an OSError reading the file, or from the write, propagates."""
+PLAN_TABLES = {'plan': (plan_table.SCHEMA, 'isocenter'), 'ion_plan': (ion_plan_table.ION_SCHEMA, 'isocenter'), 'dwell': (dwell_table.DWELL_SCHEMA, 'position')}  # series.json kind -> (schema, column prefix)
+
+
+def read_plan_table(source, schema):
+    """The Arrow table of the parquet file `source`; None when it is corrupt (a parse error of any kind) or not `schema` (compared as fields: file metadata is not part of it). Only an OSError reading the file propagates."""
     data = source.read_bytes()  # a file-system error here propagates; the parse below is from memory, so an OSError out of it is a corrupt file (a full-length bad footer or page raises plain OSError)
     try:
         table = pq.read_table(pa.BufferReader(data))
     except (OSError, pa.ArrowException):  # every Arrow error class; a MemoryError-like ArrowMemoryError is one too
-        return False
-    if table.schema != schema:
+        return None
+    return table if table.schema == schema else None
+
+
+def index_plan_table(source, path, final, schema=plan_table.SCHEMA, prefix='isocenter'):
+    """Write `source` (plan.parquet, ion_plan.parquet with schema=ion_plan_table.ION_SCHEMA, or dwell.parquet with schema=dwell_table.DWELL_SCHEMA and prefix='position') to `path` with <prefix>_i/j/k replaced by the continuous index of
+    <prefix>_x/y/z on `final`; False, nothing written, when it is corrupt (a parse error of any kind) or not `schema` (compared as fields: file metadata is not part of it). Only an OSError reading the file, or from the write, propagates."""
+    table = read_plan_table(source, schema)
+    if table is None:
         return False
     points = zip(*(table[name].to_pylist() for name in (f'{prefix}_x', f'{prefix}_y', f'{prefix}_z')), strict=True)
     indices = list(zip(*(final.TransformPhysicalPointToContinuousIndex(p) for p in points), strict=True))
@@ -824,11 +857,65 @@ def index_plan_table(source, path, final, schema=plan_table.SCHEMA, prefix='isoc
     return True
 
 
+def table_points(plan_dir, kept, mode):
+    """The (n, 3) float64 physical points a plan folder's tables give the `mode` centre: the distinct isocentres of its plan and ion_plan tables (pooled), or the position of every dwell with dwell_weight > 0. None when a table is unreadable or not its schema; no rows is an empty array."""
+    kinds = ('plan', 'ion_plan') if mode == 'isocenter' else ('dwell',)
+    points = []
+    for row in (r for r in kept if r['kind'] in kinds):
+        schema, prefix = PLAN_TABLES[row['kind']]
+        table = read_plan_table(plan_dir / row['file'], schema)
+        if table is None:
+            return None
+        found = np.column_stack([table[f'{prefix}_{axis}'].to_numpy().astype(np.float64) for axis in 'xyz'])
+        points.append(found[table['dwell_weight'].to_numpy() > 0] if mode == 'dwells' else found)  # a null reads as NaN, which is not > 0
+    if not points:
+        return None
+    points = np.concatenate(points)
+    return np.unique(points, axis=0) if mode == 'isocenter' else points  # a plan repeats its isocentre on every control point
+
+
+def reshape_centre_voxel(plan_dir, kept, info, steps):
+    """Voxel c, (x, y, z), of the grid entering reshape that is nearest the folder's `steps.reshape_centre` point: floor(x + 0.5) of its continuous index. None when there is no usable centre: no table or no rows, a point that is not finite, or a reshape range (c - N // 2 to c - N // 2 + N - 1) that misses the image on an axis. `info` is the CT's read_info."""
+    points = table_points(plan_dir, kept, steps.reshape_centre)
+    if points is None or not len(points):
+        return None
+    point = points.mean(axis=0)
+    if not np.isfinite(point).all():  # a NaN or an inf in any row makes the mean so
+        return None
+    size, origin, spacing, direction = entering_reshape_grid(info, steps)
+    def run():
+        grid = sitk.Image([1, 1, 1], sitk.sitkUInt8)  # only its geometry is used
+        grid.SetOrigin(origin)
+        grid.SetSpacing(spacing)
+        grid.SetDirection(direction)
+        return grid.TransformPhysicalPointToContinuousIndex(point.tolist())
+    voxel = np.floor(np.array(quiet_call(run, REASON_INTERNAL)) + 0.5)
+    start = voxel - np.array(steps.new_shape) // 2
+    if not np.isfinite(voxel).all() or (start > np.array(size) - 1).any() or (start + np.array(steps.new_shape) - 1 < 0).any():
+        return None
+    return tuple(int(v) for v in voxel)
+
+
+def entering_reshape_grid(info, steps):
+    """(size, origin, spacing, direction) of the CT entering reshape, from its read_info header: the resample steps before it, as image_fov_mask runs them (hu_window, rescale and ahe keep the grid)."""
+    def header_image(size, origin, spacing, direction):  # the four getters reference_grid reads from an image
+        return SimpleNamespace(GetSize=lambda: size, GetOrigin=lambda: origin, GetSpacing=lambda: spacing, GetDirection=lambda: direction)
+    for on, target in ((steps.resample, steps.new_spacing), (steps.harmonize_spacing, steps.final_spacing)):
+        if on:
+            info = reference_grid(header_image(*info), target)
+    return info
+
+
 def preprocess_plan(plan_dir, out_dir, steps):
     """Write the plan into `out_dir` (which must not exist); returns (the output file names, series.json last; the number of series left out; the dose and mask files cut by the final grid except a body outline (is_external), '' on a non-geometric run; the lowest `retained` of the rows counts_toward_retained accepts, None when none is set; how many of those are cut masks with no single roi_interpreted_type). CaseRefused on a refusal."""
     kept, ct, series = check_rows(plan_dir)
     if too_small(ct, steps):
         raise CaseRefused(REASON_TOO_SMALL)
+    centre = None
+    if steps.reshape and steps.reshape_centre != 'image':
+        centre = reshape_centre_voxel(plan_dir, kept, ct, steps)
+        if centre is None:  # raised here, outside quiet_call: a plan with no centre is refused alone and never becomes REASON_INTERNAL
+            raise CaseRefused(REASON_NO_CENTRE)
     geometric = steps.resample or steps.harmonize_spacing or steps.reshape
     out_dir.mkdir()
     files, series_rows, cropped = [], [], 0
@@ -837,10 +924,10 @@ def preprocess_plan(plan_dir, out_dir, steps):
         cell = ''  # series.json `retained`: only a dose or mask of a geometric run
         name = row['file'] if kind in ('applicator', 'line', 'plan', 'fluence', 'ion_plan', 'dwell') else output_name(row['file'], steps, ct=kind == 'ct', image=kind == 'ct')
         if kind == 'ct':
-            final = process_ct(read_image(source), steps)
+            final = process_ct(read_image(source), steps, centre)
             conv.write_atomic(final, out_dir / name)
         elif kind in ('plan', 'ion_plan', 'dwell') and geometric:  # isocenter_i/j/k (position_i/j/k of a dwell) always index the CT of the folder
-            schema, prefix = {'plan': (plan_table.SCHEMA, 'isocenter'), 'ion_plan': (ion_plan_table.ION_SCHEMA, 'isocenter'), 'dwell': (dwell_table.DWELL_SCHEMA, 'position')}[kind]
+            schema, prefix = PLAN_TABLES[kind]
             if not index_plan_table(source, out_dir / name, final, schema, prefix):
                 log.warning('preprocess: %s', REASON_PLAN_INDEX)
                 continue
@@ -870,7 +957,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
         files.append(name)
         if kind == 'ct' and steps.series_fov_mask:
             mask_name = f'fovmask_{name}'
-            conv.write_atomic(image_fov_mask(ct, steps), out_dir / mask_name)
+            conv.write_atomic(image_fov_mask(ct, steps, centre), out_dir / mask_name)
             files.append(mask_name)
         series_rows.append(row | {'file': name, 'retained': cell})
     skipped = 0
