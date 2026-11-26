@@ -887,7 +887,8 @@ def roi_row(kept, names):
 def weighted_centroid(image, weighted):
     """The physical (x, y, z) centroid of `image`'s nonzero voxels, or of its values as weights when `weighted`. From the per-axis marginal sums in float64 (arrays are (z, y, x)); None when the weight is zero."""
     values = sitk.GetArrayFromImage(image)
-    marginals = [(values if weighted else values != 0).sum(axis=axes, dtype=np.float64) for axes in ((0, 1), (0, 2), (1, 2))]  # along x, y, z
+    values = values if weighted else values != 0  # once, not per axis
+    marginals = [values.sum(axis=axes, dtype=np.float64) for axes in ((0, 1), (0, 2), (1, 2))]  # along x, y, z
     total = marginals[0].sum()
     if total == 0:
         return None
