@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "task-01",
+      "title": "HU window step: PreprocessSteps.hu_window, --hu-window, huwindow_ prefix, docs",
+      "depends_on": [],
+      "files": [
+        "src/rt_dataprep/preprocess.py",
+        "src/rt_dataprep/__main__.py",
+        "tests/test_preprocess.py",
+        "tests/test_cli.py",
+        "tests/test_manifest.py",
+        "README.md"
+      ],
+      "notes": "manifest.py needs no change: it imports series_id from preprocess (manifest.py:18). The allow-crop check at preprocess.py:413 already lists geometric steps only, so 5c is a test, not a code change. A registered MR/PT series stays unclipped through the is_ct guards at preprocess.py:868 and in output_name. tests/test_preprocess.py:2149 monkeypatches process_series with `lambda *args`, so the call at :868 passes the window positionally (or that lambda gains **kwargs). Docs checklist for criterion 7: README :88, :394, :420-421, :443, :470-473, :543, :645-650; __main__.py :31 and :82; preprocess.py :4 and :11. tests/test_parity.py:43 checks the prefix of a run without the window and needs no change.",
+      "file_ops": {
+        "src/rt_dataprep/preprocess.py": "modify",
+        "src/rt_dataprep/__main__.py": "modify",
+        "tests/test_preprocess.py": "modify",
+        "tests/test_cli.py": "modify",
+        "tests/test_manifest.py": "modify",
+        "README.md": "modify"
+      },
+      "test_approach": "TDD with the synthetic fixtures already used in tests/test_preprocess.py, test_cli.py and test_manifest.py. Extend reference_pipeline (test_preprocess.py ~2241) with the clip so existing parity tests cover the new order. Add the window to the step-presence assertions at test_preprocess.py:62 and :2996.",
+      "criteria": [
+        "Spec acceptance 1: a planning CT with hu_window=(-100, 200) alone writes huwindow_<ct> as float32, equal exactly to np.clip of the input voxels in float32, with the input geometry",
+        "Spec acceptance 2: --initial-resample --hu-window LO HI --rescale writes rescale_huwindow_initialresample_<ct> matching (clip(resampled, LO, HI) + 1024) / 4096 with np.allclose(rtol=0, atol=1e-6)",
+        "Spec acceptance 3: in a study folder the CT series is clipped and prefixed; an MR series in the same run with a geometric step is unchanged versus a run without the window; with the window alone the MR series is refused with REASON_NO_SERIES_STEPS; manifest over that output lists the windowed CT series under its usual id",
+        "Spec acceptance 4: a registered CT series in a plan is clipped before its resample, and with no rescale and no ahe its outside-FOV fill is the clipped minimum",
+        "Spec acceptance 5: hu_window with LO >= HI, NaN or inf raises ValueError(REASON_HU_WINDOW) before any output is written; the CLI given --hu-window 200 100 prints it as a known refusal, with the same exit code as other refusals",
+        "CLI: __main__ passes tuple(args.hu_window) (or None) into PreprocessSteps, so steps stays hashable; the flag list in test_preprocess_help_lists_the_five_step_flags_with_their_values_and_prefixes (tests/test_cli.py:173) gains a ('--hu-window', <a value phrase from the help text>, 'huwindow_', '') entry, and PREPROCESS_HELP names the window",
+        "Spec acceptance 5b: the CLI with --hu-window -1024 1500 runs and writes huwindow_<ct> clipped to [-1024, 1500]",
+        "Spec acceptance 5c: hu_window with allow_crop and no geometric step raises REASON_ALLOW_CROP_STEPS",
+        "Spec acceptance 6: dose and mask file names and values are unchanged by hu_window",
+        "Spec acceptance 7: every README place listing steps, prefixes, CT/MR step rules, errors or PreprocessSteps fields gains the window, with a note on the 12/16-bit use; the --rescale help text and the preprocess module docstring name the new order",
+        "Guardrail: preprocess_series turns off both rescale and hu_window for a non-CT series, and every 'any step on' check (preprocess() and preprocess_series) lists hu_window",
+        "Guardrail: STUDY_FILE gains (huwindow_)? between rescale_ and initialresample_, serving both series_id in preprocess and manifest.py",
+        "Guardrail: REASON_HU_WINDOW is a fixed string constant and appears in __main__'s known-refusal list",
+        "Guardrail (vault [[skimage-equalize-adapthist-3d-traps]]): the clip runs before AHE's min-max; process_series takes the window as a trailing parameter defaulting to None, so existing AHE tests pass with no change to their assertions",
+        "Verification: uv run --group dev pytest -q --tb=short and uv run --group dev ruff check . both pass"
+      ]
+    }
+  ],
+  "groups": [["task-01"]],
+  "metadata": {
+    "created": "2026-11-26",
+    "spec": "docs/specs/2026-11-26-hu-window.md",
+    "profile": "project-profile.yml",
+    "issue": 373,
+    "notes": "After the merge, sync the main checkout's .venv with `uv run --group dev pytest -q` before any push from it (vault: pre-push-uses-stale-dotvenv-pytest); delete the remote branch with gh api, not git push --delete (vault: delete-remote-branch-via-api-not-push). PR body carries `Closes #373`; after the squash merge, wait ~60 s before checking that #373 closed (vault: closing-keywords-close-late-not-never)."
+  }
+}
