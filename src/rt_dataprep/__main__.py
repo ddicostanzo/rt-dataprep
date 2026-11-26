@@ -16,6 +16,7 @@ from rt_dataprep.pool import MAX_WORKERS
 from rt_dataprep.preprocess import (
     REASON_AHE_OPTIONS,
     REASON_DOSE_RETAINED_LIMIT,
+    REASON_HU_WINDOW,
     REASON_MASK_RETENTION_LIMIT,
     REASON_NO_STEPS,
     REASON_OUTSIDE_INPUT,
@@ -28,7 +29,7 @@ from rt_dataprep.preprocess import REASON_LOCKED as PREPROCESS_REASON_LOCKED
 from rt_dataprep.split import REASON_COLUMNS, REASON_EXISTS, REASON_LEGACY, REASON_NO_TRAIN, REASON_OVERLAP, REASON_ROWS, REASON_SIZE, SPLIT_NAMES, split
 
 
-PREPROCESS_HELP = 'resample, rescale and crop/pad a converted tree into a separate output tree; give at least one step flag to write anything'
+PREPROCESS_HELP = 'resample, clip to a HU window, rescale and crop/pad a converted tree into a separate output tree; give at least one step flag to write anything'
 WORKERS_HELP = ("number of patients processed in parallel, each in its own process (about 7 GB RAM each at 701x701x433); "
                 "default 'auto' sizes it from the first processed patient's peak RAM (0.8 of available memory, capped by CPUs), "
                 "an integer sets it; output is the same for any value")
@@ -79,7 +80,8 @@ def main(argv=None):
     sub.add_argument('--workers', type=workers_arg, default='auto', help=WORKERS_HELP)
     sub.add_argument('--overwrite', action='store_true', help=OVERWRITE_HELP)
     sub.add_argument('--initial-resample', action='store_true', help='step: resample to 1 mm spacing (set it with --new-spacing); writes the initialresample_ prefix')
-    sub.add_argument('--rescale', action='store_true', help='step: rescale a CT to (HU + 1024) / 4096; writes the rescale_ prefix; as the only step, MR/PT study series are refused')
+    sub.add_argument('--hu-window', type=float, nargs=2, metavar=('LO', 'HI'), help='step: clip a CT to LO..HI HU (LO below HI), after --initial-resample and before --rescale; writes the huwindow_ prefix; as the only step, MR/PT study series are refused')
+    sub.add_argument('--rescale', action='store_true', help='step: rescale a CT to (HU + 1024) / 4096, after --hu-window if given; writes the rescale_ prefix; as the only step, MR/PT study series are refused')
     sub.add_argument('--ahe', action='store_true', help='step: CLAHE adaptive histogram equalization of every image volume; writes the ahe_ prefix')
     sub.add_argument('--resample', action='store_true', help='step: resample to 1.25 mm spacing (set it with --final-spacing); writes the resample_ prefix')
     sub.add_argument('--reshape', action='store_true', help='step: centred crop/pad to 701 x 701 x 433 voxels (set it with --new-shape); writes the reshape_ prefix')
@@ -130,7 +132,7 @@ def main(argv=None):
                                                         ('ahe_bins', args.ahe_bins), ('ahe_clip_limit', args.ahe_clip_limit)) if value is not None}  # unset: the PreprocessSteps default
             # flags are named after the output prefix: --initial-resample is the resample field, --resample is harmonize_spacing
             preprocess(args.converted, args.out, PreprocessSteps(
-                resample=args.initial_resample, rescale=args.rescale, ahe=args.ahe, harmonize_spacing=args.resample, reshape=args.reshape,
+                resample=args.initial_resample, rescale=args.rescale, hu_window=None if args.hu_window is None else tuple(args.hu_window), ahe=args.ahe, harmonize_spacing=args.resample, reshape=args.reshape,
                 legacy_linear_masks=args.legacy_linear_masks, series_fov_mask=args.series_fov_mask,
                 min_mask_retention=args.min_mask_retention, allow_crop=args.allow_crop, **grids, **optional,
                 ahe_kernel_mm=None if args.ahe_kernel_mm is None else tuple(args.ahe_kernel_mm)), workers=args.workers, overwrite=args.overwrite)
@@ -143,7 +145,7 @@ def main(argv=None):
         else:
             organize(args.src, args.out, workers=args.workers, overwrite=args.overwrite)
     except ValueError as exc:  # a fixed refusal text; any other ValueError is a bug, reported as below
-        if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_AHE_OPTIONS,
+        if str(exc) not in (REASON_OUTSIDE_ORG, REASON_OUTSIDE_INPUT, REASON_NO_STEPS, REASON_AHE_OPTIONS, REASON_HU_WINDOW,
                             REASON_MASK_RETENTION_LIMIT, REASON_DOSE_RETAINED_LIMIT, REASON_OUTSIDE_SRC, REASON_INPUT_INSIDE_OUTPUT,
                             REASON_SIZE, REASON_NO_TRAIN, REASON_OVERLAP, REASON_EXISTS, REASON_COLUMNS, REASON_ROWS, REASON_LEGACY,
                             REASON_LOCKED, CONVERT_REASON_LOCKED, PREPROCESS_REASON_LOCKED):
