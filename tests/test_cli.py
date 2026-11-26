@@ -170,7 +170,7 @@ def test_preprocess_unexpected_error_exits_1_with_its_own_fixed_text(tmp_path, c
     assert [(r['outcome'], r['reason']) for r in report_rows(out)] == [(conv.OUTCOME_REFUSED, pre.REASON_INTERNAL)]
 
 
-def test_preprocess_help_lists_the_five_step_flags_with_their_values_and_prefixes():
+def test_preprocess_help_lists_the_six_step_flags_with_their_values_and_prefixes():
     result = subprocess.run([sys.executable, '-m', 'rt_dataprep', 'preprocess', '--help'], capture_output=True, text=True)
     assert result.returncode == 0
     text = ' '.join(result.stdout.split())
@@ -178,7 +178,7 @@ def test_preprocess_help_lists_the_five_step_flags_with_their_values_and_prefixe
     entries = re.split(r'\n  (?=-)', result.stdout)  # one help entry per option, whatever options its text names
     for flag, value, prefix, size in [('--initial-resample', '1 mm', 'initialresample_', '--new-spacing'), ('--rescale', '(HU + 1024) / 4096', 'rescale_', ''),
                                       ('--ahe', 'CLAHE', 'ahe_', ''), ('--resample', '1.25 mm', 'resample_', '--final-spacing'),
-                                      ('--reshape', '701 x 701 x 433', 'reshape_', '--new-shape')]:
+                                      ('--reshape', '701 x 701 x 433', 'reshape_', '--new-shape'), ('--hu-window', 'HU', 'huwindow_', '')]:
         entry = ' '.join(next(e for e in entries if e.startswith(flag + ' ')).split())
         assert value in entry and prefix in entry and size in entry.replace('- ', '-'), flag  # argparse may wrap at the hyphen
 
@@ -215,6 +215,44 @@ def test_ahe_flag_reaches_preprocess_steps(flags, want, monkeypatch):
     cli.main(['preprocess', 'a', 'b', *flags])
     assert seen == [('a', 'b', want)]
     assert seen[0][2].ahe is ('--ahe' in flags)
+
+
+@pytest.mark.parametrize('window', [('-1024', '1500'), ('-500', '100')])  # the second one cuts the fixture's top (200 HU)
+def test_ac5b_hu_window_with_a_negative_low_clips_the_ct_and_writes_the_huwindow_name(tmp_path, converted, window):
+    out = tmp_path / 'out'
+    result = run_pre(converted, out, '--hu-window', *window)
+    assert result.returncode == 0 and result.stdout == ''
+    done = out / 'SYNTHETICPTA' / 'plan_1' / f'huwindow_{conv.CT_NAME}'
+    values = sitk.GetArrayFromImage(sitk.ReadImage(str(done)))
+    source = sitk.GetArrayFromImage(sitk.ReadImage(str(converted / 'SYNTHETICPTA' / 'plan_1' / conv.CT_NAME))).astype('float32')
+    low, high = map(float, window)
+    assert done.is_file() and values.dtype.name == 'float32' and (values == source.clip(low, high)).all()
+
+
+def test_ac5_a_reversed_hu_window_is_a_known_refusal_with_exit_1_and_no_output(tmp_path, converted):
+    out = tmp_path / 'out'
+    result = run_pre(converted, out, '--hu-window', '200', '100')
+    assert result.returncode == 1 and result.stdout == '' and result.stderr == f'rt_dataprep: {pre.REASON_HU_WINDOW}\n'
+    assert not out.exists()
+
+
+@pytest.mark.parametrize('argv, want', [(['--hu-window', '-100', '200'], (-100.0, 200.0)), (['--rescale', '--hu-window', '-1024', '3071'], (-1024.0, 3071.0)), (['--rescale'], None)])
+def test_hu_window_flag_reaches_preprocess_steps_as_a_hashable_tuple_of_floats(argv, want, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: seen.append(args))
+    cli.main(['preprocess', 'a', 'b', *argv])
+    got = seen[0][2].hu_window
+    assert got == want and type(got) is type(want) and hash(seen[0][2]) is not None
+    assert got is None or all(type(v) is float for v in got)
+
+
+@pytest.mark.parametrize('argv', [['--hu-window', '1'], ['--hu-window', '1', '2', '3'], ['--hu-window', 'a', 'b']])
+def test_hu_window_needs_two_numbers_exit_2(argv, monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(cli, 'preprocess', lambda *args, **kwargs: seen.append(args))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(['preprocess', 'a', 'b', *argv])
+    assert exc.value.code == 2 and seen == [] and 'usage:' in capsys.readouterr().err
 
 
 # Flags are named after the output prefix, not the field: --resample is harmonize_spacing (1.25 mm), --initial-resample is resample (1 mm).

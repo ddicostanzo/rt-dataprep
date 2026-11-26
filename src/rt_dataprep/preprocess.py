@@ -1,14 +1,14 @@
 """
 Preprocessing of a converted tree, one opt-in step flag per step (spec: f2b-preprocess): the CT pipeline, the resampling of dose and masks, and the walk.
 
-The CT runs initial resample -> rescale -> ahe -> final spacing -> reshape, each resample linear with default value 0. The ahe step
+The CT runs initial resample -> hu_window clip -> rescale -> ahe -> final spacing -> reshape, each resample linear with default value 0. The ahe step
 (opt-in) min-max scales the volume in float32 to [0, 1] and equalizes it with skimage's CLAHE (default kernel, 128 bins, clip 0.05). The grid
 and the crop/pad follow torchio 1.2.1 (floor size, centre-preserving origin, ceil(d/2) at the start of the axis). The final
 CT image is the one reference grid: dose and masks are each resampled once onto it. Direction is never re-derived.
 Every compute call in the three process_* entry points runs inside dicom_io.quiet_call; a failure is one fixed REASON_.
 
 preprocess() reads each plan's series.json (kinds ct, dose, mask, applicator, line, plan, beam, fluence, ion_plan, dwell, and the registered series, each resampled once onto the final CT) and each study folder's
-(<patient>/study_<n>/, one case per series: a CT through every step that is on, an MR or PT through all but the HU rescale),
+(<patient>/study_<n>/, one case per series: a CT through every step that is on, an MR or PT through all but the HU window and the HU rescale),
 and writes a separate tree plus preprocess_report.csv in the output root. Log lines and exceptions carry fixed REASON_ constants only; the report
 is the one place the patient folder names appear.
 """
@@ -63,6 +63,7 @@ REASON_LEGACY_SERIES = 'converted by an older version (series.csv); reconvert wi
 REASON_TOO_SMALL = 'the image is shorter than one output voxel along an axis'
 REASON_NOT_VOLUME = 'the image is not a 3D volume of one real value per voxel'
 REASON_NONFINITE = 'the image contains non-finite voxel values'
+REASON_HU_WINDOW = 'the HU window needs two finite numbers, the low one below the high one'
 REASON_AHE_OPTIONS = 'AHE requires at least 2 bins, a finite clip limit from 0 to 1, and three positive finite kernel widths'
 REASON_FILE_MISSING = 'a series.json row names a file that is not in the case folder'
 REASON_STUDY_MODALITY = 'a series.json series row has a modality other than CT, MR or PT, or one that differs from its file name'
@@ -81,6 +82,7 @@ REASON_INTERNAL = 'an unexpected error stopped the preprocessing; the report lis
 @dataclass(frozen=True)
 class PreprocessSteps:
     resample: bool = False  # initial resample to new_spacing, linear
+    hu_window: tuple | None = None  # CT only: (LO, HI) HU, a clamp to [LO, HI] before rescale; a step of its own (huwindow_)
     rescale: bool = False  # CT only: (HU + 1024) / 4096
     harmonize_spacing: bool = False  # final resample to final_spacing, linear
     reshape: bool = False  # centred crop/pad to new_shape
@@ -167,6 +169,21 @@ def rescale(image):
     return sitk.ShiftScale(sitk.Cast(image, sitk.sitkFloat32), 1024.0, 1 / 4096)  # arithmetic with a float would promote to float64
 
 
+def clip_hu(image, window):
+    """`image` clamped to [LO, HI] as float32."""
+    return sitk.Clamp(image, sitk.sitkFloat32, *window)
+
+
+def check_hu_window(window):
+    valid = False
+    try:
+        valid = len(window) == 2 and all(np.isfinite(v) for v in window) and window[0] < window[1]
+    except (TypeError, ValueError):
+        pass
+    if not valid:
+        raise ValueError(REASON_HU_WINDOW)
+
+
 def equalize_adapthist(*args, **kwargs):
     """Load the optional compute path only when AHE is used; keep a seam for backend failure tests."""
     from skimage.exposure import equalize_adapthist as clahe
@@ -243,6 +260,8 @@ def process_ct(ct, steps):
         image = ct
         if steps.resample:
             image = resample_to(image, steps.new_spacing)
+        if steps.hu_window:
+            image = clip_hu(image, steps.hu_window)
         if steps.rescale:
             image = rescale(image)
         if steps.ahe:
@@ -288,9 +307,9 @@ def mask_retention(native, image, linear=False):
     return quiet_call(run, REASON_INTERNAL)
 
 
-def process_series(native, final_ct, matrix, rescale_hu, ct, ahe, options=(None, 128, 0.05)):
-    """`native` (HU-rescaled first when rescale_hu, then equalized on its own grid when ahe) linearly resampled once onto final_ct as float32;
-    0 outside its FOV, or its own minimum for a CT that is neither rescaled nor equalized (#125: 0 would be water; the planning CT pads with its minimum too).
+def process_series(native, final_ct, matrix, rescale_hu, ct, ahe, options=(None, 128, 0.05), window=None):
+    """`native` (clamped to `window` first, then HU-rescaled when rescale_hu, then equalized on its own grid when ahe) linearly resampled once onto final_ct as float32;
+    0 outside its FOV, or its own (clamped) minimum for a CT that is neither rescaled nor equalized (#125: 0 would be water; the planning CT pads with its minimum too).
     `matrix` is series frame -> CT frame (series_transform)."""
     if ahe:
         check_ahe_options(*options)
@@ -298,10 +317,11 @@ def process_series(native, final_ct, matrix, rescale_hu, ct, ahe, options=(None,
             raise CaseRefused(REASON_NONFINITE)
     transform = series_transform(matrix)
     def run():
-        image = rescale(native) if rescale_hu else native
+        image = native if window is None else clip_hu(native, window)
+        fill = minimum(image) if ct and not rescale_hu and not ahe else 0.0  # before rescale and ahe: only a plain CT takes its minimum
+        image = rescale(image) if rescale_hu else image
         if ahe:
             image = equalize(image, *options)
-        fill = minimum(native) if ct and not rescale_hu and not ahe else 0.0
         return sitk.Resample(image, final_ct, transform, sitk.sitkLinear, fill, sitk.sitkFloat32)
     return quiet_call(run, REASON_INTERNAL)
 
@@ -366,9 +386,9 @@ def read_series(path):
 
 
 def output_name(name, steps, ct=False, image=False):
-    """`name` with the prefixes of the steps that are on, newest first: ahe needs an image volume (CT, MR, PT), rescale a CT; dose and masks get the geometric ones only."""
+    """`name` with the prefixes of the steps that are on, newest first: ahe needs an image volume (CT, MR, PT), rescale and huwindow a CT; dose and masks get the geometric ones only."""
     prefixes = [('reshape', steps.reshape), ('resample', steps.harmonize_spacing), ('ahe', image and steps.ahe),
-                ('rescale', ct and steps.rescale), ('initialresample', steps.resample)]
+                ('rescale', ct and steps.rescale), ('huwindow', ct and steps.hu_window), ('initialresample', steps.resample)]
     return ''.join(f'{prefix}_' for prefix, on in prefixes if on) + name
 
 
@@ -408,10 +428,12 @@ def preprocess(converted_root, out_root, steps=PreprocessSteps(), *, workers=1, 
         raise ValueError(REASON_OUTSIDE_INPUT)
     if overwrite and converted_root.resolve().is_relative_to(out_root.resolve()):  # a replaced patient folder could hold the input
         raise ValueError(dicom_io.REASON_INPUT_INSIDE_OUTPUT)
-    if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape or steps.ahe):
+    if not (steps.resample or steps.rescale or steps.hu_window or steps.harmonize_spacing or steps.reshape or steps.ahe):
         raise ValueError(REASON_NO_STEPS)
     if steps.allow_crop and not (steps.resample or steps.harmonize_spacing or steps.reshape):
         raise ValueError(REASON_ALLOW_CROP_STEPS)
+    if steps.hu_window:
+        check_hu_window(steps.hu_window)
     if steps.ahe:
         check_ahe_options(*ahe_options(steps))
     if steps.min_mask_retention is not None:
@@ -580,8 +602,8 @@ def preprocess_study(study_dir, out_dir, steps):
 def preprocess_series(study_dir, out_dir, row, steps):
     """Write one study series into `out_dir` (made on the first write) and return its output name; a CaseRefused refuses this series only and writes nothing."""
     is_ct = row['modality'] == 'CT'
-    steps = steps if is_ct else replace(steps, rescale=False)  # the HU rescale is for CT only
-    if not (steps.resample or steps.rescale or steps.harmonize_spacing or steps.reshape or steps.ahe):
+    steps = steps if is_ct else replace(steps, rescale=False, hu_window=None)  # the HU rescale and window are for CT only
+    if not (steps.resample or steps.rescale or steps.hu_window or steps.harmonize_spacing or steps.reshape or steps.ahe):
         raise CaseRefused(REASON_NO_SERIES_STEPS)  # a rescale-only run has nothing to do to an MR or PT: no read, no copy under another name
     source = study_dir / row['file']
     info = read_info(source)  # header first: a too-small series is refused without a pixel read (#141)
@@ -633,7 +655,7 @@ def check_rows(plan_dir):
     return kept, ct, series
 
 
-STUDY_FILE = re.compile(r'(reshape_)?(resample_)?(ahe_)?(rescale_)?(initialresample_)?(?P<id>series_(CT|MR|PT)_[0-9]+)\.nii\.gz')  # output_name's prefixes, in order
+STUDY_FILE = re.compile(r'(reshape_)?(resample_)?(ahe_)?(rescale_)?(huwindow_)?(initialresample_)?(?P<id>series_(CT|MR|PT)_[0-9]+)\.nii\.gz')  # output_name's prefixes, in order
 
 
 def series_id(name):
@@ -865,7 +887,7 @@ def preprocess_plan(plan_dir, out_dir, steps):
         if not covered:  # entirely outside the CT: never resampled
             skipped += 1
         else:
-            image = process_series(native, final, matrix, is_ct and steps.rescale, is_ct, steps.ahe, ahe_options(steps))
+            image = process_series(native, final, matrix, is_ct and steps.rescale, is_ct, steps.ahe, ahe_options(steps), steps.hu_window if is_ct else None)
             name = output_name(row['file'], steps, ct=is_ct, image=True)
             conv.write_atomic(image, out_dir / name)
             files.append(name)

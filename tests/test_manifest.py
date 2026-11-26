@@ -811,3 +811,15 @@ def test_a_geometric_run_lists_the_dwell_under_its_kept_name(tmp_path):
     line = plan_line(out)
     assert list(line)[-5:] == ['retained', 'plan', 'beam', 'fluence', 'dwell'] and line['dwell'] == DWELL_NAME
     assert (out / folder.parent.name / 'plan_1' / DWELL_NAME).is_file()
+
+
+# ---- hu_window (#373): the huwindow_ names go through series_id, so the manifest lists a windowed CT series under its usual id ----
+
+def test_a_windowed_study_ct_is_listed_under_its_series_id_with_its_huwindow_file_name(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    write_study_tree(converted, series=(('CT', 1), ('MR', 1)))
+    pre.preprocess(converted, out, pre.PreprocessSteps(resample=True, rescale=True, hu_window=(-497.0, -493.0)))
+    assert man.manifest(out) == (2, 0)
+    assert [(r['case_dir'], r['case_type'], r['modality'], r['image']) for r in read(out)] == [
+        ('SYNTHETICPTA/study_1/series_CT_1', 'imaging', 'CT', 'rescale_huwindow_initialresample_series_CT_1.nii.gz'),
+        ('SYNTHETICPTA/study_1/series_MR_1', 'imaging', 'MR', 'initialresample_series_MR_1.nii.gz')]

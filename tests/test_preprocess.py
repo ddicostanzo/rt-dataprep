@@ -60,6 +60,7 @@ def centroid_mm(mask):
 def test_steps_defaults():
     steps = PreprocessSteps()
     assert (steps.resample, steps.rescale, steps.harmonize_spacing, steps.reshape, steps.legacy_linear_masks) == (False,) * 5
+    assert steps.hu_window is None
     assert steps.new_spacing == (1, 1, 1) and steps.final_spacing == (1.25, 1.25, 1.25) and steps.new_shape == (701, 701, 433)
     with pytest.raises(dataclasses.FrozenInstanceError):
         steps.resample = True
@@ -1163,6 +1164,8 @@ def test_series_id_is_group_five_of_a_full_match():
     assert pre.series_id('series_MR_12.nii.gz') == 'series_MR_12'
     assert pre.series_id('reshape_resample_rescale_initialresample_series_CT_3.nii.gz') == 'series_CT_3'
     assert pre.series_id('resample_initialresample_series_PT_1.nii.gz') == 'series_PT_1'
+    assert pre.series_id('rescale_huwindow_initialresample_series_CT_2.nii.gz') == 'series_CT_2'
+    assert pre.series_id('huwindow_huwindow_series_CT_1.nii.gz') is None
     for bad in ('series_MR_1.nii', 'xseries_MR_1.nii.gz', 'series_MR_1.nii.gz.bak', 'series_RTDOSE_1.nii.gz', 'series_MR_.nii.gz',
                 'resample_reshape_series_MR_1.nii.gz', 'rescale_rescale_series_MR_1.nii.gz', 'planning_ct.nii.gz', 'series_MR_1\n.nii.gz'):
         assert pre.series_id(bad) is None
@@ -2235,9 +2238,11 @@ def reference_equalize(image):
 
 
 def reference_pipeline(image, steps):
-    """initial resample -> rescale -> reference equalize -> final spacing -> reshape, each step on only when `steps` says so."""
+    """initial resample -> clip -> rescale -> reference equalize -> final spacing -> reshape, each step on only when `steps` says so."""
     if steps.resample:
         image = pre.resample_to(image, steps.new_spacing)
+    if steps.hu_window:
+        image = sitk.Cast(sitk.Clamp(image, sitk.sitkFloat32, *steps.hu_window), sitk.sitkFloat32)
     if steps.rescale:
         image = pre.rescale(image)
     equalized = sitk.GetImageFromArray(reference_equalize(image))
@@ -2354,7 +2359,7 @@ def test_study_file_reads_the_id_through_the_named_group():
     assert pre.series_id('reshape_resample_ahe_rescale_initialresample_series_CT_2.nii.gz') == 'series_CT_2'
     assert pre.series_id('series_PT_3.nii.gz') == 'series_PT_3'
     assert pre.series_id('ahe_ahe_series_MR_1.nii.gz') is None
-    assert pre.STUDY_FILE.pattern == r'(reshape_)?(resample_)?(ahe_)?(rescale_)?(initialresample_)?(?P<id>series_(CT|MR|PT)_[0-9]+)\.nii\.gz'
+    assert pre.STUDY_FILE.pattern == r'(reshape_)?(resample_)?(ahe_)?(rescale_)?(huwindow_)?(initialresample_)?(?P<id>series_(CT|MR|PT)_[0-9]+)\.nii\.gz'
 
 
 def test_a_failing_equalize_is_one_fixed_internal_reason(monkeypatch):
@@ -2988,12 +2993,12 @@ def test_allow_crop_with_a_min_mask_retention_above_the_cropped_masks_retention_
     assert plan_row(pre.preprocess(tmp_path / 'converted', tmp_path / 'out2', lax)).outcome == 'preprocessed'
 
 
-@pytest.mark.parametrize('steps', [PreprocessSteps(allow_crop=True), PreprocessSteps(allow_crop=True, rescale=True, ahe=True)])
+@pytest.mark.parametrize('steps', [PreprocessSteps(allow_crop=True), PreprocessSteps(allow_crop=True, rescale=True, ahe=True), PreprocessSteps(allow_crop=True, hu_window=(-100.0, 200.0))])
 def test_allow_crop_without_a_geometric_step_raises_before_any_mkdir(tmp_path, steps):
     write_plan(tmp_path / 'converted')
     with pytest.raises(ValueError) as caught:
         pre.preprocess(tmp_path / 'converted', tmp_path / 'out', steps)
-    assert str(caught.value) == (pre.REASON_NO_STEPS if not (steps.rescale or steps.ahe) else pre.REASON_ALLOW_CROP_STEPS)
+    assert str(caught.value) == (pre.REASON_NO_STEPS if not (steps.rescale or steps.ahe or steps.hu_window) else pre.REASON_ALLOW_CROP_STEPS)
     assert not (tmp_path / 'out').exists()
 
 
@@ -3514,3 +3519,115 @@ def test_index_plan_table_without_a_prefix_writes_the_isocenter_index_columns(tm
     expected = np.array([final.TransformPhysicalPointToContinuousIndex(p) for p in points])
     assert np.allclose(np.column_stack([after[name].to_numpy() for name in index_columns]), expected, rtol=0, atol=1e-6)
     assert not np.allclose(np.column_stack([after[n].to_numpy() for n in index_columns]), np.column_stack([before[n].to_numpy() for n in index_columns]))
+
+
+# ---------------------------------------------------------------- hu_window (#373): clip a CT to [LO, HI] HU, between the initial resample and rescale
+
+HU = (-100.0, 200.0)
+WINDOWED_CT = f'huwindow_{conv.CT_NAME}'
+
+
+def test_output_name_puts_huwindow_between_rescale_and_initialresample_for_a_ct_only():
+    steps = PreprocessSteps(resample=True, rescale=True, hu_window=HU)
+    assert pre.output_name('planning_ct.nii.gz', steps, ct=True, image=True) == 'rescale_huwindow_initialresample_planning_ct.nii.gz'
+    assert pre.output_name('series_MR_1.nii.gz', steps, ct=False, image=True) == 'initialresample_series_MR_1.nii.gz'
+    assert pre.output_name('dose.nii.gz', steps) == 'initialresample_dose.nii.gz' and pre.output_name('planning_ct.nii.gz', PreprocessSteps(hu_window=HU)) == 'planning_ct.nii.gz'
+    assert pre.output_name('planning_ct.nii.gz', PreprocessSteps(hu_window=HU), ct=True) == 'huwindow_planning_ct.nii.gz'
+
+
+def test_steps_with_a_window_stay_hashable():
+    assert hash(PreprocessSteps(hu_window=HU)) == hash(PreprocessSteps(hu_window=HU))
+
+
+def test_ac1_a_window_alone_writes_the_clipped_float32_ct_with_its_geometry_and_leaves_dose_and_masks_alone(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, _ = write_plan(converted)
+    pre.preprocess(converted, out, PreprocessSteps(hu_window=HU))
+    done = out / 'SYNTHETICPTA' / 'plan_1'
+    source, result = sitk.ReadImage(str(folder / conv.CT_NAME)), sitk.ReadImage(str(done / WINDOWED_CT))
+    values = sitk.GetArrayFromImage(result)
+    assert values.dtype == np.float32 and result.GetPixelID() == sitk.sitkFloat32 and not (done / conv.CT_NAME).exists()
+    np.testing.assert_array_equal(values, np.clip(sitk.GetArrayFromImage(source), np.float32(HU[0]), np.float32(HU[1])))
+    assert values.min() == HU[0] and values.max() == HU[1] and header(result) == header(source)
+    for name in (conv.DOSE_NAME, 'ptv.nii.gz', 'bladder.nii.gz'):  # AC6: no prefix, same bytes
+        assert (done / name).read_bytes() == (folder / name).read_bytes()
+
+
+def test_ac2_initial_resample_then_window_then_rescale_matches_the_reference(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, _ = write_plan(converted, spacing=1.5)
+    steps = PreprocessSteps(resample=True, rescale=True, hu_window=(-500.0, 100.0))
+    pre.preprocess(converted, out, steps)
+    done = out / 'SYNTHETICPTA' / 'plan_1' / f'rescale_huwindow_initialresample_{conv.CT_NAME}'
+    resampled = sitk.GetArrayFromImage(pre.resample_to(sitk.ReadImage(str(folder / conv.CT_NAME)), steps.new_spacing))
+    expected = (np.clip(resampled, -500.0, 100.0) + 1024) / 4096
+    assert expected.min() > 0.1 and np.allclose(sitk.GetArrayFromImage(sitk.ReadImage(str(done))), expected, rtol=0, atol=1e-6)
+
+
+def test_the_window_runs_between_resample_and_the_rest_of_the_reference_pipeline(tmp_path):
+    converted, out = tmp_path / 'converted', tmp_path / 'out'
+    folder, _ = ahe_plan(converted, spacing=1.5)
+    steps = dataclasses.replace(SMALL_AHE, hu_window=(-800.0, 0.0))
+    pre.preprocess(converted, out, steps)
+    done = sitk.ReadImage(str(out / 'SYNTHETICPTA' / 'plan_1' / pre.output_name(conv.CT_NAME, steps, ct=True, image=True)))
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(done), sitk.GetArrayFromImage(reference_pipeline(sitk.ReadImage(str(folder / conv.CT_NAME)), steps)))
+
+
+def test_ac3_a_study_ct_is_clipped_and_prefixed_while_mr_is_unchanged_and_with_the_window_alone_mr_is_refused(tmp_path):
+    converted, out, plain = tmp_path / 'converted', tmp_path / 'out', tmp_path / 'plain'
+    write_study_tree(converted)  # the CT ramp is -500..-490, the MR 300..310
+    window = (-497.0, -493.0)
+    steps = PreprocessSteps(resample=True, hu_window=window)
+    pre.preprocess(converted, out, steps)
+    pre.preprocess(converted, plain, PreprocessSteps(resample=True))
+    study, base = out / 'SYNTHETICPTA' / 'study_1', plain / 'SYNTHETICPTA' / 'study_1'
+    assert sorted(p.name for p in study.iterdir()) == ['huwindow_initialresample_series_CT_1.nii.gz', 'initialresample_series_MR_1.nii.gz', 'series.json']
+    ct, unclipped = (sitk.GetArrayFromImage(sitk.ReadImage(str(d / n))) for d, n in ((study, 'huwindow_initialresample_series_CT_1.nii.gz'), (base, 'initialresample_series_CT_1.nii.gz')))
+    np.testing.assert_array_equal(ct, np.clip(unclipped, *window))
+    assert ct.min() == window[0] and ct.max() == window[1]
+    assert (study / 'initialresample_series_MR_1.nii.gz').read_bytes() == (base / 'initialresample_series_MR_1.nii.gz').read_bytes()
+    alone, report = tmp_path / 'alone', None
+    report = pre.preprocess(converted, alone, PreprocessSteps(hu_window=window))
+    assert imaging_rows(report) == [('study_1/series_CT_1', 'preprocessed', '', ['huwindow_series_CT_1.nii.gz', 'series.json']),
+                                    ('study_1/series_MR_1', 'refused', pre.REASON_NO_SERIES_STEPS, [])]
+
+
+def test_ac4_a_registered_ct_is_clipped_before_its_resample_and_fills_outside_its_fov_with_the_clipped_minimum(tmp_path):
+    geometry, matrix = dict(spacing=(1.25,) * 3, origin=(-3.875, -4.125, -2.625)), rigid(0, (4, 0, 0))
+    values = np.full((8, 8, 8), 100.0)
+    values[0, 0, 0] = -3024.0  # SYNTHETIC scanner padding value
+    values[3:6, 3:6, 3:6] = 2000.0  # a block the plain run keeps above the window
+    steps = dataclasses.replace(SMALL, rescale=False)
+    windowed = dataclasses.replace(steps, hu_window=(-500.0, 500.0))
+    name = pre.output_name('series_CT_1.nii.gz', windowed, ct=True)
+    assert 'huwindow_' in name
+    spec = [mr_spec(values, matrix, geometry, 'series_CT_1.nii.gz', 'CT')]
+    _, done, _ = run_plan(tmp_path / 'w', spec, steps=windowed)
+    _, plain, _ = run_plan(tmp_path / 'p', spec, steps=steps)
+    image, base = read_out(done, name), read_out(plain, pre.output_name('series_CT_1.nii.gz', steps, ct=True))
+    _, outside = coverage(image, geometry, (8, 8, 8), matrix)
+    array = sitk.GetArrayFromImage(image)
+    assert (array[outside] == -500.0).all() and array[~outside].max() <= 500.0 + 1e-3
+    assert sitk.GetArrayFromImage(base).max() > 500.0  # the control: without the window the block survives the resample
+    clipped = sitk.Clamp(make_image(values, **geometry), sitk.sitkFloat32, -500.0, 500.0)  # clip first, then the one resample
+    expected = sitk.Resample(clipped, image, pre.series_transform(matrix), sitk.sitkLinear, -500.0, sitk.sitkFloat32)
+    assert np.allclose(array, sitk.GetArrayFromImage(expected), rtol=0, atol=1e-4)
+
+
+def test_a_registered_mr_in_a_plan_is_neither_clipped_nor_prefixed_by_the_window(tmp_path):
+    steps = dataclasses.replace(SMALL, hu_window=(5.0, 50.0))
+    _, done, _ = run_plan(tmp_path, [mr_spec(MR_RAMP, rigid(0, (4, 0, 0)))], steps=steps)
+    assert MR_OUT in {p.name for p in done.iterdir()} and not [p for p in done.iterdir() if 'huwindow_' in p.name and 'series_MR' in p.name]
+    assert sitk.GetArrayFromImage(read_out(done)).max() > 50.0
+
+
+@pytest.mark.parametrize('window', [(200.0, 100.0), (5.0, 5.0), (float('nan'), 1.0), (0.0, float('nan')), (0.0, float('inf')), (float('-inf'), 0.0)])
+def test_ac5_a_bad_window_raises_its_reason_before_any_output(tmp_path, window):
+    write_plan(tmp_path / 'converted')
+    with pytest.raises(ValueError) as caught:
+        pre.preprocess(tmp_path / 'converted', tmp_path / 'out', PreprocessSteps(hu_window=window))
+    assert str(caught.value) == pre.REASON_HU_WINDOW and not (tmp_path / 'out').exists()
+
+
+def test_the_hu_window_reason_is_a_fixed_constant_distinct_from_the_others():
+    assert isinstance(pre.REASON_HU_WINDOW, str) and pre.REASON_HU_WINDOW not in (pre.REASON_NO_STEPS, pre.REASON_ALLOW_CROP_STEPS, pre.REASON_AHE_OPTIONS)
