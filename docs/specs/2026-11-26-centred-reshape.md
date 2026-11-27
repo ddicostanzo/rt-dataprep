@@ -49,7 +49,8 @@ downstream around the isocentre or dwell indices. A tight image-centred cube can
 - The output name stays `reshape_` for every mode: one run uses one mode, so a different mode goes to a different
   output root. The README says so.
 - **No usable centre → the plan is refused** with `REASON_NO_CENTRE`: the table the mode needs is absent,
-  unreadable or not its schema; the mask or dose it needs is absent (an unreadable mask or dose keeps today's
+  corrupt or not its schema (a file-system error reading it fails the patient with `REASON_IO_ERROR`, as for every
+  other input; #376); the mask or dose it needs is absent (an unreadable mask or dose keeps today's
   `REASON_FILE_UNREADABLE` from `read_image`); it has no rows; `dwells` has no active dwell (`dwell_weight > 0`); no name
   matches; the matched mask is empty; the dose sums to zero; the centre is not finite; or the reshape range
   (`c - N // 2` … `c - N // 2 + N - 1`) misses the image on some axis, so no CT voxel would be kept. The centre is

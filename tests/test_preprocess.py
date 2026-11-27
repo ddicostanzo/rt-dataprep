@@ -3560,6 +3560,20 @@ def test_ac1_a_window_alone_writes_the_clipped_float32_ct_with_its_geometry_and_
         assert (done / name).read_bytes() == (folder / name).read_bytes()
 
 
+def test_a_resampled_dose_and_masks_are_the_same_with_and_without_the_window(tmp_path):  # #374
+    converted = tmp_path / 'converted'
+    write_plan(converted, spacing=1.5)
+    names = ('dose.nii.gz', 'ptv.nii.gz', 'bladder.nii.gz')
+    outputs = []
+    for label, window in (('plain', None), ('windowed', HU)):
+        pre.preprocess(converted, tmp_path / label, PreprocessSteps(resample=True, hu_window=window))
+        outputs.append([sitk.ReadImage(str(tmp_path / label / 'SYNTHETICPTA' / 'plan_1' / f'initialresample_{n}')) for n in names])
+    assert names[0] == conv.DOSE_NAME
+    for plain, windowed in zip(*outputs, strict=True):
+        assert header(windowed) == header(plain) and windowed.GetPixelID() == plain.GetPixelID()
+        np.testing.assert_array_equal(sitk.GetArrayFromImage(windowed), sitk.GetArrayFromImage(plain))
+
+
 def test_ac2_initial_resample_then_window_then_rescale_matches_the_reference(tmp_path):
     converted, out = tmp_path / 'converted', tmp_path / 'out'
     folder, _ = write_plan(converted, spacing=1.5)
@@ -3870,6 +3884,12 @@ def test_weighted_centroid_is_the_physical_point_of_the_marginal_means_in_x_y_z_
     assert pre.weighted_centroid(image, True) == pytest.approx((10.0 + 1.75 * 0.5, 20.0 + 1.5 * 1.25, 30.0 + 2.5 * 2.0), abs=1e-9)
     assert pre.weighted_centroid(image, False) == pytest.approx((10.0 + 2.5 * 0.5, 20.0 + 1.0 * 1.25, 30.0 + 2.0 * 2.0), abs=1e-9)
     assert pre.weighted_centroid(make_image(np.zeros((2, 2, 2))), False) is None
+
+
+def test_weighted_centroid_of_a_vector_pixel_image_is_none_not_an_error():  # #376: becomes REASON_NO_CENTRE, not REASON_INTERNAL
+    vector = sitk.GetImageFromArray(np.ones((2, 3, 4, 2)), isVector=True)
+    assert vector.GetNumberOfComponentsPerPixel() == 2
+    assert pre.weighted_centroid(vector, True) is None and pre.weighted_centroid(vector, False) is None
 
 
 ROI = dataclasses.replace(CENTRED, reshape_centre='roi', reshape_roi=('PTV',), allow_crop=True)  # allow_crop: the image-centred control run cuts the blocks
